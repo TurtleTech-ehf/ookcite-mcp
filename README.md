@@ -10,11 +10,13 @@ Windsurf, OpenCode, Qwen agents, and more.
 ## Install
 
 **cargo-binstall** (fastest):
+
 ```bash
 cargo binstall ookcite-mcp
 ```
 
 **cargo install** (from source):
+
 ```bash
 cargo install ookcite-mcp
 ```
@@ -39,26 +41,26 @@ Add to your MCP client config:
 
 Common config file locations:
 
-| Client | Config file |
-|--------|-------------|
-| Claude Desktop (Linux) | `~/.config/Claude/claude_desktop_config.json` |
+| Client                 | Config file                                                       |
+| ---------------------- | ----------------------------------------------------------------- |
+| Claude Desktop (Linux) | `~/.config/Claude/claude_desktop_config.json`                     |
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Claude Code | `.mcp.json` (project) or `~/.claude/settings.json` (global) |
-| Cursor | Settings > MCP Servers |
-| Codex | `~/.codex/config.json` |
+| Claude Code            | `.mcp.json` (project) or `~/.claude/settings.json` (global)       |
+| Cursor                 | Settings > MCP Servers                                            |
+| Codex                  | `~/.codex/config.json`                                            |
 
 No API key required. No Node.js needed. Just the binary.
 
 ## Tools
 
-| Tool | Purpose |
-|------|---------|
-| `validate_doi` | Check if a DOI exists (anti-hallucination) |
-| `lookup_isbn` | Look up a book by ISBN |
-| `reverse_lookup` | Find a paper from messy citation text |
-| `format_citation` | Format a DOI in any of 2900+ CSL styles |
-| `verify_references` | Batch-check a list of DOIs |
-| `batch_format` | Format multiple citations at once |
+| Tool                | Purpose                                    |
+| ------------------- | ------------------------------------------ |
+| `validate_doi`      | Check if a DOI exists (anti-hallucination) |
+| `lookup_isbn`       | Look up a book by ISBN                     |
+| `reverse_lookup`    | Find a paper from messy citation text      |
+| `format_citation`   | Format a DOI in any of 2900+ CSL styles    |
+| `verify_references` | Batch-check a list of DOIs                 |
+| `batch_format`      | Format multiple citations at once          |
 
 ## Anti-Hallucination
 
@@ -71,11 +73,10 @@ Add this to your system prompt:
 
 The MCP server connects to the public [OokCite](https://ookcite.turtletech.us)
 API to look up and format citations. It's a thin MCP wrapper around the OokCite
-REST API -- no local database, no heavy dependencies.
+REST API with no local database, and no heavy dependencies.
 
-Rate limits apply: 10 lookups/day anonymous, 30/day with a free account.
-[Sign up](https://my.turtletech.us/signup) for more, or upgrade to Academic
-($4/month) for unlimited.
+Rate limits apply: 10 lookups/day anonymous, 30/day with a free account. [Sign up](https://my.turtletech.us/signup) for more, or upgrade (starting at $4/month)
+for more.
 
 ## Documentation
 
@@ -85,4 +86,4 @@ Rate limits apply: 10 lookups/day anonymous, 30/day with a free account.
 
 ## License
 
-MIT -- see [LICENSE](LICENSE).
+MIT. see [LICENSE](LICENSE).
