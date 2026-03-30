@@ -37,7 +37,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-const API: &str = "https://ookcite.turtletech.us";
+const API: &str = "https://ookcite-api.turtletech.us";
 
 fn url(path: &str) -> String { format!("{API}{path}") }
 
@@ -106,6 +106,11 @@ impl Server {
             tool_router: Self::tool_router(),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
+                .default_headers({
+                    let mut h = reqwest::header::HeaderMap::new();
+                    h.insert("origin", "https://ookcite.turtletech.us".parse().unwrap());
+                    h
+                })
                 .build()
                 .unwrap(),
         }
