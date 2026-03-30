@@ -67,10 +67,28 @@ fn detect_clients() -> Vec<McpClient> {
         .collect()
 }
 
+fn binary_in_path() -> bool {
+    std::process::Command::new("ookcite-mcp")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
 fn build_server_entry(api_key: Option<&str>) -> serde_json::Value {
-    let mut entry = serde_json::json!({
-        "command": "ookcite-mcp"
-    });
+    // If the binary is in PATH (cargo install / global npm install), use it directly.
+    // Otherwise use npx which handles download + caching automatically.
+    let mut entry = if binary_in_path() {
+        serde_json::json!({
+            "command": "ookcite-mcp"
+        })
+    } else {
+        serde_json::json!({
+            "command": "npx",
+            "args": ["-y", "@turtletech/ookcite-mcp"]
+        })
+    };
     if let Some(key) = api_key {
         entry["env"] = serde_json::json!({
             "OOKCITE_API_KEY": key
