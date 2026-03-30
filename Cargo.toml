@@ -1,6 +1,6 @@
 [package]
 name = "ookcite-mcp"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "MIT"
 description = "MCP server for OokCite citation validation and formatting"
