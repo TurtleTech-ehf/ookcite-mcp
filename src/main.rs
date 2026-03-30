@@ -1,3 +1,33 @@
+//! # OokCite MCP Server
+//!
+//! A [Model Context Protocol](https://modelcontextprotocol.io/) server that
+//! gives LLMs the ability to validate DOIs, format citations, and catch
+//! hallucinated academic references.
+//!
+//! ## Tools
+//!
+//! - **validate_doi** -- Check if a DOI exists in CrossRef (anti-hallucination)
+//! - **lookup_isbn** -- Look up a book by ISBN via OpenLibrary
+//! - **reverse_lookup** -- Find a paper from messy citation text
+//! - **format_citation** -- Format a DOI in any of 2900+ CSL styles
+//! - **verify_references** -- Batch-check a list of DOIs
+//! - **batch_format** -- Resolve and format multiple citations at once
+//!
+//! ## Usage
+//!
+//! ```json
+//! {
+//!   "mcpServers": {
+//!     "ookcite": {
+//!       "command": "ookcite-mcp"
+//!     }
+//!   }
+//! }
+//! ```
+//!
+//! Connects to the public OokCite API at <https://ookcite.turtletech.us>.
+//! No API key required for basic usage.
+
 use rmcp::ServerHandler;
 use rmcp::{
     ServiceExt,
