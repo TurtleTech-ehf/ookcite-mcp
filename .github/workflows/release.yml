@@ -52,16 +52,18 @@ jobs:
       - name: Package (unix)
         if: runner.os != 'Windows'
         run: |
-          cp target/${{ matrix.target }}/release/ookcite-mcp ${{ matrix.name }}
-          chmod +x ${{ matrix.name }}
-          tar czf ${{ matrix.name }}.tar.gz ${{ matrix.name }}
+          # Copy keeping the original binary name, then archive the binary into a named tarball
+          cp target/${{ matrix.target }}/release/ookcite-mcp ./ookcite-mcp
+          chmod +x ./ookcite-mcp
+          tar czf ${{ matrix.name }}.tar.gz ookcite-mcp
           sha256sum ${{ matrix.name }}.tar.gz > ${{ matrix.name }}.tar.gz.sha256
 
       - name: Package (windows)
         if: runner.os == 'Windows'
         run: |
-          cp target/${{ matrix.target }}/release/ookcite-mcp.exe ${{ matrix.name }}.exe
-          Compress-Archive -Path ${{ matrix.name }}.exe -DestinationPath ${{ matrix.name }}.zip
+          # Copy keeping the original binary name, then archive into a named zip
+          cp target/${{ matrix.target }}/release/ookcite-mcp.exe .\ookcite-mcp.exe
+          Compress-Archive -Path .\ookcite-mcp.exe -DestinationPath ${{ matrix.name }}.zip
           Get-FileHash ${{ matrix.name }}.zip -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  ${{ matrix.name }}.zip" } | Out-File ${{ matrix.name }}.zip.sha256
 
       - name: Upload release assets
@@ -72,3 +74,18 @@ jobs:
             ${{ matrix.name }}.tar.gz.sha256
             ${{ matrix.name }}.zip
             ${{ matrix.name }}.zip.sha256
+
+  publish:
+    name: Publish to crates.io
+    needs: build # Only publish if all binaries build and package successfully
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish

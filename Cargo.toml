@@ -10,11 +10,6 @@ readme = "README.md"
 keywords = ["mcp", "citations", "doi", "bibtex", "academic"]
 categories = ["command-line-utilities", "science"]
 
-[package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/ookcite-mcp-{ target }.tar.gz"
-bin-dir = "./"
-pkg-fmt = "tgz"
-
 [dependencies]
 rmcp = { version = "1.2", features = ["server", "transport-io", "macros"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,3 +19,14 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 webpki-roots = "0.26"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
+
+[package.metadata.binstall]
+# Directs binstall to your GitHub Releases format
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.{ archive-format }"
+# Specifies that the binary rests at the root of the archive (not nested in a folder)
+bin-dir = "{ bin }{ os-ext }"
+# Defaults to tar.gz (tgz) for Unix systems
+pkg-fmt = "tgz"
+# Overrides the format to zip for Windows systems
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
