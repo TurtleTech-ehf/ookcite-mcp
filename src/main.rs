@@ -39,12 +39,12 @@ use rmcp::ServerHandler;
 use rmcp::{
     handler::server::{
         tool::ToolRouter,
-        wrapper::{Json, Parameters},
+        wrapper::Parameters,
     },
     model::*,
     tool, tool_handler, tool_router, ServiceExt,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 const API: &str = "https://ookcite-api.turtletech.us";
 
@@ -120,13 +120,6 @@ struct GroupCiteArgs {
     style: String,
 }
 
-// Outputs
-
-#[derive(Serialize, schemars::JsonSchema)]
-struct TextOutput {
-    text: String,
-}
-
 // Tools
 
 #[tool_router]
@@ -161,13 +154,12 @@ impl Server {
     async fn search_styles(
         &self,
         Parameters(args): Parameters<StyleSearchArgs>,
-    ) -> Json<TextOutput> {
+    ) -> String {
         let req_url = url(&format!(
             "/api/v1/styles/search?q={}",
             urlencoding::encode(&args.query)
         ));
         let r = self.http.get(&req_url).send().await;
-
         match r {
             Ok(resp) if resp.status().is_success() => {
                 let styles: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
@@ -177,17 +169,9 @@ impl Server {
                     let title = s["title"].as_str().unwrap_or("?");
                     out.push(format!("ID: {id} | Title: {title}"));
                 }
-                Json(TextOutput {
-                    text: if out.is_empty() {
-                        "No styles found".into()
-                    } else {
-                        out.join("\n")
-                    },
-                })
+                if out.is_empty() { "No styles found".into() } else { out.join("\n") }
             }
-            _ => Json(TextOutput {
-                text: "Style search failed".into(),
-            }),
+            _ => "Style search failed".into(),
         }
     }
 
@@ -195,7 +179,7 @@ impl Server {
         name = "validate_doi",
         description = "Check if a DOI exists in CrossRef and return its metadata. Use this to verify citations. Returns title, authors, year, journal, volume, and issue."
     )]
-    async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> Json<TextOutput> {
+    async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
         let r = self
             .http
             .post(url("/api/v1/lookup/doi"))
@@ -223,18 +207,12 @@ impl Server {
                 let volume = meta["volume"].as_str().unwrap_or("N/A");
                 let issue = meta["issue"].as_str().unwrap_or("N/A");
                 let doi = meta["doi"].as_str().unwrap_or(&args.doi);
-                Json(TextOutput {
-                    text: format!(
-                        "VALID\nDOI: {doi}\nTitle: {title}\nAuthors: {authors}\nYear: {year}\nJournal: {journal}\nVolume: {volume}\nIssue: {issue}"
-                    ),
-                })
+                format!("VALID\nDOI: {doi}\nTitle: {title}\nAuthors: {authors}\nYear: {year}\nJournal: {journal}\nVolume: {volume}\nIssue: {issue}")
             }
-            _ => Json(TextOutput {
-                text: format!(
-                    "INVALID: DOI {} not found in CrossRef. This citation may represent a hallucination.",
-                    args.doi
-                ),
-            }),
+            _ => format!(
+                "INVALID: DOI {} not found in CrossRef. This citation may represent a hallucination.",
+                args.doi
+            ),
         }
     }
 
@@ -242,7 +220,7 @@ impl Server {
         name = "lookup_isbn",
         description = "Look up a book by ISBN. Returns title, authors, publisher, year, and pages."
     )]
-    async fn lookup_isbn(&self, Parameters(args): Parameters<IsbnArgs>) -> Json<TextOutput> {
+    async fn lookup_isbn(&self, Parameters(args): Parameters<IsbnArgs>) -> String {
         let r = self
             .http
             .post(url("/api/v1/lookup/isbn"))
@@ -268,16 +246,12 @@ impl Server {
                     .unwrap_or_default();
                 let publisher = meta["publisher"].as_str().unwrap_or("N/A");
                 let pages = meta["pages"].as_str().unwrap_or("N/A");
-                Json(TextOutput {
-                    text: format!(
-                        "VALID\nISBN: {}\nTitle: {title}\nAuthors: {authors}\nYear: {year}\nPublisher: {publisher}\nPages: {pages}",
-                        args.isbn
-                    ),
-                })
+                format!(
+                    "VALID\nISBN: {}\nTitle: {title}\nAuthors: {authors}\nYear: {year}\nPublisher: {publisher}\nPages: {pages}",
+                    args.isbn
+                )
             }
-            _ => Json(TextOutput {
-                text: format!("ISBN {} not found", args.isbn),
-            }),
+            _ => format!("ISBN {} not found", args.isbn),
         }
     }
 
@@ -285,7 +259,7 @@ impl Server {
         name = "reverse_lookup",
         description = "Parse a messy citation string and find the matching paper in CrossRef. Returns ranked candidates."
     )]
-    async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> Json<TextOutput> {
+    async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> String {
         let r = self
             .http
             .post(url("/api/v1/reverse"))
@@ -307,17 +281,9 @@ impl Server {
                         score
                     ));
                 }
-                Json(TextOutput {
-                    text: if out.is_empty() {
-                        "No matches found".into()
-                    } else {
-                        out.join("\n")
-                    },
-                })
+                if out.is_empty() { "No matches found".into() } else { out.join("\n") }
             }
-            _ => Json(TextOutput {
-                text: "Reverse lookup failed".into(),
-            }),
+            _ => "Reverse lookup failed".into(),
         }
     }
 
@@ -325,7 +291,7 @@ impl Server {
         name = "format_citation",
         description = "Format a citation by DOI in a specific CSL style. Returns both the in-text marker and the full bibliography entry."
     )]
-    async fn format_citation(&self, Parameters(args): Parameters<FormatArgs>) -> Json<TextOutput> {
+    async fn format_citation(&self, Parameters(args): Parameters<FormatArgs>) -> String {
         let lookup = self
             .http
             .post(url("/api/v1/lookup/doi"))
@@ -334,11 +300,7 @@ impl Server {
             .await;
         let meta: serde_json::Value = match lookup {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-            _ => {
-                return Json(TextOutput {
-                    text: format!("DOI {} not found", args.doi),
-                });
-            }
+            _ => return format!("DOI {} not found", args.doi),
         };
 
         let fmt = self
@@ -356,13 +318,9 @@ impl Server {
                     .and_then(|a| a.first())
                     .and_then(|c| c["plain"].as_str())
                     .unwrap_or("");
-                Json(TextOutput {
-                    text: format!("In-text: {intext}\nReference: {plain}"),
-                })
+                format!("In-text: {intext}\nReference: {plain}")
             }
-            _ => Json(TextOutput {
-                text: "Format failed".into(),
-            }),
+            _ => "Format failed".into(),
         }
     }
 
@@ -370,7 +328,7 @@ impl Server {
         name = "group_cite",
         description = "Generate a grouped in-text citation marker (e.g., '[1-3]') for multiple DOIs."
     )]
-    async fn group_cite(&self, Parameters(args): Parameters<GroupCiteArgs>) -> Json<TextOutput> {
+    async fn group_cite(&self, Parameters(args): Parameters<GroupCiteArgs>) -> String {
         let mut entries = Vec::new();
         for doi in &args.dois {
             let r = self
@@ -389,9 +347,7 @@ impl Server {
         }
 
         if entries.is_empty() {
-            return Json(TextOutput {
-                text: "Failed to resolve any DOIs.".into(),
-            });
+            return "Failed to resolve any DOIs.".into();
         }
 
         let indices: Vec<usize> = (0..entries.len()).collect();
@@ -410,13 +366,9 @@ impl Server {
             Ok(resp) if resp.status().is_success() => {
                 let result: serde_json::Value = resp.json().await.unwrap_or_default();
                 let plain = result["plain"].as_str().unwrap_or("");
-                Json(TextOutput {
-                    text: format!("Grouped Citation: {plain}"),
-                })
+                format!("Grouped Citation: {plain}")
             }
-            _ => Json(TextOutput {
-                text: "Group citation failed".into(),
-            }),
+            _ => "Group citation failed".into(),
         }
     }
 
@@ -427,7 +379,7 @@ impl Server {
     async fn verify_references(
         &self,
         Parameters(args): Parameters<VerifyArgs>,
-    ) -> Json<TextOutput> {
+    ) -> String {
         let mut results = Vec::new();
         for doi in &args.dois {
             let r = self
@@ -445,16 +397,14 @@ impl Server {
                 _ => results.push(format!("INVALID {doi} : NOT FOUND")),
             }
         }
-        Json(TextOutput {
-            text: results.join("\n"),
-        })
+        results.join("\n")
     }
 
     #[tool(
         name = "batch_format",
         description = "Resolve and format multiple messy citations at once. Pass citation strings in any format."
     )]
-    async fn batch_format(&self, Parameters(args): Parameters<BatchArgs>) -> Json<TextOutput> {
+    async fn batch_format(&self, Parameters(args): Parameters<BatchArgs>) -> String {
         let mut entries = Vec::new();
         let mut errors = Vec::new();
         for (i, text) in args.citations.iter().enumerate() {
@@ -485,9 +435,7 @@ impl Server {
             }
         }
         if entries.is_empty() {
-            return Json(TextOutput {
-                text: format!("No citations resolved.\n{}", errors.join("\n")),
-            });
+            return format!("No citations resolved.\n{}", errors.join("\n"));
         }
         let fmt = self
             .http
@@ -510,13 +458,9 @@ impl Server {
                     out.push("\n*** Unresolved ***".into());
                     out.extend(errors);
                 }
-                Json(TextOutput {
-                    text: out.join("\n"),
-                })
+                out.join("\n")
             }
-            _ => Json(TextOutput {
-                text: "Batch format failed".into(),
-            }),
+            _ => "Batch format failed".into(),
         }
     }
 }
