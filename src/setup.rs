@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 const API: &str = "https://ookcite-api.turtletech.us";
 
 #[derive(serde::Deserialize)]
@@ -12,123 +10,18 @@ struct MeResponse {
     lookups_limit: u32,
 }
 
-struct McpClient {
-    name: &'static str,
-    config_path: PathBuf,
-    /// JSON path to mcpServers object (some clients nest it differently).
-    servers_key: &'static str,
-}
-
-fn detect_clients() -> Vec<McpClient> {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return vec![],
-    };
-
-    let candidates = [
-        #[cfg(target_os = "linux")]
-        McpClient {
-            name: "Claude Desktop",
-            config_path: home.join(".config/Claude/claude_desktop_config.json"),
-            servers_key: "mcpServers",
-        },
-        #[cfg(target_os = "macos")]
-        McpClient {
-            name: "Claude Desktop",
-            config_path: home.join("Library/Application Support/Claude/claude_desktop_config.json"),
-            servers_key: "mcpServers",
-        },
-        McpClient {
-            name: "Claude Code",
-            config_path: home.join(".claude/settings.json"),
-            servers_key: "mcpServers",
-        },
-        McpClient {
-            name: "Cursor",
-            config_path: home.join(".cursor/mcp.json"),
-            servers_key: "mcpServers",
-        },
-        McpClient {
-            name: "Codex",
-            config_path: home.join(".codex/config.json"),
-            servers_key: "mcpServers",
-        },
-        #[cfg(target_os = "windows")]
-        McpClient {
-            name: "Claude Desktop",
-            config_path: home.join("AppData/Roaming/Claude/claude_desktop_config.json"),
-            servers_key: "mcpServers",
-        },
-    ];
-
-    candidates
-        .into_iter()
-        .filter(|c| c.config_path.parent().is_some_and(|p| p.exists()))
-        .collect()
-}
-
-fn binary_in_path() -> bool {
-    std::process::Command::new("ookcite-mcp")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
-}
-
-fn build_server_entry(api_key: Option<&str>) -> serde_json::Value {
-    // If the binary is in PATH (cargo install / global npm install), use it directly.
-    // Otherwise use npx which handles download + caching automatically.
-    let mut entry = if binary_in_path() {
-        serde_json::json!({
-            "command": "ookcite-mcp"
-        })
-    } else {
-        serde_json::json!({
-            "command": "npx",
-            "args": ["-y", "@turtletech/ookcite-mcp"]
-        })
-    };
-    if let Some(key) = api_key {
-        entry["env"] = serde_json::json!({
-            "OOKCITE_API_KEY": key
-        });
+fn find_binary() -> Option<String> {
+    let output = std::process::Command::new("which")
+        .arg("ookcite-mcp")
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Some(path);
+        }
     }
-    entry
-}
-
-fn write_config(client: &McpClient, api_key: Option<&str>) -> Result<(), String> {
-    let mut config: serde_json::Value = if client.config_path.exists() {
-        let content = std::fs::read_to_string(&client.config_path)
-            .map_err(|e| format!("Failed to read {}: {e}", client.config_path.display()))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse {}: {e}", client.config_path.display()))?
-    } else {
-        serde_json::json!({})
-    };
-
-    let servers = config
-        .as_object_mut()
-        .ok_or("Config is not a JSON object")?
-        .entry(client.servers_key)
-        .or_insert_with(|| serde_json::json!({}));
-
-    servers
-        .as_object_mut()
-        .ok_or("mcpServers is not a JSON object")?
-        .insert("ookcite".into(), build_server_entry(api_key));
-
-    if let Some(parent) = client.config_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create dir: {e}"))?;
-    }
-
-    let formatted = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("Failed to serialize: {e}"))?;
-    std::fs::write(&client.config_path, formatted)
-        .map_err(|e| format!("Failed to write {}: {e}", client.config_path.display()))?;
-
-    Ok(())
+    None
 }
 
 async fn validate_key(api_key: &str) -> Option<MeResponse> {
@@ -144,6 +37,34 @@ async fn validate_key(api_key: &str) -> Option<MeResponse> {
         return None;
     }
     resp.json::<MeResponse>().await.ok()
+}
+
+/// Run `npx add-mcp` to install the ookcite MCP server to all detected clients.
+/// add-mcp handles Claude Code, Claude Desktop, Cursor, VS Code, Codex, Zed,
+/// OpenCode, Cline, Gemini CLI, Goose, and more.
+fn run_add_mcp(api_key: Option<&str>) -> bool {
+    // Determine the command target: full binary path if installed, else npx package.
+    let target = if let Some(bin_path) = find_binary() {
+        bin_path
+    } else {
+        "npx -y @turtletech/ookcite-mcp".to_string()
+    };
+
+    let mut cmd = std::process::Command::new("npx");
+    cmd.args(["-y", "add-mcp", &target, "--name", "ookcite", "-y", "--all"]);
+
+    if let Some(key) = api_key {
+        cmd.args(["--env", &format!("OOKCITE_API_KEY={key}")]);
+    }
+
+    println!("Running: npx add-mcp {} --name ookcite --all", target);
+    match cmd.status() {
+        Ok(status) => status.success(),
+        Err(e) => {
+            eprintln!("Failed to run add-mcp: {e}");
+            false
+        }
+    }
 }
 
 pub async fn run(args: &[String]) {
@@ -183,37 +104,19 @@ pub async fn run(args: &[String]) {
         println!("  Then re-run: ookcite-mcp setup --key YOUR_KEY\n");
     }
 
-    // Detect and configure clients
-    let clients = detect_clients();
-    if clients.is_empty() {
-        println!("No MCP clients detected.");
-        println!("Manually add to your client config:\n");
-        let entry = build_server_entry(api_key.as_deref());
-        let snippet = serde_json::json!({ "mcpServers": { "ookcite": entry } });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&snippet).unwrap_or_default()
-        );
-        return;
+    // Use add-mcp to configure all detected clients
+    if run_add_mcp(api_key.as_deref()) {
+        println!("\nSetup complete.");
+    } else {
+        println!("\nadd-mcp failed. You can configure manually:");
+        let target = find_binary()
+            .unwrap_or_else(|| "npx -y @turtletech/ookcite-mcp".into());
+        println!("  npx add-mcp {} --name ookcite", target);
     }
 
-    println!("Detected MCP clients:");
-    let mut configured = 0;
-    for client in &clients {
-        print!("  {} ({})... ", client.name, client.config_path.display());
-        match write_config(client, api_key.as_deref()) {
-            Ok(()) => {
-                println!("configured");
-                configured += 1;
-            }
-            Err(e) => println!("FAILED: {e}"),
-        }
-    }
-
-    println!("\n{configured}/{} clients configured.", clients.len());
     if api_key.is_none() {
         println!("\nTo add an API key later, re-run:");
         println!("  ookcite-mcp setup --key YOUR_KEY");
     }
-    println!("\nRestart your MCP client to activate OokCite.");
+    println!("\nRestart your MCP clients to activate OokCite.");
 }
