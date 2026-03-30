@@ -33,6 +33,8 @@
 //! Connects to the public OokCite API at <https://ookcite.turtletech.us>.
 //! Basic usage requires no API key, but adding one unlocks higher rate limits.
 
+mod setup;
+
 use rmcp::ServerHandler;
 use rmcp::{
     handler::server::{
@@ -539,8 +541,68 @@ impl ServerHandler for Server {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Handle setup subcommand
+    if args.iter().any(|a| a == "setup") {
+        setup::run(&args[1..]).await;
+        return Ok(());
+    }
+
+    // Startup auth validation (logs to stderr, which MCP clients ignore)
+    validate_auth().await;
+
     let server = Server::new();
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+async fn validate_auth() {
+    let api_key = match std::env::var("OOKCITE_API_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => {
+            eprintln!(
+                "ookcite-mcp: anonymous mode (10 lookups/day). \
+                 Set OOKCITE_API_KEY for more."
+            );
+            return;
+        }
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let resp = client
+        .get(format!("{API}/api/v1/me"))
+        .header("origin", "https://ookcite.turtletech.us")
+        .header("authorization", format!("Bearer {api_key}"))
+        .send()
+        .await;
+
+    #[derive(Deserialize)]
+    struct MeResponse {
+        authenticated: bool,
+        plan: String,
+        lookups_remaining: u32,
+        lookups_limit: u32,
+    }
+
+    match resp {
+        Ok(r) if r.status().is_success() => match r.json::<MeResponse>().await {
+            Ok(me) if me.authenticated => {
+                eprintln!(
+                    "ookcite-mcp: {} plan, {}/{} lookups remaining",
+                    me.plan, me.lookups_remaining, me.lookups_limit
+                );
+            }
+            _ => {
+                eprintln!("ookcite-mcp: WARNING: API key not recognized");
+            }
+        },
+        _ => {
+            eprintln!("ookcite-mcp: WARNING: could not reach API for key validation");
+        }
+    }
 }
