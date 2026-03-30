@@ -1,0 +1,39 @@
+{
+  "name": "@turtletech/ookcite-mcp",
+  "version": "0.1.2",
+  "description": "MCP server for citation validation and formatting. Validates DOIs, formats references in 2900+ CSL styles, and catches hallucinated citations.",
+  "bin": {
+    "ookcite-mcp": "bin/run.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "keywords": [
+    "mcp",
+    "citations",
+    "doi",
+    "bibtex",
+    "academic",
+    "model-context-protocol"
+  ],
+  "homepage": "https://ookcite.turtletech.us",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TurtleTech-ehf/ookcite-mcp.git"
+  },
+  "license": "MIT"
+}
