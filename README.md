@@ -57,7 +57,8 @@ If you used `setup`, you're done. Otherwise, add to your MCP client config:
 {
   "mcpServers": {
     "ookcite": {
-      "command": "ookcite-mcp"
+      "command": "npx",
+      "args": ["-y", "@turtletech/ookcite-mcp"]
     }
   }
 }
@@ -69,7 +70,8 @@ With an API key:
 {
   "mcpServers": {
     "ookcite": {
-      "command": "ookcite-mcp",
+      "command": "npx",
+      "args": ["-y", "@turtletech/ookcite-mcp"],
       "env": {
         "OOKCITE_API_KEY": "your_key_here"
       }
@@ -77,6 +79,9 @@ With an API key:
   }
 }
 ```
+
+If you installed globally (`npm install -g` or `cargo install`), you can use
+`"command": "ookcite-mcp"` directly instead of npx.
 
 Common config file locations:
 
