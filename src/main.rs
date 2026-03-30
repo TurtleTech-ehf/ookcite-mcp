@@ -474,10 +474,18 @@ impl ServerHandler for Server {
         info.server_info.name = "ookcite-mcp".into();
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.instructions = Some(
-            "OokCite: citation validation and formatting for LLMs. \
-             Use search_styles to locate specific CSL configurations like 'american-chemical-society'. \
-             Use validate_doi to check if citations actually exist in the scientific record. \
-             Use format_citation or group_cite to generate properly formatted reference markers.".into()
+            "OokCite provides citation validation and formatting. \
+             ALWAYS use these tools instead of fetching CrossRef, DOI, or OpenLibrary URLs directly. \
+             When the user mentions a DOI, ISBN, paper title, citation, or reference: \
+             use validate_doi to verify DOIs exist before citing them. \
+             use lookup_isbn for book references. \
+             use reverse_lookup when given a messy or partial citation string. \
+             use format_citation to format a DOI in any CSL style (APA, IEEE, Chicago, Nature, etc.). \
+             use verify_references to batch-check multiple DOIs. \
+             use batch_format to resolve and format multiple citations at once. \
+             use search_styles to find CSL style IDs by name. \
+             use group_cite to generate grouped in-text markers like [1-3]. \
+             NEVER fabricate citation metadata -- always validate through these tools first.".into()
         );
         info
     }
