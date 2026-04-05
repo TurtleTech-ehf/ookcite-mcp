@@ -74,7 +74,7 @@ struct IsbnArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ReverseArgs {
-    /// Messy citation text to parse
+    /// Free-text search: DOI, ISBN, author name, title, journal, or any combination (e.g. "Goswami JCTC 2026", "Einstein relativity 1905")
     text: String,
 }
 
@@ -118,6 +118,31 @@ struct GroupCiteArgs {
     /// CSL style (default: "apa")
     #[serde(default = "default_style")]
     style: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ListCollectionsArgs {}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct AddToCollectionArgs {
+    /// Collection name (creates if doesn't exist)
+    collection: String,
+    /// DOI, ISBN, or free-text search to find the paper to add
+    query: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ExportCollectionArgs {
+    /// Collection name to export
+    collection: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct SearchCollectionArgs {
+    /// Collection name to search within
+    collection: String,
+    /// Search query (matches title, author, journal)
+    query: String,
 }
 
 // Tools
@@ -466,6 +491,191 @@ impl Server {
             _ => "Batch format failed".into(),
         }
     }
+
+    #[tool(
+        name = "list_collections",
+        description = "List all citation collections for the authenticated user. Requires OOKCITE_API_KEY."
+    )]
+    async fn list_collections(
+        &self,
+        #[allow(unused)] Parameters(_args): Parameters<ListCollectionsArgs>,
+    ) -> String {
+        let r = self.http.get(url("/api/v1/collections")).send().await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let cols: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
+                if cols.is_empty() {
+                    return "No collections found. Create one with add_to_collection.".into();
+                }
+                cols.iter()
+                    .map(|c| {
+                        format!(
+                            "- {} ({} entries){}",
+                            c["name"].as_str().unwrap_or("?"),
+                            c["entry_count"].as_u64().unwrap_or(0),
+                            c["tags"].as_array().map_or(String::new(), |t| {
+                                if t.is_empty() { String::new() }
+                                else { format!(" [{}]", t.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")) }
+                            })
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            Ok(r) if r.status().as_u16() == 401 => "Authentication required. Set OOKCITE_API_KEY.".into(),
+            Ok(r) if r.status().as_u16() == 503 => "Collections not available (S3 not configured).".into(),
+            _ => "Failed to list collections.".into(),
+        }
+    }
+
+    #[tool(
+        name = "add_to_collection",
+        description = "Add a citation to a collection. Searches by DOI, ISBN, or free-text (e.g. 'Goswami JCTC 2026'). Creates the collection if it doesn't exist."
+    )]
+    async fn add_to_collection(
+        &self,
+        Parameters(args): Parameters<AddToCollectionArgs>,
+    ) -> String {
+        // Find or create the collection
+        let cols: Vec<serde_json::Value> = match self.http.get(url("/api/v1/collections")).send().await {
+            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+            _ => Vec::new(),
+        };
+
+        let col_id = if let Some(c) = cols.iter().find(|c| c["name"].as_str() == Some(&args.collection)) {
+            c["id"].as_str().unwrap_or("").to_string()
+        } else {
+            // Create
+            let r = self.http.post(url("/api/v1/collections"))
+                .json(&serde_json::json!({"name": args.collection}))
+                .send().await;
+            match r {
+                Ok(r) if r.status().is_success() => {
+                    let c: serde_json::Value = r.json().await.unwrap_or_default();
+                    c["id"].as_str().unwrap_or("").to_string()
+                }
+                _ => return "Failed to create collection.".into(),
+            }
+        };
+
+        if col_id.is_empty() { return "Failed to find/create collection.".into(); }
+
+        // Resolve the query to metadata
+        let query = args.query.trim();
+        let is_doi = query.starts_with("10.");
+        let meta = if is_doi {
+            let r = self.http.post(url("/api/v1/lookup/doi"))
+                .json(&serde_json::json!({"doi": query})).send().await;
+            match r {
+                Ok(r) if r.status().is_success() => Some(r.json::<serde_json::Value>().await.unwrap_or_default()),
+                _ => None,
+            }
+        } else {
+            let r = self.http.post(url("/api/v1/reverse"))
+                .json(&serde_json::json!({"text": query})).send().await;
+            match r {
+                Ok(r) if r.status().is_success() => {
+                    let results: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
+                    results.first().and_then(|r| r.get("metadata")).cloned()
+                }
+                _ => None,
+            }
+        };
+
+        let Some(metadata) = meta else {
+            return format!("Could not resolve: {query}");
+        };
+
+        // Add to collection
+        let r = self.http.post(url(&format!("/api/v1/collections/{col_id}/entries")))
+            .json(&serde_json::json!({"metadata": metadata}))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let title = metadata["title"].as_str().unwrap_or("(untitled)");
+                format!("Added to {}: {title}", args.collection)
+            }
+            _ => "Failed to add entry to collection.".into(),
+        }
+    }
+
+    #[tool(
+        name = "export_collection",
+        description = "Export a collection as BibTeX. Returns the full .bib file content with Better BibTeX keys."
+    )]
+    async fn export_collection(
+        &self,
+        Parameters(args): Parameters<ExportCollectionArgs>,
+    ) -> String {
+        // Find the collection by name
+        let cols: Vec<serde_json::Value> = match self.http.get(url("/api/v1/collections")).send().await {
+            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let col = cols.iter().find(|c| c["name"].as_str() == Some(&args.collection));
+        let Some(col) = col else {
+            return format!("Collection '{}' not found.", args.collection);
+        };
+        let id = col["id"].as_str().unwrap_or("");
+
+        let r = self.http.get(url(&format!("/api/v1/collections/{id}/export.bib"))).send().await;
+        match r {
+            Ok(r) if r.status().is_success() => r.text().await.unwrap_or_else(|_| "Export failed.".into()),
+            _ => "Failed to export collection.".into(),
+        }
+    }
+
+    #[tool(
+        name = "search_collection",
+        description = "Search within a collection by author name, title keywords, or journal. Returns matching entries."
+    )]
+    async fn search_collection(
+        &self,
+        Parameters(args): Parameters<SearchCollectionArgs>,
+    ) -> String {
+        // Find the collection by name
+        let cols: Vec<serde_json::Value> = match self.http.get(url("/api/v1/collections")).send().await {
+            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let col = cols.iter().find(|c| c["name"].as_str() == Some(&args.collection));
+        let Some(col) = col else {
+            return format!("Collection '{}' not found.", args.collection);
+        };
+        let id = col["id"].as_str().unwrap_or("");
+
+        let r = self.http.get(url(&format!("/api/v1/collections/{id}"))).send().await;
+        let collection: serde_json::Value = match r {
+            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+            _ => return "Failed to load collection.".into(),
+        };
+
+        let query_lower = args.query.to_lowercase();
+        let entries = collection["entries"].as_array().cloned().unwrap_or_default();
+        let matches: Vec<String> = entries.iter().filter(|e| {
+            let meta = &e["metadata"];
+            let title = meta["title"].as_str().unwrap_or("").to_lowercase();
+            let authors = meta["authors"].as_array().map(|a| {
+                a.iter().filter_map(|p| p["family"].as_str()).collect::<Vec<_>>().join(" ").to_lowercase()
+            }).unwrap_or_default();
+            let journal = meta["journal"].as_str().unwrap_or("").to_lowercase();
+            title.contains(&query_lower) || authors.contains(&query_lower) || journal.contains(&query_lower)
+        }).map(|e| {
+            let meta = &e["metadata"];
+            let title = meta["title"].as_str().unwrap_or("?");
+            let authors = meta["authors"].as_array().map(|a| {
+                a.iter().filter_map(|p| p["family"].as_str()).collect::<Vec<_>>().join(", ")
+            }).unwrap_or_default();
+            let year = meta["date"]["year"].as_i64().map(|y| format!(" ({y})")).unwrap_or_default();
+            format!("- {authors}{year}: {title}")
+        }).collect();
+
+        if matches.is_empty() {
+            format!("No entries matching '{}' in collection '{}'.", args.query, args.collection)
+        } else {
+            format!("{} matches in '{}':\n{}", matches.len(), args.collection, matches.join("\n"))
+        }
+    }
 }
 
 #[tool_handler]
@@ -488,6 +698,10 @@ impl ServerHandler for Server {
              use batch_format to resolve and format multiple citations at once. \
              use search_styles to find CSL style IDs by name. \
              use group_cite to generate grouped in-text markers like [1-3]. \
+             use list_collections to see saved citation collections. \
+             use add_to_collection to save a citation to a named collection (creates if needed). \
+             use export_collection to get BibTeX for a collection. \
+             use search_collection to find entries within a collection. \
              NEVER fabricate citation metadata -- always validate through these tools first.".into()
         );
         info
