@@ -126,7 +126,6 @@ struct GroupCiteArgs {
 impl Server {
     fn new() -> Self {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("origin", "https://ookcite.turtletech.us".parse().unwrap());
 
         if let Ok(api_key) = std::env::var("OOKCITE_API_KEY") {
             if let Ok(mut auth_val) =
@@ -135,6 +134,10 @@ impl Server {
                 auth_val.set_sensitive(true);
                 headers.insert(reqwest::header::AUTHORIZATION, auth_val);
             }
+        } else {
+            eprintln!(
+                "ookcite-mcp: OOKCITE_API_KEY not set; requests will be anonymous/IP-rate-limited"
+            );
         }
 
         Self {
@@ -528,7 +531,6 @@ async fn validate_auth() {
         .unwrap();
     let resp = client
         .get(format!("{API}/api/v1/me"))
-        .header("origin", "https://ookcite.turtletech.us")
         .header("authorization", format!("Bearer {api_key}"))
         .send()
         .await;
