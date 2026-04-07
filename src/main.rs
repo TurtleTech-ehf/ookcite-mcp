@@ -6,14 +6,39 @@
 //!
 //! ## Tools
 //!
+//! **Lookup & Validation**
 //! * **validate_doi** : Check if a DOI exists in CrossRef (anti-hallucination)
 //! * **lookup_isbn** : Look up a book by ISBN via OpenLibrary
 //! * **reverse_lookup** : Find a paper from messy citation text
+//! * **health_check** : Check API availability and health
+//!
+//! **Formatting**
 //! * **format_citation** : Format a DOI in any of 2900+ CSL styles
 //! * **verify_references** : Batch-check a list of DOIs
 //! * **batch_format** : Resolve and format multiple citations at once
 //! * **search_styles** : Find CSL style IDs by name
 //! * **group_cite** : Generate grouped in-text markers
+//!
+//! **Collections**
+//! * **list_collections** : List user's citation collections
+//! * **add_to_collection** : Add a single citation to a collection
+//! * **batch_add_to_collection** : Add multiple citations at once
+//! * **import_bibliography** : Import BibTeX/RIS files into a collection
+//! * **export_collection** : Export collection as BibTeX
+//! * **search_collection** : Search within a collection
+//! * **check_duplicates** : Check for duplicate entries
+//! * **delete_collection** : Delete a collection
+//! * **update_collection** : Update collection metadata
+//! * **remove_from_collection** : Remove a specific entry
+//! * **update_tags** : Set tags on a collection
+//! * **reorder_collection** : Reorder entries
+//!
+//! **Sharing**
+//! * **share_collection** : Create a shareable link
+//! * **unshare_collection** : Revoke sharing
+//! * **view_shared** : View a shared collection
+//! * **merge_collections** : Merge multiple collections
+//! * **batch_move_entries** : Move entries between collections
 //!
 //! ## Usage
 //!
@@ -143,6 +168,124 @@ struct SearchCollectionArgs {
     collection: String,
     /// Search query (matches title, author, journal)
     query: String,
+}
+
+// --- Phase 1: High-value new tools ---
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct HealthCheckArgs {}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ImportBibliographyArgs {
+    /// Collection name (creates if doesn't exist)
+    collection: String,
+    /// BibTeX or RIS content to import
+    content: String,
+    /// File format: "bibtex" or "ris" (default: "bibtex")
+    #[serde(default = "default_bibtex")]
+    format: String,
+}
+fn default_bibtex() -> String {
+    "bibtex".into()
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct CheckDuplicatesArgs {
+    /// Collection name to check within
+    collection: String,
+    /// DOI or free-text query to check for duplicates
+    query: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct BatchAddArgs {
+    /// Collection name (creates if doesn't exist)
+    collection: String,
+    /// List of DOIs or free-text queries to resolve and add
+    queries: Vec<String>,
+}
+
+// --- Phase 2: Collection management ---
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct DeleteCollectionArgs {
+    /// Collection name to delete
+    collection: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct UpdateCollectionArgs {
+    /// Current collection name
+    collection: String,
+    /// New name (optional)
+    #[serde(default)]
+    name: Option<String>,
+    /// New description (optional)
+    #[serde(default)]
+    description: Option<String>,
+    /// New default CSL style (optional)
+    #[serde(default)]
+    default_style: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct RemoveFromCollectionArgs {
+    /// Collection name
+    collection: String,
+    /// Entry ID to remove (from search_collection or list)
+    entry_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct UpdateTagsArgs {
+    /// Collection name
+    collection: String,
+    /// New tag list (replaces existing tags)
+    tags: Vec<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ReorderCollectionArgs {
+    /// Collection name
+    collection: String,
+    /// Ordered list of entry IDs
+    entry_ids: Vec<String>,
+}
+
+// --- Phase 3: Sharing and bulk ops ---
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ShareCollectionArgs {
+    /// Collection name to share
+    collection: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct UnshareCollectionArgs {
+    /// Collection name to unshare
+    collection: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct MergeCollectionsArgs {
+    /// Collection names to merge (first becomes target)
+    collections: Vec<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct BatchMoveArgs {
+    /// Source collection name
+    source: String,
+    /// Target collection name
+    target: String,
+    /// Entry IDs to move
+    entry_ids: Vec<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ViewSharedArgs {
+    /// Share token from a shared collection URL
+    share_token: String,
 }
 
 // Tools
@@ -536,57 +679,15 @@ impl Server {
         &self,
         Parameters(args): Parameters<AddToCollectionArgs>,
     ) -> String {
-        // Find or create the collection
-        let cols: Vec<serde_json::Value> = match self.http.get(url("/api/v1/collections")).send().await {
-            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-            _ => Vec::new(),
+        let col_id = match self.resolve_or_create_collection(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
         };
 
-        let col_id = if let Some(c) = cols.iter().find(|c| c["name"].as_str() == Some(&args.collection)) {
-            c["id"].as_str().unwrap_or("").to_string()
-        } else {
-            // Create
-            let r = self.http.post(url("/api/v1/collections"))
-                .json(&serde_json::json!({"name": args.collection}))
-                .send().await;
-            match r {
-                Ok(r) if r.status().is_success() => {
-                    let c: serde_json::Value = r.json().await.unwrap_or_default();
-                    c["id"].as_str().unwrap_or("").to_string()
-                }
-                _ => return "Failed to create collection.".into(),
-            }
+        let Some(metadata) = self.resolve_query_to_metadata(&args.query).await else {
+            return format!("Could not resolve: {}", args.query);
         };
 
-        if col_id.is_empty() { return "Failed to find/create collection.".into(); }
-
-        // Resolve the query to metadata
-        let query = args.query.trim();
-        let is_doi = query.starts_with("10.");
-        let meta = if is_doi {
-            let r = self.http.post(url("/api/v1/lookup/doi"))
-                .json(&serde_json::json!({"doi": query})).send().await;
-            match r {
-                Ok(r) if r.status().is_success() => Some(r.json::<serde_json::Value>().await.unwrap_or_default()),
-                _ => None,
-            }
-        } else {
-            let r = self.http.post(url("/api/v1/reverse"))
-                .json(&serde_json::json!({"text": query})).send().await;
-            match r {
-                Ok(r) if r.status().is_success() => {
-                    let results: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
-                    results.first().and_then(|r| r.get("metadata")).cloned()
-                }
-                _ => None,
-            }
-        };
-
-        let Some(metadata) = meta else {
-            return format!("Could not resolve: {query}");
-        };
-
-        // Add to collection
         let r = self.http.post(url(&format!("/api/v1/collections/{col_id}/entries")))
             .json(&serde_json::json!({"metadata": metadata}))
             .send().await;
@@ -607,18 +708,12 @@ impl Server {
         &self,
         Parameters(args): Parameters<ExportCollectionArgs>,
     ) -> String {
-        // Find the collection by name
-        let cols: Vec<serde_json::Value> = match self.http.get(url("/api/v1/collections")).send().await {
-            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-            _ => Vec::new(),
+        let col_id = match self.resolve_collection_id(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
         };
-        let col = cols.iter().find(|c| c["name"].as_str() == Some(&args.collection));
-        let Some(col) = col else {
-            return format!("Collection '{}' not found.", args.collection);
-        };
-        let id = col["id"].as_str().unwrap_or("");
 
-        let r = self.http.get(url(&format!("/api/v1/collections/{id}/export.bib"))).send().await;
+        let r = self.http.get(url(&format!("/api/v1/collections/{col_id}/export.bib"))).send().await;
         match r {
             Ok(r) if r.status().is_success() => r.text().await.unwrap_or_else(|_| "Export failed.".into()),
             _ => "Failed to export collection.".into(),
@@ -633,18 +728,12 @@ impl Server {
         &self,
         Parameters(args): Parameters<SearchCollectionArgs>,
     ) -> String {
-        // Find the collection by name
-        let cols: Vec<serde_json::Value> = match self.http.get(url("/api/v1/collections")).send().await {
-            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-            _ => Vec::new(),
+        let col_id = match self.resolve_collection_id(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
         };
-        let col = cols.iter().find(|c| c["name"].as_str() == Some(&args.collection));
-        let Some(col) = col else {
-            return format!("Collection '{}' not found.", args.collection);
-        };
-        let id = col["id"].as_str().unwrap_or("");
 
-        let r = self.http.get(url(&format!("/api/v1/collections/{id}"))).send().await;
+        let r = self.http.get(url(&format!("/api/v1/collections/{col_id}"))).send().await;
         let collection: serde_json::Value = match r {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
             _ => return "Failed to load collection.".into(),
@@ -676,6 +765,519 @@ impl Server {
             format!("{} matches in '{}':\n{}", matches.len(), args.collection, matches.join("\n"))
         }
     }
+
+    // --- Helper: resolve collection name to ID ---
+
+    async fn resolve_collection_id(&self, name: &str) -> Result<String, String> {
+        let cols: Vec<serde_json::Value> = match self.http.get(url("/api/v1/collections")).send().await {
+            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+            Ok(r) if r.status().as_u16() == 401 => return Err("Authentication required. Set OOKCITE_API_KEY.".into()),
+            _ => return Err("Failed to list collections.".into()),
+        };
+        cols.iter()
+            .find(|c| c["name"].as_str() == Some(name))
+            .and_then(|c| c["id"].as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("Collection '{name}' not found."))
+    }
+
+    async fn resolve_or_create_collection(&self, name: &str) -> Result<String, String> {
+        match self.resolve_collection_id(name).await {
+            Ok(id) => Ok(id),
+            Err(_) => {
+                let r = self.http.post(url("/api/v1/collections"))
+                    .json(&serde_json::json!({"name": name}))
+                    .send().await;
+                match r {
+                    Ok(r) if r.status().is_success() => {
+                        let c: serde_json::Value = r.json().await.unwrap_or_default();
+                        c["id"].as_str().map(|s| s.to_string())
+                            .ok_or_else(|| "Failed to create collection.".into())
+                    }
+                    _ => Err("Failed to create collection.".into()),
+                }
+            }
+        }
+    }
+
+    async fn resolve_query_to_metadata(&self, query: &str) -> Option<serde_json::Value> {
+        let q = query.trim();
+        if q.starts_with("10.") {
+            let r = self.http.post(url("/api/v1/lookup/doi"))
+                .json(&serde_json::json!({"doi": q})).send().await;
+            match r {
+                Ok(r) if r.status().is_success() => Some(r.json::<serde_json::Value>().await.unwrap_or_default()),
+                _ => None,
+            }
+        } else {
+            let r = self.http.post(url("/api/v1/reverse"))
+                .json(&serde_json::json!({"text": q})).send().await;
+            match r {
+                Ok(r) if r.status().is_success() => {
+                    let results: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
+                    results.first().and_then(|r| r.get("metadata")).cloned()
+                }
+                _ => None,
+            }
+        }
+    }
+
+    // --- Phase 1: High-value new tools ---
+
+    #[tool(
+        name = "health_check",
+        description = "Check if the OokCite API is reachable and healthy. Returns service status and cache statistics."
+    )]
+    async fn health_check(
+        &self,
+        #[allow(unused)] Parameters(_args): Parameters<HealthCheckArgs>,
+    ) -> String {
+        let r = self.http.get(url("/api/health")).send().await;
+        match r {
+            Ok(resp) if resp.status().is_success() => {
+                let data: serde_json::Value = resp.json().await.unwrap_or_default();
+                let status = data["status"].as_str().unwrap_or("unknown");
+                let version = data["version"].as_str().unwrap_or("unknown");
+                let mut out = format!("Status: {status}\nVersion: {version}");
+                if let Some(cache) = data.get("cache") {
+                    let hits = cache["hits"].as_u64().unwrap_or(0);
+                    let misses = cache["misses"].as_u64().unwrap_or(0);
+                    out.push_str(&format!("\nCache: {hits} hits, {misses} misses"));
+                }
+                out
+            }
+            Ok(resp) => format!("API unhealthy: HTTP {}", resp.status()),
+            Err(e) => format!("API unreachable: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "import_bibliography",
+        description = "Import a BibTeX (.bib) or RIS file into a collection. Pass the file content as a string. Creates the collection if it doesn't exist."
+    )]
+    async fn import_bibliography(
+        &self,
+        Parameters(args): Parameters<ImportBibliographyArgs>,
+    ) -> String {
+        let col_id = match self.resolve_or_create_collection(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+
+        let filename = if args.format == "ris" { "import.ris" } else { "import.bib" };
+        let part = match reqwest::multipart::Part::text(args.content)
+            .file_name(filename.to_string())
+            .mime_str("text/plain")
+        {
+            Ok(p) => p,
+            Err(_) => return "Failed to construct upload.".into(),
+        };
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let r = self.http
+            .post(url(&format!("/api/v1/collections/{col_id}/import")))
+            .multipart(form)
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                let added = data["added"].as_u64().unwrap_or(0);
+                let dupes = data["duplicates_skipped"].as_u64().unwrap_or(0);
+                format!("Imported into '{}': {added} added, {dupes} duplicates skipped", args.collection)
+            }
+            Ok(r) if r.status().as_u16() == 401 => "Authentication required. Set OOKCITE_API_KEY.".into(),
+            _ => "Import failed.".into(),
+        }
+    }
+
+    #[tool(
+        name = "check_duplicates",
+        description = "Check if a citation already exists in a collection. Resolves the query first, then checks for duplicates."
+    )]
+    async fn check_duplicates(
+        &self,
+        Parameters(args): Parameters<CheckDuplicatesArgs>,
+    ) -> String {
+        let col_id = match self.resolve_collection_id(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+
+        let Some(metadata) = self.resolve_query_to_metadata(&args.query).await else {
+            return format!("Could not resolve: {}", args.query);
+        };
+
+        let r = self.http
+            .post(url(&format!("/api/v1/collections/{col_id}/check-duplicates")))
+            .json(&serde_json::json!({"metadata": metadata}))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let matches: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
+                if matches.is_empty() {
+                    "No duplicates found.".into()
+                } else {
+                    let mut out = vec![format!("{} potential duplicate(s):", matches.len())];
+                    for m in &matches {
+                        let match_type = m["match_type"].as_str().unwrap_or("?");
+                        let similarity = m["similarity"].as_f64().unwrap_or(0.0);
+                        let entry_id = m["entry_id"].as_str().unwrap_or("?");
+                        out.push(format!("- {match_type} ({similarity:.0}%) entry:{entry_id}"));
+                    }
+                    out.join("\n")
+                }
+            }
+            _ => "Duplicate check failed.".into(),
+        }
+    }
+
+    #[tool(
+        name = "batch_add_to_collection",
+        description = "Add multiple citations to a collection at once. Each query can be a DOI or free-text search."
+    )]
+    async fn batch_add_to_collection(
+        &self,
+        Parameters(args): Parameters<BatchAddArgs>,
+    ) -> String {
+        let col_id = match self.resolve_or_create_collection(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+
+        let mut entries = Vec::new();
+        let mut errors = Vec::new();
+        for (i, query) in args.queries.iter().enumerate() {
+            match self.resolve_query_to_metadata(query).await {
+                Some(meta) => entries.push(meta),
+                None => errors.push(format!("[{}] Could not resolve: {}", i + 1, &query[..query.len().min(60)])),
+            }
+        }
+
+        if entries.is_empty() {
+            return format!("No citations resolved.\n{}", errors.join("\n"));
+        }
+
+        let r = self.http
+            .post(url(&format!("/api/v1/collections/{col_id}/entries/batch")))
+            .json(&serde_json::json!({"entries": entries}))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                let added = data["added"].as_u64().unwrap_or(0);
+                let dupes = data["duplicates_skipped"].as_u64().unwrap_or(0);
+                let mut out = format!("Added {added} to '{}', {dupes} duplicates skipped", args.collection);
+                if !errors.is_empty() {
+                    out.push_str(&format!("\n\nUnresolved:\n{}", errors.join("\n")));
+                }
+                out
+            }
+            _ => "Batch add failed.".into(),
+        }
+    }
+
+    // --- Phase 2: Collection management ---
+
+    #[tool(
+        name = "delete_collection",
+        description = "Delete a citation collection. This is irreversible."
+    )]
+    async fn delete_collection(
+        &self,
+        Parameters(args): Parameters<DeleteCollectionArgs>,
+    ) -> String {
+        let col_id = match self.resolve_collection_id(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let r = self.http.delete(url(&format!("/api/v1/collections/{col_id}"))).send().await;
+        match r {
+            Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
+                format!("Deleted collection '{}'.", args.collection)
+            }
+            _ => "Failed to delete collection.".into(),
+        }
+    }
+
+    #[tool(
+        name = "update_collection",
+        description = "Update a collection's name, description, or default citation style."
+    )]
+    async fn update_collection(
+        &self,
+        Parameters(args): Parameters<UpdateCollectionArgs>,
+    ) -> String {
+        let col_id = match self.resolve_collection_id(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let mut body = serde_json::Map::new();
+        if let Some(name) = &args.name {
+            body.insert("name".into(), serde_json::json!(name));
+        }
+        if let Some(desc) = &args.description {
+            body.insert("description".into(), serde_json::json!(desc));
+        }
+        if let Some(style) = &args.default_style {
+            body.insert("default_style".into(), serde_json::json!(style));
+        }
+        if body.is_empty() {
+            return "Nothing to update. Provide name, description, or default_style.".into();
+        }
+        let r = self.http
+            .patch(url(&format!("/api/v1/collections/{col_id}")))
+            .json(&serde_json::Value::Object(body))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                format!("Updated collection '{}'.", args.collection)
+            }
+            _ => "Failed to update collection.".into(),
+        }
+    }
+
+    #[tool(
+        name = "remove_from_collection",
+        description = "Remove a specific entry from a collection by its entry ID."
+    )]
+    async fn remove_from_collection(
+        &self,
+        Parameters(args): Parameters<RemoveFromCollectionArgs>,
+    ) -> String {
+        let col_id = match self.resolve_collection_id(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let r = self.http
+            .delete(url(&format!("/api/v1/collections/{col_id}/entries/{}", args.entry_id)))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
+                format!("Removed entry {} from '{}'.", args.entry_id, args.collection)
+            }
+            _ => "Failed to remove entry.".into(),
+        }
+    }
+
+    #[tool(
+        name = "update_tags",
+        description = "Set tags on a collection. Replaces all existing tags."
+    )]
+    async fn update_tags(
+        &self,
+        Parameters(args): Parameters<UpdateTagsArgs>,
+    ) -> String {
+        let col_id = match self.resolve_collection_id(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let r = self.http
+            .patch(url(&format!("/api/v1/collections/{col_id}/tags")))
+            .json(&serde_json::json!({"tags": args.tags}))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
+                format!("Updated tags on '{}'.", args.collection)
+            }
+            _ => "Failed to update tags.".into(),
+        }
+    }
+
+    #[tool(
+        name = "reorder_collection",
+        description = "Reorder entries in a collection. Provide the entry IDs in the desired order."
+    )]
+    async fn reorder_collection(
+        &self,
+        Parameters(args): Parameters<ReorderCollectionArgs>,
+    ) -> String {
+        let col_id = match self.resolve_collection_id(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let r = self.http
+            .patch(url(&format!("/api/v1/collections/{col_id}/reorder")))
+            .json(&serde_json::json!({"entry_ids": args.entry_ids}))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
+                format!("Reordered entries in '{}'.", args.collection)
+            }
+            _ => "Failed to reorder collection.".into(),
+        }
+    }
+
+    // --- Phase 3: Sharing and bulk ops ---
+
+    #[tool(
+        name = "share_collection",
+        description = "Create a shareable link for a collection. Anyone with the link can view it."
+    )]
+    async fn share_collection(
+        &self,
+        Parameters(args): Parameters<ShareCollectionArgs>,
+    ) -> String {
+        let col_id = match self.resolve_collection_id(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let r = self.http
+            .post(url(&format!("/api/v1/collections/{col_id}/share")))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                let share_url = data["url"].as_str().unwrap_or("?");
+                format!("Shared '{}': {share_url}", args.collection)
+            }
+            _ => "Failed to share collection.".into(),
+        }
+    }
+
+    #[tool(
+        name = "unshare_collection",
+        description = "Revoke the shareable link for a collection."
+    )]
+    async fn unshare_collection(
+        &self,
+        Parameters(args): Parameters<UnshareCollectionArgs>,
+    ) -> String {
+        let col_id = match self.resolve_collection_id(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let r = self.http
+            .delete(url(&format!("/api/v1/collections/{col_id}/share")))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
+                format!("Unshared '{}'.", args.collection)
+            }
+            _ => "Failed to unshare collection.".into(),
+        }
+    }
+
+    #[tool(
+        name = "merge_collections",
+        description = "Merge multiple collections into one. All entries are combined, duplicates are skipped."
+    )]
+    async fn merge_collections(
+        &self,
+        Parameters(args): Parameters<MergeCollectionsArgs>,
+    ) -> String {
+        if args.collections.len() < 2 {
+            return "Need at least 2 collection names to merge.".into();
+        }
+        // Resolve all collections to full objects
+        let cols: Vec<serde_json::Value> = match self.http.get(url("/api/v1/collections")).send().await {
+            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+            _ => return "Failed to list collections.".into(),
+        };
+
+        let mut resolved = Vec::new();
+        for name in &args.collections {
+            let Some(col) = cols.iter().find(|c| c["name"].as_str() == Some(name)) else {
+                return format!("Collection '{name}' not found.");
+            };
+            // Fetch full collection with entries
+            let id = col["id"].as_str().unwrap_or("");
+            let r = self.http.get(url(&format!("/api/v1/collections/{id}"))).send().await;
+            match r {
+                Ok(r) if r.status().is_success() => {
+                    let full: serde_json::Value = r.json().await.unwrap_or_default();
+                    resolved.push(full);
+                }
+                _ => return format!("Failed to load collection '{name}'."),
+            }
+        }
+
+        let r = self.http
+            .post(url("/api/v1/collections/merge"))
+            .json(&serde_json::json!({"collections": resolved}))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                let merged = data["merged"].as_u64().unwrap_or(0);
+                let created = data["created"].as_u64().unwrap_or(0);
+                let dupes = data["duplicates_skipped"].as_u64().unwrap_or(0);
+                format!("Merged: {merged} entries, {created} new, {dupes} duplicates skipped")
+            }
+            _ => "Merge failed.".into(),
+        }
+    }
+
+    #[tool(
+        name = "batch_move_entries",
+        description = "Move entries from one collection to another."
+    )]
+    async fn batch_move_entries(
+        &self,
+        Parameters(args): Parameters<BatchMoveArgs>,
+    ) -> String {
+        let source_id = match self.resolve_collection_id(&args.source).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let target_id = match self.resolve_collection_id(&args.target).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let r = self.http
+            .post(url("/api/v1/collections/batch-move"))
+            .json(&serde_json::json!({
+                "source_id": source_id,
+                "target_id": target_id,
+                "entry_ids": args.entry_ids
+            }))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                let moved = data["moved"].as_u64().unwrap_or(0);
+                format!("Moved {moved} entries from '{}' to '{}'.", args.source, args.target)
+            }
+            _ => "Batch move failed.".into(),
+        }
+    }
+
+    #[tool(
+        name = "view_shared",
+        description = "View a shared collection using its share token."
+    )]
+    async fn view_shared(
+        &self,
+        Parameters(args): Parameters<ViewSharedArgs>,
+    ) -> String {
+        let r = self.http
+            .get(url(&format!("/api/v1/shared/{}", args.share_token)))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let col: serde_json::Value = r.json().await.unwrap_or_default();
+                let name = col["name"].as_str().unwrap_or("?");
+                let entries = col["entries"].as_array().map(|a| a.len()).unwrap_or(0);
+                let mut out = vec![format!("Shared collection: {name} ({entries} entries)")];
+                if let Some(arr) = col["entries"].as_array() {
+                    for e in arr.iter().take(20) {
+                        let meta = &e["metadata"];
+                        let title = meta["title"].as_str().unwrap_or("?");
+                        let authors = meta["authors"].as_array().map(|a| {
+                            a.iter().filter_map(|p| p["family"].as_str()).collect::<Vec<_>>().join(", ")
+                        }).unwrap_or_default();
+                        let year = meta["date"]["year"].as_i64().map(|y| format!(" ({y})")).unwrap_or_default();
+                        out.push(format!("- {authors}{year}: {title}"));
+                    }
+                    if entries > 20 {
+                        out.push(format!("... and {} more", entries - 20));
+                    }
+                }
+                out.join("\n")
+            }
+            Ok(r) if r.status().as_u16() == 404 => "Shared collection not found or link expired.".into(),
+            _ => "Failed to load shared collection.".into(),
+        }
+    }
 }
 
 #[tool_handler]
@@ -698,10 +1300,27 @@ impl ServerHandler for Server {
              use batch_format to resolve and format multiple citations at once. \
              use search_styles to find CSL style IDs by name. \
              use group_cite to generate grouped in-text markers like [1-3]. \
+             use health_check to verify the API is reachable (use when lookups fail). \
+             COLLECTION MANAGEMENT: \
              use list_collections to see saved citation collections. \
              use add_to_collection to save a citation to a named collection (creates if needed). \
+             use batch_add_to_collection to add multiple citations at once. \
+             use import_bibliography to import BibTeX or RIS files into a collection. \
              use export_collection to get BibTeX for a collection. \
              use search_collection to find entries within a collection. \
+             use check_duplicates to check if a citation already exists in a collection. \
+             use delete_collection to remove a collection. \
+             use update_collection to rename or change a collection's default style. \
+             use remove_from_collection to remove a specific entry. \
+             use update_tags to set tags on a collection. \
+             use reorder_collection to change the order of entries. \
+             SHARING: \
+             use share_collection to create a shareable link. \
+             use unshare_collection to revoke sharing. \
+             use view_shared to view a shared collection by token. \
+             BULK OPERATIONS: \
+             use merge_collections to combine multiple collections. \
+             use batch_move_entries to move entries between collections. \
              NEVER fabricate citation metadata -- always validate through these tools first.".into()
         );
         info
