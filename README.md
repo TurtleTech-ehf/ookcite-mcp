@@ -4,9 +4,10 @@
 [![Crates.io](https://img.shields.io/crates/v/ookcite-mcp.svg)](https://crates.io/crates/ookcite-mcp)
 [![npm](https://img.shields.io/npm/v/@turtletech/ookcite-mcp.svg)](https://www.npmjs.com/package/@turtletech/ookcite-mcp)
 
-Give any LLM the ability to validate DOIs, format citations, and catch
-hallucinated references. Works with any MCP client: Claude, Codex, Cursor,
-Windsurf, OpenCode, Qwen agents, and more.
+Give any LLM the ability to validate DOIs, format citations, manage
+bibliography collections, and catch hallucinated references. Returns citation
+metadata only -- not PDFs or full-text articles. Works with any MCP client:
+Claude, Codex, Cursor, Windsurf, OpenCode, Qwen agents, and more.
 
 ## Quick Start
 
@@ -95,16 +96,53 @@ Common config file locations:
 
 ## Tools
 
+### Lookup & Validation
+
 | Tool                | Purpose                                       |
 | ------------------- | --------------------------------------------- |
 | `validate_doi`      | Check if a DOI exists (anti-hallucination)    |
 | `lookup_isbn`       | Look up a book by ISBN                        |
 | `reverse_lookup`    | Find a paper from messy citation text         |
+| `health_check`      | Check API availability and health             |
+
+### Formatting
+
+| Tool                | Purpose                                       |
+| ------------------- | --------------------------------------------- |
 | `format_citation`   | Format a DOI in any of 2900+ CSL styles       |
 | `verify_references` | Batch-check a list of DOIs                    |
 | `batch_format`      | Format multiple citations at once             |
 | `search_styles`     | Find CSL style IDs by name                    |
 | `group_cite`        | Generate grouped in-text markers (e.g. [1-3]) |
+
+### Collections (requires sign-in)
+
+Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
+
+| Tool                       | Purpose                                  |
+| -------------------------- | ---------------------------------------- |
+| `list_collections`         | List saved citation collections          |
+| `add_to_collection`        | Add a citation (by DOI or free-text)     |
+| `batch_add_to_collection`  | Add multiple citations at once           |
+| `import_bibliography`      | Import BibTeX/RIS files into a collection|
+| `export_collection`        | Export collection as BibTeX              |
+| `search_collection`        | Search within a collection              |
+| `check_duplicates`         | Check for duplicate entries             |
+| `delete_collection`        | Delete a collection                     |
+| `update_collection`        | Update name, description, or style      |
+| `remove_from_collection`   | Remove a specific entry                 |
+| `update_tags`              | Set tags on a collection                |
+| `reorder_collection`       | Reorder entries                         |
+
+### Sharing & Bulk Operations (requires sign-in)
+
+| Tool                  | Purpose                                    |
+| --------------------- | ------------------------------------------ |
+| `share_collection`    | Create a shareable link                    |
+| `unshare_collection`  | Revoke sharing                             |
+| `view_shared`         | View a shared collection by token          |
+| `merge_collections`   | Merge multiple collections                 |
+| `batch_move_entries`  | Move entries between collections           |
 
 ## Anti-Hallucination
 
