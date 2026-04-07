@@ -7,8 +7,8 @@
 //! ## Tools
 //!
 //! **Lookup & Validation**
-//! * **validate_doi** : Check if a DOI exists in CrossRef (anti-hallucination)
-//! * **lookup_isbn** : Look up a book by ISBN via OpenLibrary
+//! * **validate_doi** : Check if a DOI exists (anti-hallucination)
+//! * **lookup_isbn** : Look up a book by ISBN
 //! * **reverse_lookup** : Find a paper from messy citation text
 //! * **health_check** : Check API availability and health
 //!
@@ -388,7 +388,7 @@ impl Server {
 
     #[tool(
         name = "validate_doi",
-        description = "Check if a DOI exists in CrossRef and return its metadata. Use this to verify citations. Returns title, authors, year, journal, volume, and issue."
+        description = "Check if a DOI exists and return its metadata. Use this to verify citations are real. Returns title, authors, year, journal, volume, and issue."
     )]
     async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
         let r = self
@@ -420,10 +420,17 @@ impl Server {
                 let doi = meta["doi"].as_str().unwrap_or(&args.doi);
                 format!("VALID\nDOI: {doi}\nTitle: {title}\nAuthors: {authors}\nYear: {year}\nJournal: {journal}\nVolume: {volume}\nIssue: {issue}")
             }
-            _ => format!(
-                "INVALID: DOI {} not found in CrossRef. This citation may represent a hallucination.",
+            Ok(resp) if resp.status().as_u16() == 429 => {
+                format!("RATE LIMITED: {}", error_detail(resp).await)
+            }
+            Ok(resp) if resp.status().as_u16() == 403 => {
+                format!("ACCESS DENIED: {}", error_detail(resp).await)
+            }
+            Ok(_) => format!(
+                "INVALID: DOI {} not found. This citation may be a hallucination.",
                 args.doi
             ),
+            Err(e) => format!("ERROR: Could not reach citation service: {e}"),
         }
     }
 
@@ -462,13 +469,16 @@ impl Server {
                     args.isbn
                 )
             }
-            _ => format!("ISBN {} not found", args.isbn),
+            Ok(r) if r.status().as_u16() == 429 => format!("RATE LIMITED: {}", error_detail(r).await),
+            Ok(r) if r.status().as_u16() == 403 => format!("ACCESS DENIED: {}", error_detail(r).await),
+            Ok(_) => format!("ISBN {} not found", args.isbn),
+            Err(e) => format!("ERROR: {e}"),
         }
     }
 
     #[tool(
         name = "reverse_lookup",
-        description = "Parse a messy citation string and find the matching paper in CrossRef. Returns ranked candidates."
+        description = "Parse a messy citation string and find the matching paper. Returns ranked candidates."
     )]
     async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> String {
         let r = self
@@ -494,7 +504,10 @@ impl Server {
                 }
                 if out.is_empty() { "No matches found".into() } else { out.join("\n") }
             }
-            _ => "Reverse lookup failed".into(),
+            Ok(r) if r.status().as_u16() == 429 => format!("RATE LIMITED: {}", error_detail(r).await),
+            Ok(r) if r.status().as_u16() == 403 => format!("ACCESS DENIED: {}", error_detail(r).await),
+            Ok(_) => "No matches found".into(),
+            Err(e) => format!("Reverse lookup failed: {e}"),
         }
     }
 
@@ -511,7 +524,10 @@ impl Server {
             .await;
         let meta: serde_json::Value = match lookup {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-            _ => return format!("DOI {} not found", args.doi),
+            Ok(r) if r.status().as_u16() == 429 => return format!("RATE LIMITED: {}", error_detail(r).await),
+            Ok(r) if r.status().as_u16() == 403 => return format!("ACCESS DENIED: {}", error_detail(r).await),
+            Ok(_) => return format!("DOI {} not found", args.doi),
+            Err(e) => return format!("ERROR: {e}"),
         };
 
         let fmt = self
@@ -1471,7 +1487,7 @@ impl ServerHandler for Server {
             "OokCite provides citation METADATA validation and formatting -- it does NOT fetch PDFs, \
              full-text articles, or paper content. It returns structured metadata (title, authors, \
              year, journal, DOI) and formatted bibliography entries. \
-             ALWAYS use these tools instead of fetching CrossRef, DOI, or OpenLibrary URLs directly. \
+             ALWAYS use these tools instead of searching the web for DOI or citation metadata. \
              When the user mentions a DOI, ISBN, paper title, citation, or reference: \
              use validate_doi to verify DOIs exist before citing them. \
              use lookup_isbn for book references. \
@@ -1765,6 +1781,22 @@ mod tests {
         let s = test_server(&mock.uri());
         let result = s.validate_doi(Parameters(DoiArgs { doi: "10.9999/fake".into() })).await;
         assert!(result.starts_with("INVALID"));
+        assert!(!result.contains("CrossRef"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_doi_rate_limited() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(429)
+                .set_body_string("Daily limit reached (50/day). Resets in 3h 45m."))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.validate_doi(Parameters(DoiArgs { doi: "10.1038/187493a0".into() })).await;
+        assert!(result.starts_with("RATE LIMITED"));
+        assert!(result.contains("Daily limit"));
+        assert!(!result.contains("not found"));
     }
 
     #[tokio::test]
@@ -1780,7 +1812,8 @@ mod tests {
 
         let s = test_server(&mock.uri());
         let result = s.validate_doi(Parameters(DoiArgs { doi: "10.1038/187493a0".into() })).await;
-        assert!(result.contains("INVALID"));
+        assert!(result.starts_with("ACCESS DENIED"));
+        assert!(result.contains("academic"));
     }
 
     #[tokio::test]
@@ -1951,5 +1984,59 @@ mod tests {
         let detail = error_detail(resp).await;
         assert!(detail.contains("academic"));
         assert!(detail.contains("$4/mo"));
+    }
+
+    #[tokio::test]
+    async fn test_format_citation_rate_limited() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(429)
+                .set_body_string("Daily limit reached (30/day). Resets in 5h."))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.format_citation(Parameters(FormatArgs { doi: "10.1038/187493a0".into(), style: "apa".into() })).await;
+        assert!(result.starts_with("RATE LIMITED"));
+        assert!(!result.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_reverse_lookup_rate_limited() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(429)
+                .set_body_string("Daily limit reached"))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.reverse_lookup(Parameters(ReverseArgs { text: "test".into() })).await;
+        assert!(result.starts_with("RATE LIMITED"));
+    }
+
+    #[tokio::test]
+    async fn test_isbn_rate_limited() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/lookup/isbn"))
+            .respond_with(ResponseTemplate::new(429)
+                .set_body_string("Daily limit reached"))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.lookup_isbn(Parameters(IsbnArgs { isbn: "978-0-521-85629-7".into() })).await;
+        assert!(result.starts_with("RATE LIMITED"));
+    }
+
+    #[tokio::test]
+    async fn test_no_crossref_leak_in_errors() {
+        let mock = MockServer::start().await;
+        // 404 should not mention CrossRef
+        Mock::given(method("POST")).and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.validate_doi(Parameters(DoiArgs { doi: "10.9999/fake".into() })).await;
+        assert!(!result.to_lowercase().contains("crossref"), "Error leaked 'CrossRef': {result}");
+        assert!(!result.to_lowercase().contains("openlibrary"), "Error leaked 'OpenLibrary': {result}");
     }
 }
