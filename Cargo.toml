@@ -22,6 +22,11 @@ futures = "0.3"
 anyhow = "1"
 urlencoding = "2.1.3"
 
+[dev-dependencies]
+wiremock = "0.6"
+http = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
 [package.metadata.binstall]
 # Directs binstall to your GitHub Releases format
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.{ archive-format }"
