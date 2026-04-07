@@ -69,6 +69,7 @@ use rmcp::{
     model::*,
     tool, tool_handler, tool_router, ServiceExt,
 };
+use futures::{stream, StreamExt};
 use serde::Deserialize;
 
 const API: &str = "https://ookcite-api.turtletech.us";
@@ -81,6 +82,25 @@ fn url(path: &str) -> String {
 struct Server {
     tool_router: ToolRouter<Self>,
     http: reqwest::Client,
+}
+
+/// Extract a useful error message from a failed HTTP response.
+async fn error_detail(resp: reqwest::Response) -> String {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    // Try to parse JSON error with message field
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+        if let Some(msg) = json["message"].as_str() {
+            return format!("{status}: {msg}");
+        }
+    }
+    if body.len() > 120 {
+        format!("{status}: {}", &body[..120])
+    } else if body.is_empty() {
+        format!("{status}")
+    } else {
+        format!("{status}: {body}")
+    }
 }
 
 // Args
@@ -500,22 +520,28 @@ impl Server {
         description = "Generate a grouped in-text citation marker (e.g., '[1-3]') for multiple DOIs."
     )]
     async fn group_cite(&self, Parameters(args): Parameters<GroupCiteArgs>) -> String {
-        let mut entries = Vec::new();
-        for doi in &args.dois {
-            let r = self
-                .http
-                .post(url("/api/v1/lookup/doi"))
-                .json(&serde_json::json!({"doi": doi}))
-                .send()
-                .await;
-            if let Ok(resp) = r {
-                if resp.status().is_success() {
-                    if let Ok(meta) = resp.json::<serde_json::Value>().await {
-                        entries.push(meta);
-                    }
+        let futs: Vec<_> = args.dois.iter().map(|doi| {
+            let http = self.http.clone();
+            let doi = doi.clone();
+            async move {
+                let r = http
+                    .post(url("/api/v1/lookup/doi"))
+                    .json(&serde_json::json!({"doi": doi}))
+                    .send()
+                    .await;
+                match r {
+                    Ok(resp) if resp.status().is_success() => resp.json::<serde_json::Value>().await.ok(),
+                    _ => None,
                 }
             }
-        }
+        }).collect();
+        let entries: Vec<serde_json::Value> = stream::iter(futs)
+            .buffer_unordered(10)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
 
         if entries.is_empty() {
             return "Failed to resolve any DOIs.".into();
@@ -551,23 +577,27 @@ impl Server {
         &self,
         Parameters(args): Parameters<VerifyArgs>,
     ) -> String {
-        let mut results = Vec::new();
-        for doi in &args.dois {
-            let r = self
-                .http
-                .post(url("/api/v1/lookup/doi"))
-                .json(&serde_json::json!({"doi": doi}))
-                .send()
-                .await;
-            match r {
-                Ok(resp) if resp.status().is_success() => {
-                    let meta: serde_json::Value = resp.json().await.unwrap_or_default();
-                    let title = meta["title"].as_str().unwrap_or("?");
-                    results.push(format!("VALID {doi} : {title}"));
+        let futs: Vec<_> = args.dois.iter().map(|doi| {
+            let http = self.http.clone();
+            let doi = doi.clone();
+            async move {
+                let r = http
+                    .post(url("/api/v1/lookup/doi"))
+                    .json(&serde_json::json!({"doi": doi}))
+                    .send()
+                    .await;
+                match r {
+                    Ok(resp) if resp.status().is_success() => {
+                        let meta: serde_json::Value = resp.json().await.unwrap_or_default();
+                        let title = meta["title"].as_str().unwrap_or("?");
+                        format!("VALID {doi} : {title}")
+                    }
+                    Ok(resp) => format!("INVALID {doi} : HTTP {}", resp.status()),
+                    Err(e) => format!("ERROR {doi} : {e}"),
                 }
-                _ => results.push(format!("INVALID {doi} : NOT FOUND")),
             }
-        }
+        }).collect();
+        let results = stream::iter(futs).buffer_unordered(10).collect::<Vec<_>>().await;
         results.join("\n")
     }
 
@@ -576,35 +606,41 @@ impl Server {
         description = "Resolve and format multiple messy citations at once. Pass citation strings in any format."
     )]
     async fn batch_format(&self, Parameters(args): Parameters<BatchArgs>) -> String {
+        // Resolve all citations in parallel (up to 10 concurrent)
+        let futs: Vec<_> = args.citations.iter().enumerate().map(|(i, text)| {
+            let http = self.http.clone();
+            let text = text.clone();
+            async move {
+                let r = http
+                    .post(url("/api/v1/reverse"))
+                    .json(&serde_json::json!({"text": text}))
+                    .send()
+                    .await;
+                match r {
+                    Ok(resp) if resp.status().is_success() => {
+                        let candidates: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+                        if let Some(meta) = candidates.first().and_then(|c| c.get("metadata")) {
+                            Ok(meta.clone())
+                        } else {
+                            Err(format!("[{}] Not found: {}", i + 1, &text[..text.len().min(60)]))
+                        }
+                    }
+                    Ok(resp) => Err(format!("[{}] HTTP {}: {}", i + 1, resp.status(), &text[..text.len().min(60)])),
+                    Err(e) => Err(format!("[{}] {e}: {}", i + 1, &text[..text.len().min(60)])),
+                }
+            }
+        }).collect();
+        let resolved: Vec<_> = stream::iter(futs).buffer_unordered(10).collect().await;
+
         let mut entries = Vec::new();
         let mut errors = Vec::new();
-        for (i, text) in args.citations.iter().enumerate() {
-            let r = self
-                .http
-                .post(url("/api/v1/reverse"))
-                .json(&serde_json::json!({"text": text}))
-                .send()
-                .await;
-            match r {
-                Ok(resp) if resp.status().is_success() => {
-                    let candidates: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
-                    if let Some(meta) = candidates.first().and_then(|c| c.get("metadata")) {
-                        entries.push(meta.clone());
-                    } else {
-                        errors.push(format!(
-                            "[{}] Not found: {}",
-                            i + 1,
-                            &text[..text.len().min(60)]
-                        ));
-                    }
-                }
-                _ => errors.push(format!(
-                    "[{}] Failed: {}",
-                    i + 1,
-                    &text[..text.len().min(60)]
-                )),
+        for result in resolved {
+            match result {
+                Ok(meta) => entries.push(meta),
+                Err(e) => errors.push(e),
             }
         }
+
         if entries.is_empty() {
             return format!("No citations resolved.\n{}", errors.join("\n"));
         }
@@ -631,7 +667,8 @@ impl Server {
                 }
                 out.join("\n")
             }
-            _ => "Batch format failed".into(),
+            Ok(r) => format!("Batch format failed: HTTP {}", r.status()),
+            Err(e) => format!("Batch format failed: {e}"),
         }
     }
 
@@ -696,7 +733,8 @@ impl Server {
                 let title = metadata["title"].as_str().unwrap_or("(untitled)");
                 format!("Added to {}: {title}", args.collection)
             }
-            _ => "Failed to add entry to collection.".into(),
+            Ok(r) => format!("Failed to add entry: {}", error_detail(r).await),
+            Err(e) => format!("Failed to add entry: {e}"),
         }
     }
 
@@ -886,7 +924,8 @@ impl Server {
                 format!("Imported into '{}': {added} added, {dupes} duplicates skipped", args.collection)
             }
             Ok(r) if r.status().as_u16() == 401 => "Authentication required. Set OOKCITE_API_KEY.".into(),
-            _ => "Import failed.".into(),
+            Ok(r) => format!("Import failed: {}", error_detail(r).await),
+            Err(e) => format!("Import failed: {e}"),
         }
     }
 
@@ -944,12 +983,44 @@ impl Server {
             Err(e) => return e,
         };
 
+        // Resolve all queries in parallel (up to 10 concurrent)
+        let futs: Vec<_> = args.queries.iter().enumerate().map(|(i, query)| {
+            let http = self.http.clone();
+            let query = query.clone();
+            async move {
+                let q = query.trim();
+                let meta = if q.starts_with("10.") {
+                    let r = http.post(url("/api/v1/lookup/doi"))
+                        .json(&serde_json::json!({"doi": q})).send().await;
+                    match r {
+                        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
+                        _ => None,
+                    }
+                } else {
+                    let r = http.post(url("/api/v1/reverse"))
+                        .json(&serde_json::json!({"text": q})).send().await;
+                    match r {
+                        Ok(r) if r.status().is_success() => {
+                            let results: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
+                            results.first().and_then(|r| r.get("metadata")).cloned()
+                        }
+                        _ => None,
+                    }
+                };
+                match meta {
+                    Some(m) => Ok(m),
+                    None => Err(format!("[{}] Could not resolve: {}", i + 1, &query[..query.len().min(60)])),
+                }
+            }
+        }).collect();
+        let resolved: Vec<_> = stream::iter(futs).buffer_unordered(10).collect().await;
+
         let mut entries = Vec::new();
         let mut errors = Vec::new();
-        for (i, query) in args.queries.iter().enumerate() {
-            match self.resolve_query_to_metadata(query).await {
-                Some(meta) => entries.push(meta),
-                None => errors.push(format!("[{}] Could not resolve: {}", i + 1, &query[..query.len().min(60)])),
+        for result in resolved {
+            match result {
+                Ok(meta) => entries.push(meta),
+                Err(e) => errors.push(e),
             }
         }
 
@@ -972,7 +1043,8 @@ impl Server {
                 }
                 out
             }
-            _ => "Batch add failed.".into(),
+            Ok(r) => format!("Batch add failed: {}", error_detail(r).await),
+            Err(e) => format!("Batch add failed: {e}"),
         }
     }
 
@@ -995,7 +1067,8 @@ impl Server {
             Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
                 format!("Deleted collection '{}'.", args.collection)
             }
-            _ => "Failed to delete collection.".into(),
+            Ok(r) => format!("Failed to delete collection: {}", error_detail(r).await),
+            Err(e) => format!("Failed to delete collection: {e}"),
         }
     }
 
@@ -1203,7 +1276,8 @@ impl Server {
                 let dupes = data["duplicates_skipped"].as_u64().unwrap_or(0);
                 format!("Merged: {merged} entries, {created} new, {dupes} duplicates skipped")
             }
-            _ => "Merge failed.".into(),
+            Ok(r) => format!("Merge failed: {}", error_detail(r).await),
+            Err(e) => format!("Merge failed: {e}"),
         }
     }
 
@@ -1237,7 +1311,8 @@ impl Server {
                 let moved = data["moved"].as_u64().unwrap_or(0);
                 format!("Moved {moved} entries from '{}' to '{}'.", args.source, args.target)
             }
-            _ => "Batch move failed.".into(),
+            Ok(r) => format!("Batch move failed: {}", error_detail(r).await),
+            Err(e) => format!("Batch move failed: {e}"),
         }
     }
 

@@ -649,6 +649,7 @@ name = "ookcite-mcp"
 version = "0.3.1"
 dependencies = [
  "anyhow",
+ "futures",
  "reqwest",
  "rmcp",
  "schemars",
