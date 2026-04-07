@@ -1289,7 +1289,9 @@ impl ServerHandler for Server {
         info.server_info.name = "ookcite-mcp".into();
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.instructions = Some(
-            "OokCite provides citation validation and formatting. \
+            "OokCite provides citation METADATA validation and formatting -- it does NOT fetch PDFs, \
+             full-text articles, or paper content. It returns structured metadata (title, authors, \
+             year, journal, DOI) and formatted bibliography entries. \
              ALWAYS use these tools instead of fetching CrossRef, DOI, or OpenLibrary URLs directly. \
              When the user mentions a DOI, ISBN, paper title, citation, or reference: \
              use validate_doi to verify DOIs exist before citing them. \
