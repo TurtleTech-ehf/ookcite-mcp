@@ -134,7 +134,7 @@ Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
 | `update_tags`              | Set tags on a collection                |
 | `reorder_collection`       | Reorder entries                         |
 
-### Sharing & Bulk Operations (requires sign-in)
+### Sharing & Bulk Operations (requires academic/business plan)
 
 | Tool                  | Purpose                                    |
 | --------------------- | ------------------------------------------ |
@@ -143,6 +143,22 @@ Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
 | `view_shared`         | View a shared collection by token          |
 | `merge_collections`   | Merge multiple collections                 |
 | `batch_move_entries`  | Move entries between collections           |
+
+## Plans & Pricing
+
+| Tier      | Price   | Lookups/day | Collections | Entries/collection |
+| --------- | ------- | ----------- | ----------- | ------------------ |
+| Anonymous | Free    | 10          | 0           | --                 |
+| Free      | Free    | 30          | 1           | 100                |
+| Academic  | $4/mo   | 10,000      | 5           | 500                |
+| Business  | $12/mo  | 10,000      | 10           | 2,000              |
+
+Papers already in your collections are **free and unlimited** to re-lookup.
+Only new lookups count against your daily quota. Every paper you save
+becomes free forever.
+
+Batch operations require an academic or business plan. Academic pricing
+is for students, researchers, and educators at accredited institutions.
 
 ## Anti-Hallucination
 
@@ -157,8 +173,9 @@ The MCP server connects to the public [OokCite](https://ookcite.turtletech.us)
 API to look up and format citations. It's a thin MCP wrapper around the OokCite
 REST API with no local database, and no heavy dependencies.
 
-Rate limits apply: 10 lookups/day anonymous, 30/day with a free account. [Sign up](https://my.turtletech.us/signup) for more, or upgrade (starting at $4/month)
-for more.
+[Sign up](https://my.turtletech.us/signup) for a free account (30 lookups/day),
+or upgrade to academic ($4/mo) or business ($12/mo) for batch operations
+and larger collections.
 
 ## Documentation
 
