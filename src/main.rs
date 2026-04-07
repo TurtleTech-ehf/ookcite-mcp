@@ -308,6 +308,20 @@ struct ViewSharedArgs {
     share_token: String,
 }
 
+// --- New utility tools ---
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct GenerateCitationKeysArgs {
+    /// List of DOIs to generate citation keys for
+    dois: Vec<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ExpandJournalArgs {
+    /// Journal abbreviation to expand (e.g. "JACS", "J. Am. Chem. Soc.")
+    abbreviation: String,
+}
+
 // Tools
 
 #[tool_router]
@@ -1353,6 +1367,89 @@ impl Server {
             _ => "Failed to load shared collection.".into(),
         }
     }
+
+    // --- Utility tools ---
+
+    #[tool(
+        name = "generate_citation_keys",
+        description = "Generate Better BibTeX-style citation keys (e.g. 'goswami2026') for a list of DOIs. Requires academic/business plan."
+    )]
+    async fn generate_citation_keys(
+        &self,
+        Parameters(args): Parameters<GenerateCitationKeysArgs>,
+    ) -> String {
+        // Resolve all DOIs to metadata in parallel
+        let futs: Vec<_> = args.dois.iter().map(|doi| {
+            let http = self.http.clone();
+            let doi = doi.clone();
+            async move {
+                let r = http
+                    .post(url("/api/v1/lookup/doi"))
+                    .json(&serde_json::json!({"doi": doi}))
+                    .send()
+                    .await;
+                match r {
+                    Ok(resp) if resp.status().is_success() => resp.json::<serde_json::Value>().await.ok(),
+                    _ => None,
+                }
+            }
+        }).collect();
+        let entries: Vec<serde_json::Value> = stream::iter(futs)
+            .buffer_unordered(10)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+
+        if entries.is_empty() {
+            return "Could not resolve any DOIs.".into();
+        }
+
+        let r = self.http
+            .post(url("/api/v1/citation-keys"))
+            .json(&serde_json::json!({"entries": entries}))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                let keys = data["keys"].as_array().map(|a| {
+                    a.iter().filter_map(|k| k.as_str()).collect::<Vec<_>>().join("\n")
+                }).unwrap_or_default();
+                if keys.is_empty() { "No keys generated.".into() } else { keys }
+            }
+            Ok(r) => format!("Citation key generation failed: {}", error_detail(r).await),
+            Err(e) => format!("Citation key generation failed: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "expand_journal",
+        description = "Expand a journal abbreviation to its full name (e.g. 'JACS' -> 'Journal of the American Chemical Society'). 16,000+ journals supported. Requires academic/business plan."
+    )]
+    async fn expand_journal(
+        &self,
+        Parameters(args): Parameters<ExpandJournalArgs>,
+    ) -> String {
+        let r = self.http
+            .post(url("/api/v1/journal/expand"))
+            .json(&serde_json::json!({"abbreviation": args.abbreviation}))
+            .send().await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                let found = data["found"].as_bool().unwrap_or(false);
+                if found {
+                    let full = data["full_name"].as_str().unwrap_or("?");
+                    format!("{} -> {full}", args.abbreviation)
+                } else {
+                    format!("No expansion found for '{}'", args.abbreviation)
+                }
+            }
+            Ok(r) => format!("Journal expansion failed: {}", error_detail(r).await),
+            Err(e) => format!("Journal expansion failed: {e}"),
+        }
+    }
 }
 
 #[tool_handler]
@@ -1398,6 +1495,9 @@ impl ServerHandler for Server {
              BULK OPERATIONS: \
              use merge_collections to combine multiple collections. \
              use batch_move_entries to move entries between collections. \
+             UTILITIES (requires academic/business plan): \
+             use generate_citation_keys to create Better BibTeX-style keys for DOIs. \
+             use expand_journal to expand a journal abbreviation to its full name. \
              NEVER fabricate citation metadata -- always validate through these tools first.".into()
         );
         info
