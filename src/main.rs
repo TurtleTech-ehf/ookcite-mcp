@@ -1570,3 +1570,135 @@ async fn validate_auth() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_url_construction() {
+        let u = url("/api/v1/lookup/doi");
+        assert_eq!(u, "https://ookcite-api.turtletech.us/api/v1/lookup/doi");
+    }
+
+    #[test]
+    fn test_url_with_path_params() {
+        let id = "abc-123";
+        let u = url(&format!("/api/v1/collections/{id}/entries"));
+        assert_eq!(u, "https://ookcite-api.turtletech.us/api/v1/collections/abc-123/entries");
+    }
+
+    #[test]
+    fn test_default_style() {
+        assert_eq!(default_style(), "apa");
+    }
+
+    #[test]
+    fn test_default_bibtex() {
+        assert_eq!(default_bibtex(), "bibtex");
+    }
+
+    #[tokio::test]
+    async fn test_error_detail_json_message() {
+        let resp = http::Response::builder()
+            .status(403)
+            .header("content-type", "application/json")
+            .body(r#"{"error":"plan_required","message":"This feature requires academic plan."}"#)
+            .unwrap();
+        let resp = reqwest::Response::from(resp);
+        let detail = error_detail(resp).await;
+        assert_eq!(detail, "403 Forbidden: This feature requires academic plan.");
+    }
+
+    #[tokio::test]
+    async fn test_error_detail_plain_text() {
+        let resp = http::Response::builder()
+            .status(429)
+            .body("Rate limited")
+            .unwrap();
+        let resp = reqwest::Response::from(resp);
+        let detail = error_detail(resp).await;
+        assert_eq!(detail, "429 Too Many Requests: Rate limited");
+    }
+
+    #[tokio::test]
+    async fn test_error_detail_empty_body() {
+        let resp = http::Response::builder()
+            .status(500)
+            .body("")
+            .unwrap();
+        let resp = reqwest::Response::from(resp);
+        let detail = error_detail(resp).await;
+        assert_eq!(detail, "500 Internal Server Error");
+    }
+
+    #[tokio::test]
+    async fn test_error_detail_long_body_truncated() {
+        let long = "x".repeat(200);
+        let resp = http::Response::builder()
+            .status(502)
+            .body(long)
+            .unwrap();
+        let resp = reqwest::Response::from(resp);
+        let detail = error_detail(resp).await;
+        assert!(detail.starts_with("502 Bad Gateway: "));
+        assert!(detail.len() < 160);
+    }
+
+    #[test]
+    fn test_args_doi() {
+        let args: DoiArgs = serde_json::from_str(r#"{"doi": "10.1038/187493a0"}"#).unwrap();
+        assert_eq!(args.doi, "10.1038/187493a0");
+    }
+
+    #[test]
+    fn test_args_format_default_style() {
+        let args: FormatArgs = serde_json::from_str(r#"{"doi": "10.1038/187493a0"}"#).unwrap();
+        assert_eq!(args.style, "apa");
+    }
+
+    #[test]
+    fn test_args_format_custom_style() {
+        let args: FormatArgs = serde_json::from_str(r#"{"doi": "10.1038/187493a0", "style": "ieee"}"#).unwrap();
+        assert_eq!(args.style, "ieee");
+    }
+
+    #[test]
+    fn test_args_import_default_format() {
+        let args: ImportBibliographyArgs = serde_json::from_str(r#"{"collection": "test", "content": "@article{...}"}"#).unwrap();
+        assert_eq!(args.format, "bibtex");
+    }
+
+    #[test]
+    fn test_args_import_ris() {
+        let args: ImportBibliographyArgs = serde_json::from_str(r#"{"collection": "test", "content": "TY - JOUR", "format": "ris"}"#).unwrap();
+        assert_eq!(args.format, "ris");
+    }
+
+    #[test]
+    fn test_args_batch_add() {
+        let args: BatchAddArgs = serde_json::from_str(r#"{"collection": "refs", "queries": ["10.1038/187493a0", "Einstein 1905"]}"#).unwrap();
+        assert_eq!(args.queries.len(), 2);
+    }
+
+    #[test]
+    fn test_args_update_collection_optional() {
+        let args: UpdateCollectionArgs = serde_json::from_str(r#"{"collection": "refs"}"#).unwrap();
+        assert!(args.name.is_none());
+        assert!(args.description.is_none());
+        assert!(args.default_style.is_none());
+    }
+
+    #[test]
+    fn test_args_merge() {
+        let args: MergeCollectionsArgs = serde_json::from_str(r#"{"collections": ["a", "b", "c"]}"#).unwrap();
+        assert_eq!(args.collections.len(), 3);
+    }
+
+    #[test]
+    fn test_args_batch_move() {
+        let args: BatchMoveArgs = serde_json::from_str(r#"{"source": "a", "target": "b", "entry_ids": ["e1", "e2"]}"#).unwrap();
+        assert_eq!(args.source, "a");
+        assert_eq!(args.entry_ids.len(), 2);
+    }
+}
