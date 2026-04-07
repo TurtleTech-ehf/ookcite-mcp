@@ -153,9 +153,9 @@ Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
 | Academic  | $4/mo   | 10,000      | 5           | 500                |
 | Business  | $12/mo  | 10,000      | 10           | 2,000              |
 
-Papers already in your collections are **free and unlimited** to re-lookup.
-Only new lookups count against your daily quota. Every paper you save
-becomes free forever.
+Papers in your collections are **free and unlimited** to re-lookup.
+Only new lookups count against your daily quota. Papers stay free
+as long as they remain in a collection.
 
 Batch operations require an academic or business plan. Academic pricing
 is for students, researchers, and educators at accredited institutions.
