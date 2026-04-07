@@ -74,14 +74,15 @@ use serde::Deserialize;
 
 const API: &str = "https://ookcite-api.turtletech.us";
 
-fn url(path: &str) -> String {
-    format!("{API}{path}")
+fn url_base(base: &str, path: &str) -> String {
+    format!("{base}{path}")
 }
 
 #[derive(Clone)]
 struct Server {
     tool_router: ToolRouter<Self>,
     http: reqwest::Client,
+    api_base: String,
 }
 
 /// Extract a useful error message from a failed HTTP response.
@@ -349,7 +350,12 @@ impl Server {
                 .default_headers(headers)
                 .build()
                 .unwrap(),
+            api_base: API.to_string(),
         }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.api_base)
     }
 
     #[tool(
@@ -360,7 +366,7 @@ impl Server {
         &self,
         Parameters(args): Parameters<StyleSearchArgs>,
     ) -> String {
-        let req_url = url(&format!(
+        let req_url = self.url(&format!(
             "/api/v1/styles/search?q={}",
             urlencoding::encode(&args.query)
         ));
@@ -387,7 +393,7 @@ impl Server {
     async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
         let r = self
             .http
-            .post(url("/api/v1/lookup/doi"))
+            .post(self.url("/api/v1/lookup/doi"))
             .json(&serde_json::json!({"doi": args.doi}))
             .send()
             .await;
@@ -428,7 +434,7 @@ impl Server {
     async fn lookup_isbn(&self, Parameters(args): Parameters<IsbnArgs>) -> String {
         let r = self
             .http
-            .post(url("/api/v1/lookup/isbn"))
+            .post(self.url("/api/v1/lookup/isbn"))
             .json(&serde_json::json!({"isbn": args.isbn}))
             .send()
             .await;
@@ -467,7 +473,7 @@ impl Server {
     async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> String {
         let r = self
             .http
-            .post(url("/api/v1/reverse"))
+            .post(self.url("/api/v1/reverse"))
             .json(&serde_json::json!({"text": args.text}))
             .send()
             .await;
@@ -499,7 +505,7 @@ impl Server {
     async fn format_citation(&self, Parameters(args): Parameters<FormatArgs>) -> String {
         let lookup = self
             .http
-            .post(url("/api/v1/lookup/doi"))
+            .post(self.url("/api/v1/lookup/doi"))
             .json(&serde_json::json!({"doi": args.doi}))
             .send()
             .await;
@@ -510,7 +516,7 @@ impl Server {
 
         let fmt = self
             .http
-            .post(url("/api/v1/format"))
+            .post(self.url("/api/v1/format"))
             .json(&serde_json::json!({"entries": [meta], "style": args.style, "locale": "en-US"}))
             .send()
             .await;
@@ -539,7 +545,7 @@ impl Server {
             let doi = doi.clone();
             async move {
                 let r = http
-                    .post(url("/api/v1/lookup/doi"))
+                    .post(self.url("/api/v1/lookup/doi"))
                     .json(&serde_json::json!({"doi": doi}))
                     .send()
                     .await;
@@ -564,7 +570,7 @@ impl Server {
         let indices: Vec<usize> = (0..entries.len()).collect();
         let r = self
             .http
-            .post(url("/api/v1/format/group-cite"))
+            .post(self.url("/api/v1/format/group-cite"))
             .json(&serde_json::json!({
                 "entries": entries,
                 "indices": indices,
@@ -596,7 +602,7 @@ impl Server {
             let doi = doi.clone();
             async move {
                 let r = http
-                    .post(url("/api/v1/lookup/doi"))
+                    .post(self.url("/api/v1/lookup/doi"))
                     .json(&serde_json::json!({"doi": doi}))
                     .send()
                     .await;
@@ -626,7 +632,7 @@ impl Server {
             let text = text.clone();
             async move {
                 let r = http
-                    .post(url("/api/v1/reverse"))
+                    .post(self.url("/api/v1/reverse"))
                     .json(&serde_json::json!({"text": text}))
                     .send()
                     .await;
@@ -660,7 +666,7 @@ impl Server {
         }
         let fmt = self
             .http
-            .post(url("/api/v1/format"))
+            .post(self.url("/api/v1/format"))
             .json(&serde_json::json!({"entries": entries, "style": args.style, "locale": "en-US"}))
             .send()
             .await;
@@ -694,7 +700,7 @@ impl Server {
         &self,
         #[allow(unused)] Parameters(_args): Parameters<ListCollectionsArgs>,
     ) -> String {
-        let r = self.http.get(url("/api/v1/collections")).send().await;
+        let r = self.http.get(self.url("/api/v1/collections")).send().await;
         match r {
             Ok(r) if r.status().is_success() => {
                 let cols: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
@@ -739,7 +745,7 @@ impl Server {
             return format!("Could not resolve: {}", args.query);
         };
 
-        let r = self.http.post(url(&format!("/api/v1/collections/{col_id}/entries")))
+        let r = self.http.post(self.url(&format!("/api/v1/collections/{col_id}/entries")))
             .json(&serde_json::json!({"metadata": metadata}))
             .send().await;
         match r {
@@ -765,7 +771,7 @@ impl Server {
             Err(e) => return e,
         };
 
-        let r = self.http.get(url(&format!("/api/v1/collections/{col_id}/export.bib"))).send().await;
+        let r = self.http.get(self.url(&format!("/api/v1/collections/{col_id}/export.bib"))).send().await;
         match r {
             Ok(r) if r.status().is_success() => r.text().await.unwrap_or_else(|_| "Export failed.".into()),
             _ => "Failed to export collection.".into(),
@@ -785,7 +791,7 @@ impl Server {
             Err(e) => return e,
         };
 
-        let r = self.http.get(url(&format!("/api/v1/collections/{col_id}"))).send().await;
+        let r = self.http.get(self.url(&format!("/api/v1/collections/{col_id}"))).send().await;
         let collection: serde_json::Value = match r {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
             _ => return "Failed to load collection.".into(),
@@ -821,7 +827,7 @@ impl Server {
     // --- Helper: resolve collection name to ID ---
 
     async fn resolve_collection_id(&self, name: &str) -> Result<String, String> {
-        let cols: Vec<serde_json::Value> = match self.http.get(url("/api/v1/collections")).send().await {
+        let cols: Vec<serde_json::Value> = match self.http.get(self.url("/api/v1/collections")).send().await {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
             Ok(r) if r.status().as_u16() == 401 => return Err("Authentication required. Set OOKCITE_API_KEY.".into()),
             _ => return Err("Failed to list collections.".into()),
@@ -837,7 +843,7 @@ impl Server {
         match self.resolve_collection_id(name).await {
             Ok(id) => Ok(id),
             Err(_) => {
-                let r = self.http.post(url("/api/v1/collections"))
+                let r = self.http.post(self.url("/api/v1/collections"))
                     .json(&serde_json::json!({"name": name}))
                     .send().await;
                 match r {
@@ -855,14 +861,14 @@ impl Server {
     async fn resolve_query_to_metadata(&self, query: &str) -> Option<serde_json::Value> {
         let q = query.trim();
         if q.starts_with("10.") {
-            let r = self.http.post(url("/api/v1/lookup/doi"))
+            let r = self.http.post(self.url("/api/v1/lookup/doi"))
                 .json(&serde_json::json!({"doi": q})).send().await;
             match r {
                 Ok(r) if r.status().is_success() => Some(r.json::<serde_json::Value>().await.unwrap_or_default()),
                 _ => None,
             }
         } else {
-            let r = self.http.post(url("/api/v1/reverse"))
+            let r = self.http.post(self.url("/api/v1/reverse"))
                 .json(&serde_json::json!({"text": q})).send().await;
             match r {
                 Ok(r) if r.status().is_success() => {
@@ -884,7 +890,7 @@ impl Server {
         &self,
         #[allow(unused)] Parameters(_args): Parameters<HealthCheckArgs>,
     ) -> String {
-        let r = self.http.get(url("/api/health")).send().await;
+        let r = self.http.get(self.url("/api/health")).send().await;
         match r {
             Ok(resp) if resp.status().is_success() => {
                 let data: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -927,7 +933,7 @@ impl Server {
         let form = reqwest::multipart::Form::new().part("file", part);
 
         let r = self.http
-            .post(url(&format!("/api/v1/collections/{col_id}/import")))
+            .post(self.url(&format!("/api/v1/collections/{col_id}/import")))
             .multipart(form)
             .send().await;
         match r {
@@ -961,7 +967,7 @@ impl Server {
         };
 
         let r = self.http
-            .post(url(&format!("/api/v1/collections/{col_id}/check-duplicates")))
+            .post(self.url(&format!("/api/v1/collections/{col_id}/check-duplicates")))
             .json(&serde_json::json!({"metadata": metadata}))
             .send().await;
         match r {
@@ -1000,18 +1006,19 @@ impl Server {
         // Resolve all queries in parallel (up to 10 concurrent)
         let futs: Vec<_> = args.queries.iter().enumerate().map(|(i, query)| {
             let http = self.http.clone();
+            let base = self.api_base.clone();
             let query = query.clone();
             async move {
                 let q = query.trim();
                 let meta = if q.starts_with("10.") {
-                    let r = http.post(url("/api/v1/lookup/doi"))
+                    let r = http.post(url_base(&base, "/api/v1/lookup/doi"))
                         .json(&serde_json::json!({"doi": q})).send().await;
                     match r {
                         Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
                         _ => None,
                     }
                 } else {
-                    let r = http.post(url("/api/v1/reverse"))
+                    let r = http.post(url_base(&base, "/api/v1/reverse"))
                         .json(&serde_json::json!({"text": q})).send().await;
                     match r {
                         Ok(r) if r.status().is_success() => {
@@ -1043,7 +1050,7 @@ impl Server {
         }
 
         let r = self.http
-            .post(url(&format!("/api/v1/collections/{col_id}/entries/batch")))
+            .post(self.url(&format!("/api/v1/collections/{col_id}/entries/batch")))
             .json(&serde_json::json!({"entries": entries}))
             .send().await;
         match r {
@@ -1076,7 +1083,7 @@ impl Server {
             Ok(id) => id,
             Err(e) => return e,
         };
-        let r = self.http.delete(url(&format!("/api/v1/collections/{col_id}"))).send().await;
+        let r = self.http.delete(self.url(&format!("/api/v1/collections/{col_id}"))).send().await;
         match r {
             Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
                 format!("Deleted collection '{}'.", args.collection)
@@ -1112,7 +1119,7 @@ impl Server {
             return "Nothing to update. Provide name, description, or default_style.".into();
         }
         let r = self.http
-            .patch(url(&format!("/api/v1/collections/{col_id}")))
+            .patch(self.url(&format!("/api/v1/collections/{col_id}")))
             .json(&serde_json::Value::Object(body))
             .send().await;
         match r {
@@ -1136,7 +1143,7 @@ impl Server {
             Err(e) => return e,
         };
         let r = self.http
-            .delete(url(&format!("/api/v1/collections/{col_id}/entries/{}", args.entry_id)))
+            .delete(self.url(&format!("/api/v1/collections/{col_id}/entries/{}", args.entry_id)))
             .send().await;
         match r {
             Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
@@ -1159,7 +1166,7 @@ impl Server {
             Err(e) => return e,
         };
         let r = self.http
-            .patch(url(&format!("/api/v1/collections/{col_id}/tags")))
+            .patch(self.url(&format!("/api/v1/collections/{col_id}/tags")))
             .json(&serde_json::json!({"tags": args.tags}))
             .send().await;
         match r {
@@ -1183,7 +1190,7 @@ impl Server {
             Err(e) => return e,
         };
         let r = self.http
-            .patch(url(&format!("/api/v1/collections/{col_id}/reorder")))
+            .patch(self.url(&format!("/api/v1/collections/{col_id}/reorder")))
             .json(&serde_json::json!({"entry_ids": args.entry_ids}))
             .send().await;
         match r {
@@ -1209,7 +1216,7 @@ impl Server {
             Err(e) => return e,
         };
         let r = self.http
-            .post(url(&format!("/api/v1/collections/{col_id}/share")))
+            .post(self.url(&format!("/api/v1/collections/{col_id}/share")))
             .send().await;
         match r {
             Ok(r) if r.status().is_success() => {
@@ -1234,7 +1241,7 @@ impl Server {
             Err(e) => return e,
         };
         let r = self.http
-            .delete(url(&format!("/api/v1/collections/{col_id}/share")))
+            .delete(self.url(&format!("/api/v1/collections/{col_id}/share")))
             .send().await;
         match r {
             Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
@@ -1256,7 +1263,7 @@ impl Server {
             return "Need at least 2 collection names to merge.".into();
         }
         // Resolve all collections to full objects
-        let cols: Vec<serde_json::Value> = match self.http.get(url("/api/v1/collections")).send().await {
+        let cols: Vec<serde_json::Value> = match self.http.get(self.url("/api/v1/collections")).send().await {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
             _ => return "Failed to list collections.".into(),
         };
@@ -1268,7 +1275,7 @@ impl Server {
             };
             // Fetch full collection with entries
             let id = col["id"].as_str().unwrap_or("");
-            let r = self.http.get(url(&format!("/api/v1/collections/{id}"))).send().await;
+            let r = self.http.get(self.url(&format!("/api/v1/collections/{id}"))).send().await;
             match r {
                 Ok(r) if r.status().is_success() => {
                     let full: serde_json::Value = r.json().await.unwrap_or_default();
@@ -1279,7 +1286,7 @@ impl Server {
         }
 
         let r = self.http
-            .post(url("/api/v1/collections/merge"))
+            .post(self.url("/api/v1/collections/merge"))
             .json(&serde_json::json!({"collections": resolved}))
             .send().await;
         match r {
@@ -1312,7 +1319,7 @@ impl Server {
             Err(e) => return e,
         };
         let r = self.http
-            .post(url("/api/v1/collections/batch-move"))
+            .post(self.url("/api/v1/collections/batch-move"))
             .json(&serde_json::json!({
                 "source_id": source_id,
                 "target_id": target_id,
@@ -1339,7 +1346,7 @@ impl Server {
         Parameters(args): Parameters<ViewSharedArgs>,
     ) -> String {
         let r = self.http
-            .get(url(&format!("/api/v1/shared/{}", args.share_token)))
+            .get(self.url(&format!("/api/v1/shared/{}", args.share_token)))
             .send().await;
         match r {
             Ok(r) if r.status().is_success() => {
@@ -1384,7 +1391,7 @@ impl Server {
             let doi = doi.clone();
             async move {
                 let r = http
-                    .post(url("/api/v1/lookup/doi"))
+                    .post(self.url("/api/v1/lookup/doi"))
                     .json(&serde_json::json!({"doi": doi}))
                     .send()
                     .await;
@@ -1407,7 +1414,7 @@ impl Server {
         }
 
         let r = self.http
-            .post(url("/api/v1/citation-keys"))
+            .post(self.url("/api/v1/citation-keys"))
             .json(&serde_json::json!({"entries": entries}))
             .send().await;
         match r {
@@ -1432,7 +1439,7 @@ impl Server {
         Parameters(args): Parameters<ExpandJournalArgs>,
     ) -> String {
         let r = self.http
-            .post(url("/api/v1/journal/expand"))
+            .post(self.url("/api/v1/journal/expand"))
             .json(&serde_json::json!({"abbreviation": args.abbreviation}))
             .send().await;
         match r {
@@ -1572,20 +1579,34 @@ async fn validate_auth() {
 }
 
 #[cfg(test)]
+impl Server {
+    fn new_with_base(api_base: String) -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            api_base,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_url_construction() {
-        let u = url("/api/v1/lookup/doi");
-        assert_eq!(u, "https://ookcite-api.turtletech.us/api/v1/lookup/doi");
+    fn test_url_base_construction() {
+        let u = url_base("https://example.com", "/api/v1/lookup/doi");
+        assert_eq!(u, "https://example.com/api/v1/lookup/doi");
     }
 
     #[test]
-    fn test_url_with_path_params() {
+    fn test_url_base_with_path_params() {
         let id = "abc-123";
-        let u = url(&format!("/api/v1/collections/{id}/entries"));
-        assert_eq!(u, "https://ookcite-api.turtletech.us/api/v1/collections/abc-123/entries");
+        let u = url_base("https://example.com", &format!("/api/v1/collections/{id}/entries"));
+        assert_eq!(u, "https://example.com/api/v1/collections/abc-123/entries");
     }
 
     #[test]
@@ -1700,5 +1721,235 @@ mod tests {
         let args: BatchMoveArgs = serde_json::from_str(r#"{"source": "a", "target": "b", "entry_ids": ["e1", "e2"]}"#).unwrap();
         assert_eq!(args.source, "a");
         assert_eq!(args.entry_ids.len(), 2);
+    }
+
+    // --- Wiremock integration tests ---
+
+    use wiremock::{MockServer, Mock, ResponseTemplate};
+    use wiremock::matchers::{method, path};
+    use rmcp::handler::server::wrapper::Parameters;
+
+    fn test_server(base: &str) -> Server {
+        Server::new_with_base(base.to_string())
+    }
+
+    #[tokio::test]
+    async fn test_validate_doi_success() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/187493a0",
+                "title": "Stimulated Optical Radiation in Ruby",
+                "authors": [{"family": "Maiman", "given": "T. H."}],
+                "date": {"year": 1960},
+                "journal": "Nature",
+                "volume": "187",
+                "issue": "4736"
+            })))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.validate_doi(Parameters(DoiArgs { doi: "10.1038/187493a0".into() })).await;
+        assert!(result.starts_with("VALID"));
+        assert!(result.contains("Stimulated Optical Radiation in Ruby"));
+        assert!(result.contains("Maiman"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_doi_not_found() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.validate_doi(Parameters(DoiArgs { doi: "10.9999/fake".into() })).await;
+        assert!(result.starts_with("INVALID"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_doi_plan_required() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": "plan_required",
+                "message": "This feature requires an academic ($4/mo) or business ($12/mo) plan.",
+                "upgrade_url": "https://my.turtletech.us"
+            })))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.validate_doi(Parameters(DoiArgs { doi: "10.1038/187493a0".into() })).await;
+        assert!(result.contains("INVALID"));
+    }
+
+    #[tokio::test]
+    async fn test_reverse_lookup_success() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "metadata": {
+                        "title": "Stimulated Optical Radiation in Ruby",
+                        "doi": "10.1038/187493a0",
+                        "journal": "Nature"
+                    },
+                    "score": 95.0
+                }
+            ])))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.reverse_lookup(Parameters(ReverseArgs { text: "Maiman 1960 ruby laser".into() })).await;
+        assert!(result.contains("Stimulated Optical Radiation"));
+        assert!(result.contains("10.1038/187493a0"));
+    }
+
+    #[tokio::test]
+    async fn test_reverse_lookup_no_matches() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.reverse_lookup(Parameters(ReverseArgs { text: "nonexistent paper xyz".into() })).await;
+        assert_eq!(result, "No matches found");
+    }
+
+    #[tokio::test]
+    async fn test_health_check_success() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "version": "0.1.0",
+                "cache": {"hits": 1234, "misses": 56}
+            })))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.health_check(Parameters(HealthCheckArgs {})).await;
+        assert!(result.contains("Status: ok"));
+        assert!(result.contains("Version: 0.1.0"));
+        assert!(result.contains("1234 hits"));
+    }
+
+    #[tokio::test]
+    async fn test_health_check_unreachable() {
+        let s = test_server("http://127.0.0.1:1");
+        let result = s.health_check(Parameters(HealthCheckArgs {})).await;
+        assert!(result.starts_with("API unreachable:"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_collection_id_found() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-123", "name": "My Refs", "entry_count": 5}
+            ])))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.resolve_collection_id("My Refs").await;
+        assert_eq!(result, Ok("col-123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_collection_id_not_found() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.resolve_collection_id("Nonexistent").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_collection_id_auth_required() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.resolve_collection_id("anything").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Authentication required"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_references_parallel() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/187493a0",
+                "title": "Test Paper"
+            })))
+            .expect(3)
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.verify_references(Parameters(VerifyArgs {
+            dois: vec!["10.1038/1".into(), "10.1038/2".into(), "10.1038/3".into()],
+        })).await;
+        assert_eq!(result.lines().count(), 3);
+        assert!(result.lines().all(|l| l.starts_with("VALID")));
+    }
+
+    #[tokio::test]
+    async fn test_expand_journal_success() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/journal/expand"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "abbreviation": "JACS",
+                "full_name": "Journal of the American Chemical Society",
+                "found": true
+            })))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.expand_journal(Parameters(ExpandJournalArgs { abbreviation: "JACS".into() })).await;
+        assert!(result.contains("Journal of the American Chemical Society"));
+    }
+
+    #[tokio::test]
+    async fn test_expand_journal_not_found() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/journal/expand"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "abbreviation": "XYZ",
+                "full_name": null,
+                "found": false
+            })))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.expand_journal(Parameters(ExpandJournalArgs { abbreviation: "XYZ".into() })).await;
+        assert!(result.contains("No expansion found"));
+    }
+
+    #[tokio::test]
+    async fn test_error_detail_surfaces_plan_gating() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/collections/col-123/entries"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": "plan_required",
+                "message": "This feature requires an academic ($4/mo) or business ($12/mo) plan."
+            })))
+            .mount(&mock).await;
+
+        // Manually call the endpoint to test error_detail
+        let client = reqwest::Client::new();
+        let resp = client.post(format!("{}/api/v1/collections/col-123/entries", mock.uri()))
+            .json(&serde_json::json!({"metadata": {}}))
+            .send().await.unwrap();
+        let detail = error_detail(resp).await;
+        assert!(detail.contains("academic"));
+        assert!(detail.contains("$4/mo"));
     }
 }
