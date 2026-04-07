@@ -7,9 +7,6 @@ on:
 permissions:
   contents: write
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     strategy:
@@ -71,6 +68,8 @@ jobs:
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           files: |
             ${{ matrix.name }}.tar.gz
@@ -103,7 +102,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
