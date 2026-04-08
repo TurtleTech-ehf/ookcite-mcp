@@ -1537,8 +1537,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Startup auth validation (logs to stderr, which MCP clients ignore)
+    // Startup checks (logs to stderr, which MCP clients ignore)
     validate_auth().await;
+    check_for_updates().await;
 
     let server = Server::new();
     let service = server.serve(rmcp::transport::io::stdio()).await?;
@@ -1590,6 +1591,45 @@ async fn validate_auth() {
         },
         _ => {
             eprintln!("ookcite-mcp: WARNING: could not reach API for key validation");
+        }
+    }
+}
+
+async fn check_for_updates() {
+    let current = env!("CARGO_PKG_VERSION");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap();
+
+    #[derive(Deserialize)]
+    struct NpmPackage {
+        #[serde(rename = "dist-tags")]
+        dist_tags: std::collections::HashMap<String, String>,
+    }
+
+    let resp = client
+        .get("https://registry.npmjs.org/@turtletech/ookcite-mcp")
+        .header("accept", "application/vnd.npm.install-v1+json")
+        .send()
+        .await;
+
+    let latest = match resp {
+        Ok(r) if r.status().is_success() => {
+            r.json::<NpmPackage>()
+                .await
+                .ok()
+                .and_then(|p| p.dist_tags.get("latest").cloned())
+        }
+        _ => None,
+    };
+
+    if let Some(ref latest) = latest {
+        if latest != current {
+            eprintln!(
+                "ookcite-mcp: UPDATE AVAILABLE: v{current} -> v{latest}. \
+                 Run: npx @turtletech/ookcite-mcp@latest setup"
+            );
         }
     }
 }
