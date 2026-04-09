@@ -114,4 +114,10 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
-          npm publish --access public --provenance
+          npm publish --access public --provenance 2>&1 || {
+            if npm view "@turtletech/ookcite-mcp@$VERSION" version >/dev/null 2>&1; then
+              echo "Version $VERSION already published, skipping"
+            else
+              exit 1
+            fi
+          }
