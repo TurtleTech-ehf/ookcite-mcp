@@ -426,6 +426,9 @@ impl Server {
             Ok(resp) if resp.status().as_u16() == 403 => {
                 format!("ACCESS DENIED: {}", error_detail(resp).await)
             }
+            Ok(resp) if resp.status().is_server_error() => {
+                format!("TEMPORARY ERROR: {}", error_detail(resp).await)
+            }
             Ok(_) => format!(
                 "INVALID: DOI {} not found. This citation may be a hallucination.",
                 args.doi
@@ -471,6 +474,7 @@ impl Server {
             }
             Ok(r) if r.status().as_u16() == 429 => format!("RATE LIMITED: {}", error_detail(r).await),
             Ok(r) if r.status().as_u16() == 403 => format!("ACCESS DENIED: {}", error_detail(r).await),
+            Ok(r) if r.status().is_server_error() => format!("TEMPORARY ERROR: {}", error_detail(r).await),
             Ok(_) => format!("ISBN {} not found", args.isbn),
             Err(e) => format!("ERROR: {e}"),
         }
@@ -506,6 +510,7 @@ impl Server {
             }
             Ok(r) if r.status().as_u16() == 429 => format!("RATE LIMITED: {}", error_detail(r).await),
             Ok(r) if r.status().as_u16() == 403 => format!("ACCESS DENIED: {}", error_detail(r).await),
+            Ok(r) if r.status().is_server_error() => format!("TEMPORARY ERROR: {}", error_detail(r).await),
             Ok(_) => "No matches found".into(),
             Err(e) => format!("Reverse lookup failed: {e}"),
         }
@@ -1857,6 +1862,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_validate_doi_temporary_upstream_failure() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(503)
+                .set_body_string("Lookup service temporarily unavailable. Please try again shortly."))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.validate_doi(Parameters(DoiArgs { doi: "10.1038/187493a0".into() })).await;
+        assert!(result.starts_with("TEMPORARY ERROR"));
+        assert!(!result.contains("INVALID"));
+    }
+
+    #[tokio::test]
     async fn test_reverse_lookup_success() {
         let mock = MockServer::start().await;
         Mock::given(method("POST")).and(path("/api/v1/reverse"))
@@ -2051,6 +2070,20 @@ mod tests {
         let s = test_server(&mock.uri());
         let result = s.reverse_lookup(Parameters(ReverseArgs { text: "test".into() })).await;
         assert!(result.starts_with("RATE LIMITED"));
+    }
+
+    #[tokio::test]
+    async fn test_reverse_lookup_temporary_upstream_failure() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(503)
+                .set_body_string("Lookup service temporarily unavailable. Please try again shortly."))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.reverse_lookup(Parameters(ReverseArgs { text: "test".into() })).await;
+        assert!(result.starts_with("TEMPORARY ERROR"));
+        assert!(!result.contains("No matches"));
     }
 
     #[tokio::test]
