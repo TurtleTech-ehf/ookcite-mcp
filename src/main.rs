@@ -10,6 +10,7 @@
 //! * **validate_doi** : Check if a DOI exists (anti-hallucination)
 //! * **lookup_isbn** : Look up a book by ISBN
 //! * **reverse_lookup** : Find a paper from messy citation text
+//! * **parse_citations** : Parse raw bibliography text into structured units
 //! * **health_check** : Check API availability and health
 //!
 //! **Formatting**
@@ -118,6 +119,12 @@ struct IsbnArgs {
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ReverseArgs {
     /// Free-text search: DOI, ISBN, author name, title, journal, or any combination (e.g. "Goswami JCTC 2026", "Einstein relativity 1905")
+    text: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ParseCitationsArgs {
+    /// Raw bibliography text (can contain multiple citations separated by newlines or numbered)
     text: String,
 }
 
@@ -513,6 +520,55 @@ impl Server {
             Ok(r) if r.status().is_server_error() => format!("TEMPORARY ERROR: {}", error_detail(r).await),
             Ok(_) => "No matches found".into(),
             Err(e) => format!("Reverse lookup failed: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "parse_citations",
+        description = "Parse raw bibliography text into structured citation units. Splits multi-citation blocks, extracts DOIs/ISBNs, and provides title/author/year hints. Use this to break down pasted bibliographies before resolving individual citations."
+    )]
+    async fn parse_citations(&self, Parameters(args): Parameters<ParseCitationsArgs>) -> String {
+        let r = self.request(endpoints::PARSE_CITATIONS, &[])
+            .json(&serde_json::json!({"text": args.text}))
+            .send()
+            .await;
+        match r {
+            Ok(resp) if resp.status().is_success() => {
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                let citations = body["citations"].as_array();
+                match citations {
+                    Some(arr) if arr.is_empty() => "No citations found in text".into(),
+                    Some(arr) => {
+                        let mut out = Vec::new();
+                        for c in arr {
+                            let idx = c["index"].as_u64().unwrap_or(0);
+                            let source = c["source_text"].as_str().unwrap_or("?");
+                            let cleaned = c["cleaned_text"].as_str().unwrap_or(source);
+                            let title = c["title_hint"].as_str();
+                            let author = c["author_hint"].as_str();
+                            let year = c["year_hint"].as_i64();
+                            let parser = c["parser"].as_str().unwrap_or("regex");
+
+                            let mut entry = format!("{}. {}", idx + 1, cleaned);
+                            let mut hints = Vec::new();
+                            if let Some(t) = title { hints.push(format!("title: {t}")); }
+                            if let Some(a) = author { hints.push(format!("author: {a}")); }
+                            if let Some(y) = year { hints.push(format!("year: {y}")); }
+                            if !hints.is_empty() {
+                                entry.push_str(&format!("\n   Hints: {} (parser: {})", hints.join(", "), parser));
+                            }
+                            out.push(entry);
+                        }
+                        format!("Found {} citations:\n\n{}", arr.len(), out.join("\n\n"))
+                    }
+                    None => "No citations found in text".into(),
+                }
+            }
+            Ok(r) if r.status().as_u16() == 429 => format!("RATE LIMITED: {}", error_detail(r).await),
+            Ok(r) if r.status().as_u16() == 403 => format!("ACCESS DENIED: {}", error_detail(r).await),
+            Ok(r) if r.status().is_server_error() => format!("TEMPORARY ERROR: {}", error_detail(r).await),
+            Ok(_) => "Failed to parse citations".into(),
+            Err(e) => format!("Parse citations failed: {e}"),
         }
     }
 
@@ -1483,6 +1539,7 @@ impl ServerHandler for Server {
              use validate_doi to verify DOIs exist before citing them. \
              use lookup_isbn for book references. \
              use reverse_lookup when given a messy or partial citation string. \
+             use parse_citations to split raw bibliography text into individual citation units before resolving. \
              use format_citation to format a DOI in any CSL style (APA, IEEE, Chicago, Nature, etc.). \
              use verify_references to batch-check multiple DOIs. \
              use batch_format to resolve and format multiple citations at once. \
