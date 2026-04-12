@@ -121,6 +121,18 @@ struct IsbnArgs {
 struct ReverseArgs {
     /// Free-text search: DOI, ISBN, author name, title, journal, or any combination (e.g. "Goswami JCTC 2026", "Einstein relativity 1905")
     text: String,
+    /// Optional author name to filter/boost results (e.g. "Goswami")
+    #[serde(default)]
+    author: Option<String>,
+    /// Optional journal name to filter/boost results (e.g. "MethodsX", "JCTC")
+    #[serde(default)]
+    journal: Option<String>,
+    /// Optional publication year to filter/boost results (e.g. 2026)
+    #[serde(default)]
+    year: Option<i32>,
+    /// Optional ORCID ID to filter/boost results by author's ORCID (e.g. "0000-0002-1234-5678")
+    #[serde(default)]
+    orcid: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -498,11 +510,29 @@ impl Server {
 
     #[tool(
         name = "reverse_lookup",
-        description = "Parse a messy citation string and find the matching paper. Returns ranked candidates."
+        description = "Parse a messy citation string and find the matching paper. Returns ranked candidates. Optional filters (author, journal, year, orcid) boost matching results."
     )]
     async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> String {
+        let mut body = serde_json::json!({"text": args.text});
+        // Build filters object for optional search cues
+        let mut filters = serde_json::Map::new();
+        if let Some(author) = &args.author {
+            filters.insert("author".into(), serde_json::json!(author));
+        }
+        if let Some(journal) = &args.journal {
+            filters.insert("journal".into(), serde_json::json!(journal));
+        }
+        if let Some(year) = args.year {
+            filters.insert("year".into(), serde_json::json!(year));
+        }
+        if let Some(orcid) = &args.orcid {
+            filters.insert("orcid".into(), serde_json::json!(orcid));
+        }
+        if !filters.is_empty() {
+            body["filters"] = serde_json::Value::Object(filters);
+        }
         let r = self.request(endpoints::REVERSE, &[])
-            .json(&serde_json::json!({"text": args.text}))
+            .json(&body)
             .send()
             .await;
         match r {
