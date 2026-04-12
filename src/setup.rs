@@ -1,3 +1,5 @@
+use ookcite_mcp::endpoints;
+
 const API: &str = "https://ookcite-api.turtletech.us";
 
 #[derive(serde::Deserialize)]
@@ -27,7 +29,7 @@ fn find_binary() -> Option<String> {
 async fn validate_key(api_key: &str) -> Option<MeResponse> {
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("{API}/api/v1/me"))
+        .get(endpoints::ME.url(API, &[]))
         .header("origin", "https://ookcite.turtletech.us")
         .header("authorization", format!("Bearer {api_key}"))
         .send()

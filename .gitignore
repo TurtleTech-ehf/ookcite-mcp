@@ -1,1 +1,6 @@
 /target
+
+# NEVER commit the plaintext OpenAPI spec -- it leaks the private
+# ttech-cite API surface. Only contract/openapi.json.age is public.
+/contract/openapi.json
+/contract/openapi.json.plain
