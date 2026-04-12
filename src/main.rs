@@ -71,12 +71,9 @@ use rmcp::{
 };
 use futures::{stream, StreamExt};
 use serde::Deserialize;
+use ookcite_mcp::endpoints::{self, Endpoint};
 
 const API: &str = "https://ookcite-api.turtletech.us";
-
-fn url_base(base: &str, path: &str) -> String {
-    format!("{base}{path}")
-}
 
 #[derive(Clone)]
 struct Server {
@@ -354,8 +351,18 @@ impl Server {
         }
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}{path}", self.api_base)
+    /// Build a request to a registered endpoint, substituting any path
+    /// placeholders. Method is taken from the registry, ensuring the call
+    /// site cannot drift from the contract.
+    fn request(&self, ep: Endpoint, params: &[(&str, &str)]) -> reqwest::RequestBuilder {
+        let url = format!("{}{}", self.api_base, ep.render(params));
+        match ep.method {
+            "GET" => self.http.get(url),
+            "POST" => self.http.post(url),
+            "PATCH" => self.http.patch(url),
+            "DELETE" => self.http.delete(url),
+            other => panic!("ookcite-mcp: unsupported HTTP method `{other}` in registry for {}", ep.path),
+        }
     }
 
     #[tool(
@@ -366,11 +373,10 @@ impl Server {
         &self,
         Parameters(args): Parameters<StyleSearchArgs>,
     ) -> String {
-        let req_url = self.url(&format!(
-            "/api/v1/styles/search?q={}",
-            urlencoding::encode(&args.query)
-        ));
-        let r = self.http.get(&req_url).send().await;
+        let r = self.request(endpoints::STYLES_SEARCH, &[])
+            .query(&[("q", args.query.as_str())])
+            .send()
+            .await;
         match r {
             Ok(resp) if resp.status().is_success() => {
                 let styles: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
@@ -391,9 +397,7 @@ impl Server {
         description = "Check if a DOI exists and return its metadata. Use this to verify citations are real. Returns title, authors, year, journal, volume, and issue."
     )]
     async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
-        let r = self
-            .http
-            .post(self.url("/api/v1/lookup/doi"))
+        let r = self.request(endpoints::LOOKUP_DOI, &[])
             .json(&serde_json::json!({"doi": args.doi}))
             .send()
             .await;
@@ -442,9 +446,7 @@ impl Server {
         description = "Look up a book by ISBN. Returns title, authors, publisher, year, and pages."
     )]
     async fn lookup_isbn(&self, Parameters(args): Parameters<IsbnArgs>) -> String {
-        let r = self
-            .http
-            .post(self.url("/api/v1/lookup/isbn"))
+        let r = self.request(endpoints::LOOKUP_ISBN, &[])
             .json(&serde_json::json!({"isbn": args.isbn}))
             .send()
             .await;
@@ -485,9 +487,7 @@ impl Server {
         description = "Parse a messy citation string and find the matching paper. Returns ranked candidates."
     )]
     async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> String {
-        let r = self
-            .http
-            .post(self.url("/api/v1/reverse"))
+        let r = self.request(endpoints::REVERSE, &[])
             .json(&serde_json::json!({"text": args.text}))
             .send()
             .await;
@@ -521,9 +521,7 @@ impl Server {
         description = "Format a citation by DOI in a specific CSL style. Returns both the in-text marker and the full bibliography entry."
     )]
     async fn format_citation(&self, Parameters(args): Parameters<FormatArgs>) -> String {
-        let lookup = self
-            .http
-            .post(self.url("/api/v1/lookup/doi"))
+        let lookup = self.request(endpoints::LOOKUP_DOI, &[])
             .json(&serde_json::json!({"doi": args.doi}))
             .send()
             .await;
@@ -535,9 +533,7 @@ impl Server {
             Err(e) => return format!("ERROR: {e}"),
         };
 
-        let fmt = self
-            .http
-            .post(self.url("/api/v1/format"))
+        let fmt = self.request(endpoints::FORMAT, &[])
             .json(&serde_json::json!({"entries": [meta], "style": args.style, "locale": "en-US"}))
             .send()
             .await;
@@ -561,12 +557,14 @@ impl Server {
         description = "Generate a grouped in-text citation marker (e.g., '[1-3]') for multiple DOIs."
     )]
     async fn group_cite(&self, Parameters(args): Parameters<GroupCiteArgs>) -> String {
+        let api_base = self.api_base.clone();
         let futs: Vec<_> = args.dois.iter().map(|doi| {
             let http = self.http.clone();
+            let api_base = api_base.clone();
             let doi = doi.clone();
             async move {
                 let r = http
-                    .post(self.url("/api/v1/lookup/doi"))
+                    .post(endpoints::LOOKUP_DOI.url(&api_base, &[]))
                     .json(&serde_json::json!({"doi": doi}))
                     .send()
                     .await;
@@ -589,9 +587,7 @@ impl Server {
         }
 
         let indices: Vec<usize> = (0..entries.len()).collect();
-        let r = self
-            .http
-            .post(self.url("/api/v1/format/group-cite"))
+        let r = self.request(endpoints::FORMAT_GROUP_CITE, &[])
             .json(&serde_json::json!({
                 "entries": entries,
                 "indices": indices,
@@ -618,12 +614,14 @@ impl Server {
         &self,
         Parameters(args): Parameters<VerifyArgs>,
     ) -> String {
+        let api_base = self.api_base.clone();
         let futs: Vec<_> = args.dois.iter().map(|doi| {
             let http = self.http.clone();
+            let api_base = api_base.clone();
             let doi = doi.clone();
             async move {
                 let r = http
-                    .post(self.url("/api/v1/lookup/doi"))
+                    .post(endpoints::LOOKUP_DOI.url(&api_base, &[]))
                     .json(&serde_json::json!({"doi": doi}))
                     .send()
                     .await;
@@ -648,12 +646,14 @@ impl Server {
     )]
     async fn batch_format(&self, Parameters(args): Parameters<BatchArgs>) -> String {
         // Resolve all citations in parallel (up to 10 concurrent)
+        let api_base = self.api_base.clone();
         let futs: Vec<_> = args.citations.iter().enumerate().map(|(i, text)| {
             let http = self.http.clone();
+            let api_base = api_base.clone();
             let text = text.clone();
             async move {
                 let r = http
-                    .post(self.url("/api/v1/reverse"))
+                    .post(endpoints::REVERSE.url(&api_base, &[]))
                     .json(&serde_json::json!({"text": text}))
                     .send()
                     .await;
@@ -685,9 +685,7 @@ impl Server {
         if entries.is_empty() {
             return format!("No citations resolved.\n{}", errors.join("\n"));
         }
-        let fmt = self
-            .http
-            .post(self.url("/api/v1/format"))
+        let fmt = self.request(endpoints::FORMAT, &[])
             .json(&serde_json::json!({"entries": entries, "style": args.style, "locale": "en-US"}))
             .send()
             .await;
@@ -721,7 +719,7 @@ impl Server {
         &self,
         #[allow(unused)] Parameters(_args): Parameters<ListCollectionsArgs>,
     ) -> String {
-        let r = self.http.get(self.url("/api/v1/collections")).send().await;
+        let r = self.request(endpoints::COLLECTIONS_LIST, &[]).send().await;
         match r {
             Ok(r) if r.status().is_success() => {
                 let cols: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
@@ -766,7 +764,7 @@ impl Server {
             return format!("Could not resolve: {}", args.query);
         };
 
-        let r = self.http.post(self.url(&format!("/api/v1/collections/{col_id}/entries")))
+        let r = self.request(endpoints::COLLECTION_ENTRIES_ADD, &[("id", &col_id)])
             .json(&serde_json::json!({"metadata": metadata}))
             .send().await;
         match r {
@@ -792,7 +790,7 @@ impl Server {
             Err(e) => return e,
         };
 
-        let r = self.http.get(self.url(&format!("/api/v1/collections/{col_id}/export.bib"))).send().await;
+        let r = self.request(endpoints::COLLECTION_EXPORT_BIB, &[("id", &col_id)]).send().await;
         match r {
             Ok(r) if r.status().is_success() => r.text().await.unwrap_or_else(|_| "Export failed.".into()),
             _ => "Failed to export collection.".into(),
@@ -812,7 +810,7 @@ impl Server {
             Err(e) => return e,
         };
 
-        let r = self.http.get(self.url(&format!("/api/v1/collections/{col_id}"))).send().await;
+        let r = self.request(endpoints::COLLECTION_GET, &[("id", &col_id)]).send().await;
         let collection: serde_json::Value = match r {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
             _ => return "Failed to load collection.".into(),
@@ -848,7 +846,7 @@ impl Server {
     // --- Helper: resolve collection name to ID ---
 
     async fn resolve_collection_id(&self, name: &str) -> Result<String, String> {
-        let cols: Vec<serde_json::Value> = match self.http.get(self.url("/api/v1/collections")).send().await {
+        let cols: Vec<serde_json::Value> = match self.request(endpoints::COLLECTIONS_LIST, &[]).send().await {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
             Ok(r) if r.status().as_u16() == 401 => return Err("Authentication required. Set OOKCITE_API_KEY.".into()),
             _ => return Err("Failed to list collections.".into()),
@@ -864,7 +862,7 @@ impl Server {
         match self.resolve_collection_id(name).await {
             Ok(id) => Ok(id),
             Err(_) => {
-                let r = self.http.post(self.url("/api/v1/collections"))
+                let r = self.request(endpoints::COLLECTIONS_CREATE, &[])
                     .json(&serde_json::json!({"name": name}))
                     .send().await;
                 match r {
@@ -882,14 +880,14 @@ impl Server {
     async fn resolve_query_to_metadata(&self, query: &str) -> Option<serde_json::Value> {
         let q = query.trim();
         if q.starts_with("10.") {
-            let r = self.http.post(self.url("/api/v1/lookup/doi"))
+            let r = self.request(endpoints::LOOKUP_DOI, &[])
                 .json(&serde_json::json!({"doi": q})).send().await;
             match r {
                 Ok(r) if r.status().is_success() => Some(r.json::<serde_json::Value>().await.unwrap_or_default()),
                 _ => None,
             }
         } else {
-            let r = self.http.post(self.url("/api/v1/reverse"))
+            let r = self.request(endpoints::REVERSE, &[])
                 .json(&serde_json::json!({"text": q})).send().await;
             match r {
                 Ok(r) if r.status().is_success() => {
@@ -911,7 +909,7 @@ impl Server {
         &self,
         #[allow(unused)] Parameters(_args): Parameters<HealthCheckArgs>,
     ) -> String {
-        let r = self.http.get(self.url("/api/health")).send().await;
+        let r = self.request(endpoints::HEALTH, &[]).send().await;
         match r {
             Ok(resp) if resp.status().is_success() => {
                 let data: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -953,8 +951,7 @@ impl Server {
         };
         let form = reqwest::multipart::Form::new().part("file", part);
 
-        let r = self.http
-            .post(self.url(&format!("/api/v1/collections/{col_id}/import")))
+        let r = self.request(endpoints::COLLECTION_IMPORT, &[("id", &col_id)])
             .multipart(form)
             .send().await;
         match r {
@@ -987,8 +984,7 @@ impl Server {
             return format!("Could not resolve: {}", args.query);
         };
 
-        let r = self.http
-            .post(self.url(&format!("/api/v1/collections/{col_id}/check-duplicates")))
+        let r = self.request(endpoints::COLLECTION_CHECK_DUPLICATES, &[("id", &col_id)])
             .json(&serde_json::json!({"metadata": metadata}))
             .send().await;
         match r {
@@ -1032,14 +1028,14 @@ impl Server {
             async move {
                 let q = query.trim();
                 let meta = if q.starts_with("10.") {
-                    let r = http.post(url_base(&base, "/api/v1/lookup/doi"))
+                    let r = http.post(endpoints::LOOKUP_DOI.url(&base, &[]))
                         .json(&serde_json::json!({"doi": q})).send().await;
                     match r {
                         Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
                         _ => None,
                     }
                 } else {
-                    let r = http.post(url_base(&base, "/api/v1/reverse"))
+                    let r = http.post(endpoints::REVERSE.url(&base, &[]))
                         .json(&serde_json::json!({"text": q})).send().await;
                     match r {
                         Ok(r) if r.status().is_success() => {
@@ -1070,8 +1066,7 @@ impl Server {
             return format!("No citations resolved.\n{}", errors.join("\n"));
         }
 
-        let r = self.http
-            .post(self.url(&format!("/api/v1/collections/{col_id}/entries/batch")))
+        let r = self.request(endpoints::COLLECTION_ENTRIES_BATCH, &[("id", &col_id)])
             .json(&serde_json::json!({"entries": entries}))
             .send().await;
         match r {
@@ -1104,7 +1099,7 @@ impl Server {
             Ok(id) => id,
             Err(e) => return e,
         };
-        let r = self.http.delete(self.url(&format!("/api/v1/collections/{col_id}"))).send().await;
+        let r = self.request(endpoints::COLLECTION_DELETE, &[("id", &col_id)]).send().await;
         match r {
             Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
                 format!("Deleted collection '{}'.", args.collection)
@@ -1139,8 +1134,7 @@ impl Server {
         if body.is_empty() {
             return "Nothing to update. Provide name, description, or default_style.".into();
         }
-        let r = self.http
-            .patch(self.url(&format!("/api/v1/collections/{col_id}")))
+        let r = self.request(endpoints::COLLECTION_UPDATE, &[("id", &col_id)])
             .json(&serde_json::Value::Object(body))
             .send().await;
         match r {
@@ -1163,8 +1157,7 @@ impl Server {
             Ok(id) => id,
             Err(e) => return e,
         };
-        let r = self.http
-            .delete(self.url(&format!("/api/v1/collections/{col_id}/entries/{}", args.entry_id)))
+        let r = self.request(endpoints::COLLECTION_ENTRY_REMOVE, &[("id", &col_id), ("eid", &args.entry_id)])
             .send().await;
         match r {
             Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
@@ -1186,8 +1179,7 @@ impl Server {
             Ok(id) => id,
             Err(e) => return e,
         };
-        let r = self.http
-            .patch(self.url(&format!("/api/v1/collections/{col_id}/tags")))
+        let r = self.request(endpoints::COLLECTION_TAGS, &[("id", &col_id)])
             .json(&serde_json::json!({"tags": args.tags}))
             .send().await;
         match r {
@@ -1210,8 +1202,7 @@ impl Server {
             Ok(id) => id,
             Err(e) => return e,
         };
-        let r = self.http
-            .patch(self.url(&format!("/api/v1/collections/{col_id}/reorder")))
+        let r = self.request(endpoints::COLLECTION_REORDER, &[("id", &col_id)])
             .json(&serde_json::json!({"entry_ids": args.entry_ids}))
             .send().await;
         match r {
@@ -1236,8 +1227,7 @@ impl Server {
             Ok(id) => id,
             Err(e) => return e,
         };
-        let r = self.http
-            .post(self.url(&format!("/api/v1/collections/{col_id}/share")))
+        let r = self.request(endpoints::COLLECTION_SHARE, &[("id", &col_id)])
             .send().await;
         match r {
             Ok(r) if r.status().is_success() => {
@@ -1261,8 +1251,7 @@ impl Server {
             Ok(id) => id,
             Err(e) => return e,
         };
-        let r = self.http
-            .delete(self.url(&format!("/api/v1/collections/{col_id}/share")))
+        let r = self.request(endpoints::COLLECTION_UNSHARE, &[("id", &col_id)])
             .send().await;
         match r {
             Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
@@ -1284,7 +1273,7 @@ impl Server {
             return "Need at least 2 collection names to merge.".into();
         }
         // Resolve all collections to full objects
-        let cols: Vec<serde_json::Value> = match self.http.get(self.url("/api/v1/collections")).send().await {
+        let cols: Vec<serde_json::Value> = match self.request(endpoints::COLLECTIONS_LIST, &[]).send().await {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
             _ => return "Failed to list collections.".into(),
         };
@@ -1296,7 +1285,7 @@ impl Server {
             };
             // Fetch full collection with entries
             let id = col["id"].as_str().unwrap_or("");
-            let r = self.http.get(self.url(&format!("/api/v1/collections/{id}"))).send().await;
+            let r = self.request(endpoints::COLLECTION_GET, &[("id", id)]).send().await;
             match r {
                 Ok(r) if r.status().is_success() => {
                     let full: serde_json::Value = r.json().await.unwrap_or_default();
@@ -1306,8 +1295,7 @@ impl Server {
             }
         }
 
-        let r = self.http
-            .post(self.url("/api/v1/collections/merge"))
+        let r = self.request(endpoints::COLLECTIONS_MERGE, &[])
             .json(&serde_json::json!({"collections": resolved}))
             .send().await;
         match r {
@@ -1339,8 +1327,7 @@ impl Server {
             Ok(id) => id,
             Err(e) => return e,
         };
-        let r = self.http
-            .post(self.url("/api/v1/collections/batch-move"))
+        let r = self.request(endpoints::COLLECTIONS_BATCH_MOVE, &[])
             .json(&serde_json::json!({
                 "source_id": source_id,
                 "target_id": target_id,
@@ -1366,8 +1353,7 @@ impl Server {
         &self,
         Parameters(args): Parameters<ViewSharedArgs>,
     ) -> String {
-        let r = self.http
-            .get(self.url(&format!("/api/v1/shared/{}", args.share_token)))
+        let r = self.request(endpoints::SHARED_GET, &[("token", &args.share_token)])
             .send().await;
         match r {
             Ok(r) if r.status().is_success() => {
@@ -1407,12 +1393,14 @@ impl Server {
         Parameters(args): Parameters<GenerateCitationKeysArgs>,
     ) -> String {
         // Resolve all DOIs to metadata in parallel
+        let api_base = self.api_base.clone();
         let futs: Vec<_> = args.dois.iter().map(|doi| {
             let http = self.http.clone();
+            let api_base = api_base.clone();
             let doi = doi.clone();
             async move {
                 let r = http
-                    .post(self.url("/api/v1/lookup/doi"))
+                    .post(endpoints::LOOKUP_DOI.url(&api_base, &[]))
                     .json(&serde_json::json!({"doi": doi}))
                     .send()
                     .await;
@@ -1434,8 +1422,7 @@ impl Server {
             return "Could not resolve any DOIs.".into();
         }
 
-        let r = self.http
-            .post(self.url("/api/v1/citation-keys"))
+        let r = self.request(endpoints::CITATION_KEYS, &[])
             .json(&serde_json::json!({"entries": entries}))
             .send().await;
         match r {
@@ -1459,8 +1446,7 @@ impl Server {
         &self,
         Parameters(args): Parameters<ExpandJournalArgs>,
     ) -> String {
-        let r = self.http
-            .post(self.url("/api/v1/journal/expand"))
+        let r = self.request(endpoints::JOURNAL_EXPAND, &[])
             .json(&serde_json::json!({"abbreviation": args.abbreviation}))
             .send().await;
         match r {
@@ -1658,15 +1644,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_url_base_construction() {
-        let u = url_base("https://example.com", "/api/v1/lookup/doi");
+    fn test_endpoint_url_construction() {
+        let u = endpoints::LOOKUP_DOI.url("https://example.com", &[]);
         assert_eq!(u, "https://example.com/api/v1/lookup/doi");
     }
 
     #[test]
-    fn test_url_base_with_path_params() {
-        let id = "abc-123";
-        let u = url_base("https://example.com", &format!("/api/v1/collections/{id}/entries"));
+    fn test_endpoint_url_with_path_params() {
+        let u = endpoints::COLLECTION_ENTRIES_ADD
+            .url("https://example.com", &[("id", "abc-123")]);
         assert_eq!(u, "https://example.com/api/v1/collections/abc-123/entries");
     }
 

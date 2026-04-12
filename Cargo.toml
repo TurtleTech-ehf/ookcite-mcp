@@ -21,11 +21,28 @@ tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 anyhow = "1"
 urlencoding = "2.1.3"
+# age + secrecy drive the contract-encrypt helper and the contract test.
+# Kept as normal deps (not dev-only) so `cargo run --bin contract-encrypt`
+# works in the regen script without a separate build profile.
+age = "0.10"
+secrecy = "0.8"
 
 [dev-dependencies]
 wiremock = "0.6"
 http = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[lib]
+name = "ookcite_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ookcite-mcp"
+path = "src/main.rs"
+
+[[bin]]
+name = "contract-encrypt"
+path = "src/bin/contract-encrypt.rs"
 
 [package.metadata.binstall]
 # Directs binstall to your GitHub Releases format
