@@ -11,6 +11,7 @@
 //! * **lookup_isbn** : Look up a book by ISBN
 //! * **reverse_lookup** : Find a paper from messy citation text
 //! * **parse_citations** : Parse raw bibliography text into structured units
+//! * **debug_resolve** : Debug why a citation resolves incorrectly
 //! * **health_check** : Check API availability and health
 //!
 //! **Formatting**
@@ -125,6 +126,12 @@ struct ReverseArgs {
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ParseCitationsArgs {
     /// Raw bibliography text (can contain multiple citations separated by newlines or numbered)
+    text: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct DebugResolveArgs {
+    /// Citation text to debug (free-text query)
     text: String,
 }
 
@@ -569,6 +576,76 @@ impl Server {
             Ok(r) if r.status().is_server_error() => format!("TEMPORARY ERROR: {}", error_detail(r).await),
             Ok(_) => "Failed to parse citations".into(),
             Err(e) => format!("Parse citations failed: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "debug_resolve",
+        description = "Debug why a citation resolves incorrectly. Returns the search query used, active ranking weights, and per-backend candidate lists with scores. Use this to diagnose bad matches."
+    )]
+    async fn debug_resolve(&self, Parameters(args): Parameters<DebugResolveArgs>) -> String {
+        let r = self.request(endpoints::RESOLVE_DEBUG, &[])
+            .json(&serde_json::json!({
+                "input": {"text": args.text}
+            }))
+            .send()
+            .await;
+        match r {
+            Ok(resp) if resp.status().is_success() => {
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+
+                let mut out = Vec::new();
+
+                // Query info
+                let cleaned = body["cleaned_query"].as_str().unwrap_or("?");
+                let search = body["search_query"].as_str().unwrap_or("?");
+                out.push(format!("Cleaned query: {cleaned}"));
+                out.push(format!("Search query: {search}"));
+                if let Some(broad) = body["broadened_query"].as_str() {
+                    out.push(format!("Broadened query: {broad}"));
+                }
+
+                // Weight source
+                let weight_src = body["weight_source"].as_str().unwrap_or("built_in");
+                out.push(format!("Weight source: {weight_src}"));
+
+                // Final result summary
+                if let Some(paper) = body["final_response"]["paper"].as_object() {
+                    let title = paper.get("title").and_then(|t| t.as_str()).unwrap_or("?");
+                    let doi = paper.get("doi").and_then(|d| d.as_str()).unwrap_or("?");
+                    out.push(format!("\nMatched: {title}"));
+                    out.push(format!("DOI: {doi}"));
+                } else {
+                    out.push("\nNo match found".into());
+                }
+
+                // Per-backend candidates
+                if let Some(backends) = body["backends"].as_array() {
+                    for backend in backends {
+                        let name = backend["backend"].as_str().unwrap_or("?");
+                        let query = backend["query"].as_str().unwrap_or("");
+                        out.push(format!("\n[{name}] query: {query}"));
+                        if let Some(candidates) = backend["candidates"].as_array() {
+                            for (i, c) in candidates.iter().take(3).enumerate() {
+                                let title = c["metadata"]["title"].as_str().unwrap_or("?");
+                                let score = c["score"].as_f64().unwrap_or(0.0);
+                                out.push(format!("  {}. [score:{:.0}] {}", i + 1, score, title));
+                            }
+                            if candidates.len() > 3 {
+                                out.push(format!("  ... and {} more", candidates.len() - 3));
+                            }
+                        }
+                    }
+                }
+
+                out.join("\n")
+            }
+            Ok(r) if r.status().as_u16() == 401 => "AUTH REQUIRED: debug_resolve requires authentication (API key)".into(),
+            Ok(r) if r.status().as_u16() == 429 => format!("RATE LIMITED: {}", error_detail(r).await),
+            Ok(r) if r.status().as_u16() == 403 => format!("ACCESS DENIED: {}", error_detail(r).await),
+            Ok(r) if r.status().is_server_error() => format!("TEMPORARY ERROR: {}", error_detail(r).await),
+            Ok(_) => "Debug resolve failed".into(),
+            Err(e) => format!("Debug resolve failed: {e}"),
         }
     }
 
@@ -1540,6 +1617,7 @@ impl ServerHandler for Server {
              use lookup_isbn for book references. \
              use reverse_lookup when given a messy or partial citation string. \
              use parse_citations to split raw bibliography text into individual citation units before resolving. \
+             use debug_resolve to diagnose why a citation resolves to the wrong paper (requires API key). \
              use format_citation to format a DOI in any CSL style (APA, IEEE, Chicago, Nature, etc.). \
              use verify_references to batch-check multiple DOIs. \
              use batch_format to resolve and format multiple citations at once. \
