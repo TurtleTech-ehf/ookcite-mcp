@@ -103,6 +103,18 @@ async fn error_detail(resp: reqwest::Response) -> String {
     }
 }
 
+async fn classify_lookup_doi_failure(resp: reqwest::Response, doi: &str) -> String {
+    if resp.status().as_u16() == 429 {
+        format!("RATE LIMITED {doi} : {}", error_detail(resp).await)
+    } else if resp.status().as_u16() == 403 {
+        format!("ACCESS DENIED {doi} : {}", error_detail(resp).await)
+    } else if resp.status().is_server_error() {
+        format!("TEMPORARY ERROR {doi} : {}", error_detail(resp).await)
+    } else {
+        format!("INVALID {doi} : HTTP {}", resp.status())
+    }
+}
+
 // Args
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -794,7 +806,7 @@ impl Server {
                         let title = meta["title"].as_str().unwrap_or("?");
                         format!("VALID {doi} : {title}")
                     }
-                    Ok(resp) => format!("INVALID {doi} : HTTP {}", resp.status()),
+                    Ok(resp) => classify_lookup_doi_failure(resp, &doi).await,
                     Err(e) => format!("ERROR {doi} : {e}"),
                 }
             }
@@ -1948,7 +1960,7 @@ mod tests {
     // --- Wiremock integration tests ---
 
     use wiremock::{MockServer, Mock, ResponseTemplate};
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_string_contains, method, path};
     use rmcp::handler::server::wrapper::Parameters;
 
     fn test_server(base: &str) -> Server {
@@ -2053,7 +2065,15 @@ mod tests {
             .mount(&mock).await;
 
         let s = test_server(&mock.uri());
-        let result = s.reverse_lookup(Parameters(ReverseArgs { text: "Maiman 1960 ruby laser".into() })).await;
+        let result = s
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "Maiman 1960 ruby laser".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+            }))
+            .await;
         assert!(result.contains("Stimulated Optical Radiation"));
         assert!(result.contains("10.1038/187493a0"));
     }
@@ -2066,7 +2086,15 @@ mod tests {
             .mount(&mock).await;
 
         let s = test_server(&mock.uri());
-        let result = s.reverse_lookup(Parameters(ReverseArgs { text: "nonexistent paper xyz".into() })).await;
+        let result = s
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "nonexistent paper xyz".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+            }))
+            .await;
         assert_eq!(result, "No matches found");
     }
 
@@ -2155,6 +2183,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_verify_references_preserves_rate_limit_status() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/lookup/doi"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .set_body_string("Daily limit reached (30/day). Resets in 5h."),
+            )
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec!["10.1038/187493a0".into()],
+            }))
+            .await;
+        assert!(result.starts_with("RATE LIMITED 10.1038/187493a0 :"));
+        assert!(!result.contains("INVALID"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_references_preserves_mixed_statuses() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains("10.1038/good"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/good",
+                "title": "Good Paper"
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains("10.1038/slow"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_string("Lookup service temporarily unavailable."),
+            )
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec!["10.1038/good".into(), "10.1038/slow".into()],
+            }))
+            .await;
+
+        assert!(result.contains("VALID 10.1038/good : Good Paper"));
+        assert!(result.contains("TEMPORARY ERROR 10.1038/slow :"));
+        assert!(!result.contains("INVALID 10.1038/slow"));
+    }
+
+    #[tokio::test]
     async fn test_expand_journal_success() {
         let mock = MockServer::start().await;
         Mock::given(method("POST")).and(path("/api/v1/journal/expand"))
@@ -2229,7 +2312,15 @@ mod tests {
             .mount(&mock).await;
 
         let s = test_server(&mock.uri());
-        let result = s.reverse_lookup(Parameters(ReverseArgs { text: "test".into() })).await;
+        let result = s
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "test".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+            }))
+            .await;
         assert!(result.starts_with("RATE LIMITED"));
     }
 
@@ -2242,7 +2333,15 @@ mod tests {
             .mount(&mock).await;
 
         let s = test_server(&mock.uri());
-        let result = s.reverse_lookup(Parameters(ReverseArgs { text: "test".into() })).await;
+        let result = s
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "test".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+            }))
+            .await;
         assert!(result.starts_with("TEMPORARY ERROR"));
         assert!(!result.contains("No matches"));
     }
