@@ -18,13 +18,19 @@ npx @turtletech/ookcite-mcp setup
 ```
 
 This auto-detects your MCP clients (Claude Desktop, Claude Code, Cursor, Codex)
-and writes the config for you. Add an API key for higher rate limits:
+and writes the config for you. Add an API key for higher rate limits and
+collection tools:
 
 ```bash
 npx @turtletech/ookcite-mcp setup --key YOUR_API_KEY
 ```
 
-No API key required for basic usage (10 lookups/day). [Sign up](https://my.turtletech.us/signup) for more.
+No API key required for basic usage (10 lookups/day).
+[Sign up](https://my.turtletech.us/signup) for more.
+
+After changing MCP config, restart the client or reload its MCP servers.
+Many clients do not hot-reload environment-variable changes for already-running
+stdio servers.
 
 ## Install (Alternative Methods)
 
@@ -92,7 +98,15 @@ Common config file locations:
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Claude Code            | `.mcp.json` (project) or `~/.claude/settings.json` (global)       |
 | Cursor                 | Settings > MCP Servers                                            |
-| Codex                  | `~/.codex/config.json`                                            |
+| Codex                  | `~/.codex/config.toml`                                            |
+
+For Codex, the equivalent global registration also works from the CLI:
+
+```bash
+codex mcp add ookcite --env OOKCITE_API_KEY=your_key_here -- npx -y @turtletech/ookcite-mcp
+```
+
+Then restart Codex so the new stdio server starts with the updated environment.
 
 ## Tools
 
@@ -134,6 +148,13 @@ Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
 | `update_tags`              | Set tags on a collection                |
 | `reorder_collection`       | Reorder entries                         |
 
+Typical workflow:
+
+1. Keep `references.bib` or `library.bib` under version control in your project
+2. Import that file into an OokCite collection with `import_bibliography`
+3. Use `search_collection`, `check_duplicates`, and `export_collection` while revising
+4. Treat the collection as an audit/export companion, not the only copy of your bibliography
+
 ### Sharing & Bulk Operations (requires academic/business plan)
 
 | Tool                  | Purpose                                    |
@@ -166,6 +187,11 @@ Add this to your system prompt:
 
 > Before citing any paper, use validate_doi to confirm the reference exists.
 > If validation fails, do not include the citation.
+
+For revision workflows, add:
+
+> Keep the project bibliography in a local `.bib` file under version control.
+> Use OokCite collections for verification, deduplication, and export.
 
 ## How It Works
 
