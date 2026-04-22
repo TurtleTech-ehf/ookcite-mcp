@@ -131,6 +131,29 @@ async fn classify_collection_create_failure(resp: reqwest::Response, name: &str)
     }
 }
 
+fn format_resolve_candidates(query: &str, candidates: &[serde_json::Value]) -> String {
+    let mut lines = vec![format!("Ambiguous match for '{}'. Top candidates:", query)];
+    for (idx, candidate) in candidates.iter().take(5).enumerate() {
+        let meta = candidate.get("metadata").unwrap_or(candidate);
+        let title = meta["title"].as_str().unwrap_or("?");
+        let doi = meta["doi"].as_str().unwrap_or("?");
+        let year = meta["date"]["year"]
+            .as_i64()
+            .map(|y| format!(" ({y})"))
+            .unwrap_or_default();
+        let journal = meta["journal"].as_str().unwrap_or("N/A");
+        lines.push(format!(
+            "{}. {}{} | {} | doi:{}",
+            idx + 1,
+            title,
+            year,
+            journal,
+            doi
+        ));
+    }
+    lines.join("\n")
+}
+
 async fn lookup_doi_with_retry(
     http: &reqwest::Client,
     api_base: &str,
@@ -1065,8 +1088,51 @@ impl Server {
             Err(e) => return e,
         };
 
-        let Some(metadata) = self.resolve_query_to_metadata(&args.query).await else {
-            return format!("Could not resolve: {}", args.query);
+        let metadata = {
+            let q = args.query.trim();
+            if q.starts_with("10.") {
+                match self.resolve_query_to_metadata(q).await {
+                    Some(metadata) => metadata,
+                    None => return format!("Could not resolve: {}", args.query),
+                }
+            } else {
+                let resolve = self
+                    .request(endpoints::RESOLVE, &[])
+                    .json(&serde_json::json!({
+                        "input": { "kind": "Text", "text": q },
+                        "filters": {},
+                        "options": {}
+                    }))
+                    .send()
+                    .await;
+                match resolve {
+                    Ok(r) if r.status().is_success() => {
+                        let payload: serde_json::Value = r.json().await.unwrap_or_default();
+                        if let Some(paper) = payload.get("paper").cloned() {
+                            paper
+                        } else if let Some(candidates) =
+                            payload.get("candidates").and_then(|value| value.as_array())
+                        {
+                            if !candidates.is_empty() {
+                                return format_resolve_candidates(&args.query, candidates);
+                            }
+                            match self.resolve_query_to_metadata(q).await {
+                                Some(metadata) => metadata,
+                                None => return format!("Could not resolve: {}", args.query),
+                            }
+                        } else {
+                            match self.resolve_query_to_metadata(q).await {
+                                Some(metadata) => metadata,
+                                None => return format!("Could not resolve: {}", args.query),
+                            }
+                        }
+                    }
+                    _ => match self.resolve_query_to_metadata(q).await {
+                        Some(metadata) => metadata,
+                        None => return format!("Could not resolve: {}", args.query),
+                    },
+                }
+            }
         };
 
         let r = self
@@ -2681,6 +2747,62 @@ mod tests {
             metadata["title"].as_str(),
             Some("Shifting Balance in Evolution")
         );
+    }
+
+    #[tokio::test]
+    async fn test_add_to_collection_surfaces_ambiguous_candidates() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-1", "name": "My References", "entry_count": 0}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "match_type": "candidate_list",
+                "candidates": [
+                    {
+                        "metadata": {
+                            "title": "Shifting Balance in Evolution",
+                            "doi": "10.1093/genetics/16.2.97",
+                            "journal": "Genetics",
+                            "date": { "year": 1931 }
+                        }
+                    },
+                    {
+                        "metadata": {
+                            "title": "Another Wright Paper",
+                            "doi": "10.1093/genetics/16.2.98",
+                            "journal": "Genetics",
+                            "date": { "year": 1932 }
+                        }
+                    }
+                ]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/col-1/entries"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .add_to_collection(Parameters(AddToCollectionArgs {
+                collection: "My References".into(),
+                query: "Wright 1931 genetics shifting balance".into(),
+            }))
+            .await;
+
+        assert!(result.contains("Ambiguous match"));
+        assert!(result.contains("Shifting Balance in Evolution"));
+        assert!(result.contains("10.1093/genetics/16.2.97"));
     }
 
     #[tokio::test]
