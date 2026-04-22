@@ -106,10 +106,12 @@ async fn error_detail(resp: reqwest::Response) -> String {
 async fn classify_lookup_doi_failure(resp: reqwest::Response, doi: &str) -> String {
     if resp.status().as_u16() == 429 {
         format!("RATE LIMITED {doi} : {}", error_detail(resp).await)
-    } else if resp.status().as_u16() == 403 {
+    } else if matches!(resp.status().as_u16(), 401 | 403) {
         format!("ACCESS DENIED {doi} : {}", error_detail(resp).await)
     } else if resp.status().is_server_error() {
         format!("TEMPORARY ERROR {doi} : {}", error_detail(resp).await)
+    } else if resp.status().is_client_error() && resp.status().as_u16() != 404 {
+        format!("CLIENT ERROR {doi} : {}", error_detail(resp).await)
     } else {
         format!("INVALID {doi} : HTTP {}", resp.status())
     }
@@ -465,11 +467,14 @@ impl Server {
             Ok(resp) if resp.status().as_u16() == 429 => {
                 format!("RATE LIMITED: {}", error_detail(resp).await)
             }
-            Ok(resp) if resp.status().as_u16() == 403 => {
+            Ok(resp) if matches!(resp.status().as_u16(), 401 | 403) => {
                 format!("ACCESS DENIED: {}", error_detail(resp).await)
             }
             Ok(resp) if resp.status().is_server_error() => {
                 format!("TEMPORARY ERROR: {}", error_detail(resp).await)
+            }
+            Ok(resp) if resp.status().is_client_error() && resp.status().as_u16() != 404 => {
+                format!("CLIENT ERROR: {}", error_detail(resp).await)
             }
             Ok(_) => format!(
                 "INVALID: DOI {} not found. This citation may be a hallucination.",
@@ -2033,6 +2038,40 @@ mod tests {
         let result = s.validate_doi(Parameters(DoiArgs { doi: "10.1038/187493a0".into() })).await;
         assert!(result.starts_with("ACCESS DENIED"));
         assert!(result.contains("academic"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_doi_unauthorized_is_not_reported_as_invalid() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Authentication required"
+            })))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s.validate_doi(Parameters(DoiArgs { doi: "10.1038/187493a0".into() })).await;
+        assert!(result.starts_with("ACCESS DENIED"));
+        assert!(!result.contains("hallucination"));
+        assert!(!result.contains("INVALID"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_references_preserves_client_error_status() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(422).set_body_string("malformed doi payload"))
+            .mount(&mock).await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec!["10.1038/187493a0".into()],
+            }))
+            .await;
+
+        assert!(result.contains("CLIENT ERROR 10.1038/187493a0"));
+        assert!(!result.contains("INVALID 10.1038/187493a0"));
     }
 
     #[tokio::test]
