@@ -53,6 +53,7 @@ impl Endpoint {
 pub const LOOKUP_DOI: Endpoint = Endpoint::new("POST", "/api/v1/lookup/doi");
 pub const LOOKUP_ISBN: Endpoint = Endpoint::new("POST", "/api/v1/lookup/isbn");
 pub const REVERSE: Endpoint = Endpoint::new("POST", "/api/v1/reverse");
+pub const RESOLVE: Endpoint = Endpoint::new("POST", "/api/v1/resolve");
 pub const PARSE_CITATIONS: Endpoint = Endpoint::new("POST", "/api/v1/parse-citations");
 pub const RESOLVE_DEBUG: Endpoint = Endpoint::new("POST", "/api/v1/resolve/debug");
 pub const HEALTH: Endpoint = Endpoint::new("GET", "/api/health");
@@ -90,7 +91,7 @@ pub const JOURNAL_EXPAND: Endpoint = Endpoint::new("POST", "/api/v1/journal/expa
 /// Every endpoint this crate calls. The contract test iterates over this
 /// to verify each one exists in the OpenAPI spec.
 pub const ALL: &[Endpoint] = &[
-    LOOKUP_DOI, LOOKUP_ISBN, REVERSE, PARSE_CITATIONS, RESOLVE_DEBUG, HEALTH, ME,
+    LOOKUP_DOI, LOOKUP_ISBN, REVERSE, RESOLVE, PARSE_CITATIONS, RESOLVE_DEBUG, HEALTH, ME,
     FORMAT, FORMAT_GROUP_CITE, STYLES_SEARCH,
     COLLECTIONS_LIST, COLLECTIONS_CREATE,
     COLLECTION_GET, COLLECTION_UPDATE, COLLECTION_DELETE,
