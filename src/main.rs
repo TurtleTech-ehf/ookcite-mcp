@@ -74,6 +74,11 @@ use serde::Deserialize;
 use tokio::time::{sleep, Duration};
 
 const API: &str = "https://ookcite-api.turtletech.us";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn version_output() -> String {
+    format!("ookcite-mcp {VERSION}")
+}
 
 #[derive(Clone)]
 struct Server {
@@ -2033,6 +2038,11 @@ impl ServerHandler for Server {
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("{}", version_output());
+        return Ok(());
+    }
+
     // Handle setup subcommand
     if args.iter().any(|a| a == "setup") {
         setup::run(&args[1..]).await;
@@ -2163,6 +2173,11 @@ mod tests {
     fn test_endpoint_url_with_path_params() {
         let u = endpoints::COLLECTION_ENTRIES_ADD.url("https://example.com", &[("id", "abc-123")]);
         assert_eq!(u, "https://example.com/api/v1/collections/abc-123/entries");
+    }
+
+    #[test]
+    fn version_output_includes_current_version() {
+        assert_eq!(version_output(), format!("ookcite-mcp {}", env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

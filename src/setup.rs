@@ -1,6 +1,11 @@
 use ookcite_mcp::endpoints;
 
 const API: &str = "https://ookcite-api.turtletech.us";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn setup_banner() -> String {
+    format!("OokCite MCP v{VERSION} -- Setup\n")
+}
 
 #[derive(serde::Deserialize)]
 struct MeResponse {
@@ -70,7 +75,7 @@ fn run_add_mcp(api_key: Option<&str>) -> bool {
 }
 
 pub async fn run(args: &[String]) {
-    println!("OokCite MCP -- Setup\n");
+    println!("{}", setup_banner());
 
     // Parse --key flag
     let api_key = args
@@ -117,4 +122,15 @@ pub async fn run(args: &[String]) {
         println!("  ookcite-mcp setup --key YOUR_KEY");
     }
     println!("\nRestart your MCP clients to activate OokCite.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_banner_includes_current_version() {
+        assert!(setup_banner().contains(VERSION));
+        assert!(setup_banner().contains("OokCite MCP v"));
+    }
 }
