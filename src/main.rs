@@ -114,6 +114,22 @@ async fn classify_lookup_doi_failure(resp: reqwest::Response, doi: &str) -> Stri
     }
 }
 
+async fn classify_collection_create_failure(resp: reqwest::Response, name: &str) -> String {
+    let detail = error_detail(resp).await;
+    let lowered = detail.to_ascii_lowercase();
+    if lowered.contains("collection limit reached") {
+        format!(
+            "Collection '{name}' could not be created: {detail}. Use an existing collection, upgrade your plan, or purchase additional collections."
+        )
+    } else if lowered.contains("plan_required") || lowered.contains("requires") {
+        format!(
+            "Collection '{name}' could not be created: {detail}. This workflow may require a paid plan or additional collection capacity."
+        )
+    } else {
+        format!("Failed to create collection '{name}': {detail}")
+    }
+}
+
 // Args
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1186,7 +1202,9 @@ impl Server {
                 match r {
                     Ok(r) if r.status().is_success() => {
                         let c: serde_json::Value = r.json().await.unwrap_or_default();
-                        c["id"].as_str().map(|s| s.to_string())
+                        c["id"]
+                            .as_str()
+                            .map(|s| s.to_string())
                             .ok_or_else(|| {
                                 format!(
                                     "Collection '{}' was created but the API response did not include an id.",
@@ -1194,11 +1212,7 @@ impl Server {
                                 )
                             })
                     }
-                    Ok(r) => Err(format!(
-                        "Failed to create collection '{}': {}",
-                        name,
-                        error_detail(r).await
-                    )),
+                    Ok(r) => Err(classify_collection_create_failure(r, name).await),
                     Err(e) => Err(format!("Failed to create collection '{}': {e}", name)),
                 }
             }
@@ -1285,7 +1299,7 @@ impl Server {
 
     #[tool(
         name = "import_bibliography",
-        description = "Import a BibTeX (.bib) or RIS file into a collection. Pass the file content as a string. Creates the collection if it doesn't exist."
+        description = "Import a BibTeX (.bib) or RIS file into a collection. Pass the file content as a string. Creates the collection if it doesn't exist, but collection import may require a paid plan or additional collection capacity."
     )]
     async fn import_bibliography(
         &self,
@@ -1376,7 +1390,7 @@ impl Server {
 
     #[tool(
         name = "batch_add_to_collection",
-        description = "Add multiple citations to a collection at once. Each query can be a DOI or free-text search."
+        description = "Add multiple citations to a collection at once. Each query can be a DOI or free-text search. Creates the collection if it doesn't exist, but batch collection workflows may require a paid plan or additional collection capacity."
     )]
     async fn batch_add_to_collection(&self, Parameters(args): Parameters<BatchAddArgs>) -> String {
         let col_id = match self.resolve_or_create_collection(&args.collection).await {
@@ -2479,6 +2493,29 @@ mod tests {
         let result = s.resolve_collection_id("anything").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Authentication required"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_or_create_collection_surfaces_limit_guidance() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "Collection limit reached (1). Purchase additional collections or upgrade your plan."
+            })))
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s.resolve_or_create_collection("RuhiMastersThesis").await;
+        let err = result.expect_err("should fail with guidance");
+        assert!(err.contains("Use an existing collection"));
+        assert!(err.contains("upgrade your plan"));
     }
 
     #[tokio::test]
