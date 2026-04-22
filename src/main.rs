@@ -1032,9 +1032,19 @@ impl Server {
                     Ok(r) if r.status().is_success() => {
                         let c: serde_json::Value = r.json().await.unwrap_or_default();
                         c["id"].as_str().map(|s| s.to_string())
-                            .ok_or_else(|| "Failed to create collection.".into())
+                            .ok_or_else(|| {
+                                format!(
+                                    "Collection '{}' was created but the API response did not include an id.",
+                                    name
+                                )
+                            })
                     }
-                    _ => Err("Failed to create collection.".into()),
+                    Ok(r) => Err(format!(
+                        "Failed to create collection '{}': {}",
+                        name,
+                        error_detail(r).await
+                    )),
+                    Err(e) => Err(format!("Failed to create collection '{}': {e}", name)),
                 }
             }
         }
