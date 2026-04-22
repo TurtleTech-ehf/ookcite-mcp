@@ -71,6 +71,7 @@ use rmcp::{
     tool, tool_handler, tool_router, ServiceExt,
 };
 use serde::Deserialize;
+use tokio::time::{sleep, Duration};
 
 const API: &str = "https://ookcite-api.turtletech.us";
 
@@ -127,6 +128,28 @@ async fn classify_collection_create_failure(resp: reqwest::Response, name: &str)
         )
     } else {
         format!("Failed to create collection '{name}': {detail}")
+    }
+}
+
+async fn lookup_doi_with_retry(
+    http: &reqwest::Client,
+    api_base: &str,
+    doi: &str,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut attempt = 0u8;
+    loop {
+        let response = http
+            .post(endpoints::LOOKUP_DOI.url(api_base, &[]))
+            .json(&serde_json::json!({ "doi": doi }))
+            .send()
+            .await?;
+        let status = response.status();
+        if attempt < 2 && matches!(status.as_u16(), 429 | 502 | 503 | 504) {
+            attempt += 1;
+            sleep(Duration::from_millis(150 * u64::from(attempt))).await;
+            continue;
+        }
+        return Ok(response);
     }
 }
 
@@ -876,11 +899,7 @@ impl Server {
                 let api_base = api_base.clone();
                 let doi = doi.clone();
                 async move {
-                    let r = http
-                        .post(endpoints::LOOKUP_DOI.url(&api_base, &[]))
-                        .json(&serde_json::json!({"doi": doi}))
-                        .send()
-                        .await;
+                    let r = lookup_doi_with_retry(&http, &api_base, &doi).await;
                     match r {
                         Ok(resp) if resp.status().is_success() => {
                             let meta: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -2539,6 +2558,40 @@ mod tests {
             .await;
         assert_eq!(result.lines().count(), 3);
         assert!(result.lines().all(|l| l.starts_with("VALID")));
+    }
+
+    #[tokio::test]
+    async fn test_verify_references_retries_transient_lookup_failure() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains("10.1038/retry"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_string("Lookup service temporarily unavailable."),
+            )
+            .up_to_n_times(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains("10.1038/retry"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/retry",
+                "title": "Recovered Paper"
+            })))
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec!["10.1038/retry".into()],
+            }))
+            .await;
+
+        assert!(result.contains("VALID 10.1038/retry : Recovered Paper"));
+        assert!(!result.contains("TEMPORARY ERROR"));
     }
 
     #[tokio::test]
