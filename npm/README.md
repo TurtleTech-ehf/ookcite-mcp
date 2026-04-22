@@ -4,9 +4,9 @@
 [![Crates.io](https://img.shields.io/crates/v/ookcite-mcp.svg)](https://crates.io/crates/ookcite-mcp)
 [![npm](https://img.shields.io/npm/v/@turtletech/ookcite-mcp.svg)](https://www.npmjs.com/package/@turtletech/ookcite-mcp)
 
-Give any LLM the ability to validate DOIs, format citations, and catch
-hallucinated references. Works with any MCP client: Claude, Codex, Cursor,
-Windsurf, OpenCode, Qwen agents, and more.
+Give any LLM the ability to validate DOIs, format citations, manage
+bibliography collections, and catch hallucinated references. Works with any
+MCP client: Claude, Codex, Cursor, Windsurf, OpenCode, Qwen agents, and more.
 
 ## Quick Start
 
@@ -17,13 +17,19 @@ npx @turtletech/ookcite-mcp setup
 ```
 
 This auto-detects your MCP clients (Claude Desktop, Claude Code, Cursor, Codex)
-and writes the config for you. Add an API key for higher rate limits:
+and writes the config for you. Add an API key for higher rate limits and
+collection tools:
 
 ```bash
 npx @turtletech/ookcite-mcp setup --key YOUR_API_KEY
 ```
 
-No API key required for basic usage (10 lookups/day). [Sign up](https://my.turtletech.us/signup) for more.
+No API key required for basic usage (10 lookups/day).
+[Sign up](https://my.turtletech.us/signup) for more.
+
+After changing MCP config, restart the client or reload its MCP servers.
+Many clients do not hot-reload environment-variable changes for already-running
+stdio servers.
 
 ## Install (Alternative Methods)
 
@@ -91,20 +97,55 @@ Common config file locations:
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Claude Code            | `.mcp.json` (project) or `~/.claude/settings.json` (global)       |
 | Cursor                 | Settings > MCP Servers                                            |
-| Codex                  | `~/.codex/config.json`                                            |
+| Codex                  | `~/.codex/config.toml`                                            |
+
+For Codex, the equivalent global registration also works from the CLI:
+
+```bash
+codex mcp add ookcite --env OOKCITE_API_KEY=your_key_here -- npx -y @turtletech/ookcite-mcp
+```
 
 ## Tools
+
+### Lookup & Validation
 
 | Tool                | Purpose                                       |
 | ------------------- | --------------------------------------------- |
 | `validate_doi`      | Check if a DOI exists (anti-hallucination)    |
 | `lookup_isbn`       | Look up a book by ISBN                        |
 | `reverse_lookup`    | Find a paper from messy citation text         |
+| `health_check`      | Check API availability and health             |
+
+### Formatting
+
+| Tool                | Purpose                                       |
+| ------------------- | --------------------------------------------- |
 | `format_citation`   | Format a DOI in any of 2900+ CSL styles       |
 | `verify_references` | Batch-check a list of DOIs                    |
 | `batch_format`      | Format multiple citations at once             |
 | `search_styles`     | Find CSL style IDs by name                    |
 | `group_cite`        | Generate grouped in-text markers (e.g. [1-3]) |
+
+### Collections (requires sign-in)
+
+Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
+
+| Tool                      | Purpose                                  |
+| ------------------------- | ---------------------------------------- |
+| `list_collections`        | List saved citation collections          |
+| `add_to_collection`       | Add a citation (by DOI or free-text)     |
+| `batch_add_to_collection` | Add multiple citations at once           |
+| `import_bibliography`     | Import BibTeX/RIS files into a collection|
+| `export_collection`       | Export collection as BibTeX              |
+| `search_collection`       | Search within a collection               |
+| `check_duplicates`        | Check for duplicate entries              |
+
+Typical workflow:
+
+1. Keep `references.bib` or `library.bib` under version control in your project
+2. Import that file into an OokCite collection with `import_bibliography`
+3. Use the collection to audit, deduplicate, and export while revising
+4. Keep the local `.bib` file as the source-controlled canonical bibliography
 
 ## Anti-Hallucination
 
@@ -113,14 +154,20 @@ Add this to your system prompt:
 > Before citing any paper, use validate_doi to confirm the reference exists.
 > If validation fails, do not include the citation.
 
+For revision workflows, add:
+
+> Keep the project bibliography in a local `.bib` file under version control.
+> Use OokCite collections for verification, deduplication, and export.
+
 ## How It Works
 
 The MCP server connects to the public [OokCite](https://ookcite.turtletech.us)
 API to look up and format citations. It's a thin MCP wrapper around the OokCite
 REST API with no local database, and no heavy dependencies.
 
-Rate limits apply: 10 lookups/day anonymous, 30/day with a free account. [Sign up](https://my.turtletech.us/signup) for more, or upgrade (starting at $4/month)
-for more.
+Rate limits apply: 10 lookups/day anonymous, 30/day with a free account.
+[Sign up](https://my.turtletech.us/signup) for more, or upgrade (starting at
+$4/month) for more.
 
 ## Documentation
 
