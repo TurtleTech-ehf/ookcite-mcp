@@ -85,10 +85,7 @@ pub async fn run(args: &[String]) {
         match validate_key(key).await {
             Some(me) if me.authenticated => {
                 println!("OK");
-                println!(
-                    "  Account: {}",
-                    me.username.as_deref().unwrap_or("unknown")
-                );
+                println!("  Account: {}", me.username.as_deref().unwrap_or("unknown"));
                 println!("  Plan: {}", me.plan);
                 println!(
                     "  Lookups: {}/{} remaining today\n",
@@ -111,8 +108,7 @@ pub async fn run(args: &[String]) {
         println!("\nSetup complete.");
     } else {
         println!("\nadd-mcp failed. You can configure manually:");
-        let target = find_binary()
-            .unwrap_or_else(|| "npx -y @turtletech/ookcite-mcp".into());
+        let target = find_binary().unwrap_or_else(|| "npx -y @turtletech/ookcite-mcp".into());
         println!("  npx add-mcp {} --name ookcite", target);
     }
 
