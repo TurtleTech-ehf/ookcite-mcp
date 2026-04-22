@@ -1072,9 +1072,28 @@ impl Server {
                 _ => None,
             }
         } else {
-            let r = self.request(endpoints::REVERSE, &[])
+            let resolve = self
+                .request(endpoints::RESOLVE, &[])
+                .json(&serde_json::json!({
+                    "input": { "kind": "Text", "text": q },
+                    "filters": {},
+                    "options": {}
+                }))
+                .send()
+                .await;
+            match resolve {
+                Ok(r) if r.status().is_success() => {
+                    let payload: serde_json::Value = r.json().await.unwrap_or_default();
+                    if let Some(paper) = payload.get("paper").cloned() {
+                        return Some(paper);
+                    }
+                }
+                _ => {}
+            }
+
+            let reverse = self.request(endpoints::REVERSE, &[])
                 .json(&serde_json::json!({"text": q})).send().await;
-            match r {
+            match reverse {
                 Ok(r) if r.status().is_success() => {
                     let results: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
                     results.first().and_then(|r| r.get("metadata")).cloned()
@@ -2235,6 +2254,42 @@ mod tests {
         assert!(result.contains("VALID 10.1038/good : Good Paper"));
         assert!(result.contains("TEMPORARY ERROR 10.1038/slow :"));
         assert!(!result.contains("INVALID 10.1038/slow"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_query_to_metadata_prefers_resolve_paper() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "paper": {
+                    "title": "Shifting Balance in Evolution",
+                    "doi": "10.1093/genetics/16.2.97"
+                }
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let metadata = s
+            .resolve_query_to_metadata("Wright 1931 genetics shifting balance")
+            .await
+            .expect("metadata");
+
+        assert_eq!(
+            metadata["doi"].as_str(),
+            Some("10.1093/genetics/16.2.97")
+        );
+        assert_eq!(
+            metadata["title"].as_str(),
+            Some("Shifting Balance in Evolution")
+        );
     }
 
     #[tokio::test]
