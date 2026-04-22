@@ -2177,7 +2177,10 @@ mod tests {
 
     #[test]
     fn version_output_includes_current_version() {
-        assert_eq!(version_output(), format!("ookcite-mcp {}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            version_output(),
+            format!("ookcite-mcp {}", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]
