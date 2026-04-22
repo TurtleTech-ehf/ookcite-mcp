@@ -159,6 +159,29 @@ fn format_resolve_candidates(query: &str, candidates: &[serde_json::Value]) -> S
     lines.join("\n")
 }
 
+fn resolve_payload_metadata(payload: &serde_json::Value) -> Option<serde_json::Value> {
+    if let Some(paper) = payload.get("paper").cloned() {
+        return Some(paper);
+    }
+
+    let verified = payload
+        .get("verification")
+        .and_then(|value| value.get("status"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("verified"));
+
+    if !verified {
+        return None;
+    }
+
+    payload
+        .get("candidates")
+        .and_then(|value| value.as_array())
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("metadata"))
+        .cloned()
+}
+
 async fn lookup_doi_with_retry(
     http: &reqwest::Client,
     api_base: &str,
@@ -1113,8 +1136,8 @@ impl Server {
                 match resolve {
                     Ok(r) if r.status().is_success() => {
                         let payload: serde_json::Value = r.json().await.unwrap_or_default();
-                        if let Some(paper) = payload.get("paper").cloned() {
-                            paper
+                        if let Some(metadata) = resolve_payload_metadata(&payload) {
+                            metadata
                         } else if let Some(candidates) =
                             payload.get("candidates").and_then(|value| value.as_array())
                         {
@@ -1336,8 +1359,8 @@ impl Server {
             match resolve {
                 Ok(r) if r.status().is_success() => {
                     let payload: serde_json::Value = r.json().await.unwrap_or_default();
-                    if let Some(paper) = payload.get("paper").cloned() {
-                        return Some(paper);
+                    if let Some(metadata) = resolve_payload_metadata(&payload) {
+                        return Some(metadata);
                     }
                 }
                 _ => {}
@@ -2765,6 +2788,90 @@ mod tests {
             metadata["title"].as_str(),
             Some("Shifting Balance in Evolution")
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_query_to_metadata_accepts_verified_candidate_list() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "match_type": "candidate_list",
+                "verification": { "status": "verified", "confidence": 0.97 },
+                "candidates": [
+                    {
+                        "metadata": {
+                            "title": "EVOLUTION IN MENDELIAN POPULATIONS",
+                            "doi": "10.1093/genetics/16.2.97"
+                        }
+                    }
+                ]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let metadata = s
+            .resolve_query_to_metadata("Wright 1931 genetics shifting balance")
+            .await
+            .expect("metadata");
+
+        assert_eq!(metadata["doi"].as_str(), Some("10.1093/genetics/16.2.97"));
+    }
+
+    #[tokio::test]
+    async fn test_add_to_collection_accepts_verified_candidate_list() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-1", "name": "My References", "entry_count": 0}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "match_type": "candidate_list",
+                "verification": { "status": "verified", "confidence": 0.97 },
+                "candidates": [
+                    {
+                        "metadata": {
+                            "title": "EVOLUTION IN MENDELIAN POPULATIONS",
+                            "doi": "10.1093/genetics/16.2.97",
+                            "journal": "Genetics",
+                            "date": { "year": 1931 }
+                        }
+                    }
+                ]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/col-1/entries"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .add_to_collection(Parameters(AddToCollectionArgs {
+                collection: "My References".into(),
+                query: "Wright 1931 genetics shifting balance".into(),
+            }))
+            .await;
+
+        assert!(result.contains("Added to My References"));
+        assert!(!result.contains("Ambiguous match"));
     }
 
     #[tokio::test]
