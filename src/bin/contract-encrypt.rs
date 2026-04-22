@@ -25,9 +25,7 @@ fn main() -> anyhow::Result<()> {
 
     let plaintext = std::fs::read(input_path)?;
 
-    let encryptor = age::Encryptor::with_user_passphrase(
-        secrecy::SecretString::new(passphrase),
-    );
+    let encryptor = age::Encryptor::with_user_passphrase(secrecy::SecretString::new(passphrase));
     let output_file = std::fs::File::create(output_path)?;
     let mut output = encryptor.wrap_output(output_file)?;
     output.write_all(&plaintext)?;

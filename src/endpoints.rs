@@ -30,14 +30,16 @@ impl Endpoint {
             assert!(
                 out.contains(&placeholder),
                 "Endpoint {} has no placeholder named {{{}}}; check `endpoints.rs`",
-                self.path, name
+                self.path,
+                name
             );
             out = out.replace(&placeholder, &urlencoding::encode(value));
         }
         assert!(
             !out.contains('{'),
             "Endpoint {} still has unfilled placeholders after substitution: {}",
-            self.path, out
+            self.path,
+            out
         );
         out
     }
@@ -70,18 +72,24 @@ pub const COLLECTIONS_CREATE: Endpoint = Endpoint::new("POST", "/api/v1/collecti
 pub const COLLECTION_GET: Endpoint = Endpoint::new("GET", "/api/v1/collections/{id}");
 pub const COLLECTION_UPDATE: Endpoint = Endpoint::new("PATCH", "/api/v1/collections/{id}");
 pub const COLLECTION_DELETE: Endpoint = Endpoint::new("DELETE", "/api/v1/collections/{id}");
-pub const COLLECTION_ENTRIES_ADD: Endpoint = Endpoint::new("POST", "/api/v1/collections/{id}/entries");
-pub const COLLECTION_ENTRIES_BATCH: Endpoint = Endpoint::new("POST", "/api/v1/collections/{id}/entries/batch");
-pub const COLLECTION_ENTRY_REMOVE: Endpoint = Endpoint::new("DELETE", "/api/v1/collections/{id}/entries/{eid}");
-pub const COLLECTION_EXPORT_BIB: Endpoint = Endpoint::new("GET", "/api/v1/collections/{id}/export.bib");
+pub const COLLECTION_ENTRIES_ADD: Endpoint =
+    Endpoint::new("POST", "/api/v1/collections/{id}/entries");
+pub const COLLECTION_ENTRIES_BATCH: Endpoint =
+    Endpoint::new("POST", "/api/v1/collections/{id}/entries/batch");
+pub const COLLECTION_ENTRY_REMOVE: Endpoint =
+    Endpoint::new("DELETE", "/api/v1/collections/{id}/entries/{eid}");
+pub const COLLECTION_EXPORT_BIB: Endpoint =
+    Endpoint::new("GET", "/api/v1/collections/{id}/export.bib");
 pub const COLLECTION_IMPORT: Endpoint = Endpoint::new("POST", "/api/v1/collections/{id}/import");
 pub const COLLECTION_TAGS: Endpoint = Endpoint::new("PATCH", "/api/v1/collections/{id}/tags");
-pub const COLLECTION_CHECK_DUPLICATES: Endpoint = Endpoint::new("POST", "/api/v1/collections/{id}/check-duplicates");
+pub const COLLECTION_CHECK_DUPLICATES: Endpoint =
+    Endpoint::new("POST", "/api/v1/collections/{id}/check-duplicates");
 pub const COLLECTION_REORDER: Endpoint = Endpoint::new("PATCH", "/api/v1/collections/{id}/reorder");
 pub const COLLECTION_SHARE: Endpoint = Endpoint::new("POST", "/api/v1/collections/{id}/share");
 pub const COLLECTION_UNSHARE: Endpoint = Endpoint::new("DELETE", "/api/v1/collections/{id}/share");
 pub const COLLECTIONS_MERGE: Endpoint = Endpoint::new("POST", "/api/v1/collections/merge");
-pub const COLLECTIONS_BATCH_MOVE: Endpoint = Endpoint::new("POST", "/api/v1/collections/batch-move");
+pub const COLLECTIONS_BATCH_MOVE: Endpoint =
+    Endpoint::new("POST", "/api/v1/collections/batch-move");
 pub const SHARED_GET: Endpoint = Endpoint::new("GET", "/api/v1/shared/{token}");
 
 // --- Utilities ---
@@ -91,16 +99,37 @@ pub const JOURNAL_EXPAND: Endpoint = Endpoint::new("POST", "/api/v1/journal/expa
 /// Every endpoint this crate calls. The contract test iterates over this
 /// to verify each one exists in the OpenAPI spec.
 pub const ALL: &[Endpoint] = &[
-    LOOKUP_DOI, LOOKUP_ISBN, REVERSE, RESOLVE, PARSE_CITATIONS, RESOLVE_DEBUG, HEALTH, ME,
-    FORMAT, FORMAT_GROUP_CITE, STYLES_SEARCH,
-    COLLECTIONS_LIST, COLLECTIONS_CREATE,
-    COLLECTION_GET, COLLECTION_UPDATE, COLLECTION_DELETE,
-    COLLECTION_ENTRIES_ADD, COLLECTION_ENTRIES_BATCH, COLLECTION_ENTRY_REMOVE,
-    COLLECTION_EXPORT_BIB, COLLECTION_IMPORT, COLLECTION_TAGS,
-    COLLECTION_CHECK_DUPLICATES, COLLECTION_REORDER,
-    COLLECTION_SHARE, COLLECTION_UNSHARE,
-    COLLECTIONS_MERGE, COLLECTIONS_BATCH_MOVE, SHARED_GET,
-    CITATION_KEYS, JOURNAL_EXPAND,
+    LOOKUP_DOI,
+    LOOKUP_ISBN,
+    REVERSE,
+    RESOLVE,
+    PARSE_CITATIONS,
+    RESOLVE_DEBUG,
+    HEALTH,
+    ME,
+    FORMAT,
+    FORMAT_GROUP_CITE,
+    STYLES_SEARCH,
+    COLLECTIONS_LIST,
+    COLLECTIONS_CREATE,
+    COLLECTION_GET,
+    COLLECTION_UPDATE,
+    COLLECTION_DELETE,
+    COLLECTION_ENTRIES_ADD,
+    COLLECTION_ENTRIES_BATCH,
+    COLLECTION_ENTRY_REMOVE,
+    COLLECTION_EXPORT_BIB,
+    COLLECTION_IMPORT,
+    COLLECTION_TAGS,
+    COLLECTION_CHECK_DUPLICATES,
+    COLLECTION_REORDER,
+    COLLECTION_SHARE,
+    COLLECTION_UNSHARE,
+    COLLECTIONS_MERGE,
+    COLLECTIONS_BATCH_MOVE,
+    SHARED_GET,
+    CITATION_KEYS,
+    JOURNAL_EXPAND,
 ];
 
 #[cfg(test)]
@@ -150,7 +179,8 @@ mod tests {
             assert!(
                 seen.insert((ep.method, ep.path)),
                 "duplicate endpoint in ALL: {} {}",
-                ep.method, ep.path
+                ep.method,
+                ep.path
             );
         }
     }

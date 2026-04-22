@@ -63,10 +63,7 @@ fn every_endpoint_exists_in_openapi_spec() {
     let mut missing: Vec<String> = Vec::new();
     for ep in endpoints::ALL {
         let Some(path_item) = paths.get(ep.path) else {
-            missing.push(format!(
-                "{} {} -- path not in spec",
-                ep.method, ep.path
-            ));
+            missing.push(format!("{} {} -- path not in spec", ep.method, ep.path));
             continue;
         };
         let method_key = ep.method.to_lowercase();
@@ -90,7 +87,11 @@ fn every_endpoint_exists_in_openapi_spec() {
 #[test]
 fn openapi_spec_has_expected_shape() {
     let spec = decrypt_spec();
-    assert_eq!(spec["openapi"].as_str(), Some("3.1.0"), "expected OpenAPI 3.1");
+    assert_eq!(
+        spec["openapi"].as_str(),
+        Some("3.1.0"),
+        "expected OpenAPI 3.1"
+    );
     assert_eq!(spec["info"]["title"].as_str(), Some("OokCite API"));
     assert!(spec["paths"].is_object(), "paths must be an object");
 }
