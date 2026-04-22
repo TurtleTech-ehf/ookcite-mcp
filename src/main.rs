@@ -1226,29 +1226,11 @@ impl Server {
 
         // Resolve all queries in parallel (up to 10 concurrent)
         let futs: Vec<_> = args.queries.iter().enumerate().map(|(i, query)| {
-            let http = self.http.clone();
-            let base = self.api_base.clone();
+            let server = self.clone();
             let query = query.clone();
             async move {
                 let q = query.trim();
-                let meta = if q.starts_with("10.") {
-                    let r = http.post(endpoints::LOOKUP_DOI.url(&base, &[]))
-                        .json(&serde_json::json!({"doi": q})).send().await;
-                    match r {
-                        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
-                        _ => None,
-                    }
-                } else {
-                    let r = http.post(endpoints::REVERSE.url(&base, &[]))
-                        .json(&serde_json::json!({"text": q})).send().await;
-                    match r {
-                        Ok(r) if r.status().is_success() => {
-                            let results: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
-                            results.first().and_then(|r| r.get("metadata")).cloned()
-                        }
-                        _ => None,
-                    }
-                };
+                let meta = server.resolve_query_to_metadata(q).await;
                 match meta {
                     Some(m) => Ok(m),
                     None => Err(format!("[{}] Could not resolve: {}", i + 1, &query[..query.len().min(60)])),
@@ -2290,6 +2272,60 @@ mod tests {
             metadata["title"].as_str(),
             Some("Shifting Balance in Evolution")
         );
+    }
+
+    #[tokio::test]
+    async fn test_batch_add_to_collection_prefers_resolve_for_free_text() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "col-1",
+                "name": "RuhiMastersThesis"
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "paper": {
+                    "title": "Shifting Balance in Evolution",
+                    "doi": "10.1093/genetics/16.2.97"
+                }
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/col-1/entries/batch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "added": 1,
+                "duplicates_skipped": 0
+            })))
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .batch_add_to_collection(Parameters(BatchAddArgs {
+                collection: "RuhiMastersThesis".into(),
+                queries: vec!["Wright 1931 genetics shifting balance".into()],
+            }))
+            .await;
+
+        assert!(result.contains("Added 1 to 'RuhiMastersThesis'"));
+        assert!(!result.contains("Could not resolve"));
     }
 
     #[tokio::test]
