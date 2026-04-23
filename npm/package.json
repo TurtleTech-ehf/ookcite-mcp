@@ -1,6 +1,6 @@
 {
   "name": "@turtletech/ookcite-mcp",
-  "version": "0.4.5",
+  "version": "",
   "description": "MCP server for citation validation, formatting, and collection management. Validates DOIs, formats references in 2900+ CSL styles, manages citation collections, and catches hallucinated citations.",
   "bin": {
     "ookcite-mcp": "bin/run.js"
