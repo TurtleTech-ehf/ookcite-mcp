@@ -529,11 +529,7 @@ impl Server {
         description = "Check if a DOI exists and return its metadata. Use this to verify citations are real. Returns title, authors, year, journal, volume, and issue."
     )]
     async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
-        let r = self
-            .request(endpoints::LOOKUP_DOI, &[])
-            .json(&serde_json::json!({"doi": args.doi}))
-            .send()
-            .await;
+        let r = lookup_doi_with_retry(&self.http, &self.api_base, &args.doi).await;
         match r {
             Ok(resp) if resp.status().is_success() => {
                 let meta: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -557,22 +553,7 @@ impl Server {
                 let doi = meta["doi"].as_str().unwrap_or(&args.doi);
                 format!("VALID\nDOI: {doi}\nTitle: {title}\nAuthors: {authors}\nYear: {year}\nJournal: {journal}\nVolume: {volume}\nIssue: {issue}")
             }
-            Ok(resp) if resp.status().as_u16() == 429 => {
-                format!("RATE LIMITED: {}", error_detail(resp).await)
-            }
-            Ok(resp) if matches!(resp.status().as_u16(), 401 | 403) => {
-                format!("ACCESS DENIED: {}", error_detail(resp).await)
-            }
-            Ok(resp) if resp.status().is_server_error() => {
-                format!("TEMPORARY ERROR: {}", error_detail(resp).await)
-            }
-            Ok(resp) if resp.status().is_client_error() && resp.status().as_u16() != 404 => {
-                format!("CLIENT ERROR: {}", error_detail(resp).await)
-            }
-            Ok(_) => format!(
-                "INVALID: DOI {} not found. This citation may be a hallucination.",
-                args.doi
-            ),
+            Ok(resp) => classify_lookup_doi_failure(resp, &args.doi).await,
             Err(e) => format!("ERROR: Could not reach citation service: {e}"),
         }
     }

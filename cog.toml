@@ -1,0 +1,20 @@
+from_latest_tag = false
+ignore_merge_commits = true
+disable_changelog = false
+tag_prefix = "v"
+
+pre_bump_hooks = [
+    "bash scripts/set-version.sh {{version}}",
+]
+
+[commit_types]
+feat = { changelog_title = "Features" }
+fix = { changelog_title = "Bugfixes" }
+docs = { changelog_title = "Documentation" }
+refactor = { changelog_title = "Refactors" }
+test = { changelog_title = "Tests" }
+build = { changelog_title = "Buildsystem" }
+chore = { changelog_title = "Maintenance" }
+
+[changelog]
+path = "CHANGELOG.md"
