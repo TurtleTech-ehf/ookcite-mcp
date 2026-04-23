@@ -1269,47 +1269,69 @@ impl Server {
     // --- Helper: resolve collection name to ID ---
 
     async fn resolve_collection_id(&self, name: &str) -> Result<String, String> {
+        match self.lookup_collection_id(name).await {
+            Ok(Some(id)) => Ok(id),
+            Ok(None) => Err(format!("Collection '{name}' not found.")),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Internal lookup that distinguishes "collection does not exist" (`Ok(None)`)
+    /// from a genuine API failure (`Err`). `resolve_or_create_collection` relies on
+    /// this so it only falls through to CREATE when the target is genuinely absent,
+    /// instead of masking auth / 5xx / network errors with a second failed POST.
+    async fn lookup_collection_id(&self, name: &str) -> Result<Option<String>, String> {
         let cols: Vec<serde_json::Value> =
             match self.request(endpoints::COLLECTIONS_LIST, &[]).send().await {
                 Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
                 Ok(r) if r.status().as_u16() == 401 => {
                     return Err("Authentication required. Set OOKCITE_API_KEY.".into())
                 }
-                _ => return Err("Failed to list collections.".into()),
+                Ok(r) => {
+                    return Err(format!(
+                        "Failed to list collections: {}",
+                        error_detail(r).await
+                    ))
+                }
+                Err(e) => return Err(format!("Failed to list collections: {e}")),
             };
-        cols.iter()
+        Ok(cols
+            .iter()
             .find(|c| c["name"].as_str() == Some(name))
             .and_then(|c| c["id"].as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| format!("Collection '{name}' not found."))
+            .map(|s| s.to_string()))
     }
 
     async fn resolve_or_create_collection(&self, name: &str) -> Result<String, String> {
-        match self.resolve_collection_id(name).await {
-            Ok(id) => Ok(id),
-            Err(_) => {
-                let r = self
-                    .request(endpoints::COLLECTIONS_CREATE, &[])
-                    .json(&serde_json::json!({"name": name}))
-                    .send()
-                    .await;
-                match r {
-                    Ok(r) if r.status().is_success() => {
-                        let c: serde_json::Value = r.json().await.unwrap_or_default();
-                        c["id"]
-                            .as_str()
-                            .map(|s| s.to_string())
-                            .ok_or_else(|| {
-                                format!(
-                                    "Collection '{}' was created but the API response did not include an id.",
-                                    name
-                                )
-                            })
-                    }
-                    Ok(r) => Err(classify_collection_create_failure(r, name).await),
-                    Err(e) => Err(format!("Failed to create collection '{}': {e}", name)),
-                }
+        // Only fall through to CREATE when the collection is genuinely missing.
+        // Auth / 5xx / transport errors propagate as-is so callers see the real
+        // cause instead of a downstream "Failed to create collection" that
+        // hides a list-collections auth failure.
+        match self.lookup_collection_id(name).await? {
+            Some(id) => return Ok(id),
+            None => {}
+        }
+
+        let r = self
+            .request(endpoints::COLLECTIONS_CREATE, &[])
+            .json(&serde_json::json!({"name": name}))
+            .send()
+            .await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let c: serde_json::Value = r.json().await.unwrap_or_default();
+                c["id"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| {
+                        format!(
+                            "Collection '{}' was created but the API response did not include an id.",
+                            name
+                        )
+                    })
             }
+            Ok(r) => Err(classify_collection_create_failure(r, name).await),
+            Err(e) => Err(format!("Failed to create collection '{}': {e}", name)),
         }
     }
 
@@ -2963,6 +2985,185 @@ mod tests {
 
         assert!(result.contains("Added 1 to 'RuhiMastersThesis'"));
         assert!(!result.contains("Could not resolve"));
+    }
+
+    /// Regression for OokCite-9dw: `batch_add_to_collection` must auto-create
+    /// the target collection when it does not exist and succeed for mixed
+    /// DOI + free-text queries, mirroring the live report where six queries
+    /// were rejected with a generic "Failed to create collection" message.
+    #[tokio::test]
+    async fn test_batch_add_to_collection_auto_creates_for_mixed_queries() {
+        let mock = MockServer::start().await;
+
+        // Collection does not exist yet.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // Create succeeds and returns the new id.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections"))
+            .and(body_string_contains("amsel-literature-survey"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "col-amsel",
+                "name": "amsel-literature-survey"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // DOI lookup path for the one DOI query.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "title": "Doi Paper",
+                "doi": "10.1000/demo"
+            })))
+            .mount(&mock)
+            .await;
+
+        // Free-text resolve path returns a verified paper for everything except
+        // the last query, which we leave to fall through so we also cover the
+        // partial-success diagnostics branch.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains("Wright"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "paper": {
+                    "title": "Shifting Balance in Evolution",
+                    "doi": "10.1093/genetics/16.2.97"
+                }
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains("Fisher"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "paper": {
+                    "title": "The Genetical Theory of Natural Selection",
+                    "doi": "10.5962/bhl.title.27468"
+                }
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains("Haldane"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "paper": {
+                    "title": "The Causes of Evolution",
+                    "doi": "10.1515/9781400882588"
+                }
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains("Kimura"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "paper": {
+                    "title": "The Neutral Theory of Molecular Evolution",
+                    "doi": "10.1017/CBO9780511623486"
+                }
+            })))
+            .mount(&mock)
+            .await;
+        // Unresolvable free-text query: resolve returns no candidates and the
+        // reverse fallback returns nothing either.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains("qwertyzzz"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "candidates": []
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
+            .mount(&mock)
+            .await;
+
+        // Batch add endpoint should be hit with all resolved entries.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/col-amsel/entries/batch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "added": 5,
+                "duplicates_skipped": 0
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .batch_add_to_collection(Parameters(BatchAddArgs {
+                collection: "amsel-literature-survey".into(),
+                queries: vec![
+                    "10.1000/demo".into(),
+                    "Wright 1931 genetics shifting balance".into(),
+                    "Fisher 1930 genetical theory".into(),
+                    "Haldane 1932 causes of evolution".into(),
+                    "Kimura 1983 neutral theory".into(),
+                    "qwertyzzz nothing matches this".into(),
+                ],
+            }))
+            .await;
+
+        assert!(
+            result.contains("Added 5 to 'amsel-literature-survey'"),
+            "expected auto-create + 5 added, got: {result}"
+        );
+        assert!(
+            !result.contains("Failed to create collection"),
+            "must not surface generic create failure, got: {result}"
+        );
+        assert!(
+            result.contains("Unresolved:"),
+            "expected partial-success diagnostics, got: {result}"
+        );
+    }
+
+    /// Regression guard: `resolve_or_create_collection` must not swallow a
+    /// 5xx on the LIST step with a misleading "Failed to create collection"
+    /// after blindly retrying CREATE. It must surface the original list error
+    /// so operators can see what actually broke.
+    #[tokio::test]
+    async fn test_resolve_or_create_collection_propagates_list_failure() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                "message": "collections backend unavailable"
+            })))
+            .mount(&mock)
+            .await;
+        // No CREATE mock on purpose: if the code incorrectly falls through to
+        // CREATE the call will 404 from wiremock and the assertion below will
+        // still catch the wrong error prefix.
+
+        let s = test_server(&mock.uri());
+        let err = s
+            .resolve_or_create_collection("amsel-literature-survey")
+            .await
+            .expect_err("should propagate list failure");
+        assert!(
+            err.contains("Failed to list collections"),
+            "expected list failure to propagate, got: {err}"
+        );
+        assert!(
+            !err.contains("Failed to create collection"),
+            "must not mask list failure with create error, got: {err}"
+        );
     }
 
     #[tokio::test]
