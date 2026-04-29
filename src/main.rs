@@ -182,6 +182,18 @@ fn resolve_payload_metadata(payload: &serde_json::Value) -> Option<serde_json::V
         .cloned()
 }
 
+fn resolve_text_body(query: &str, use_live_queries: bool) -> serde_json::Value {
+    serde_json::json!({
+        "input": { "kind": "text", "text": query },
+        "filters": {},
+        "options": {
+            "max_candidates": 5,
+            "prefer_exact_identifier": true,
+            "use_live_queries": use_live_queries
+        }
+    })
+}
+
 async fn lookup_doi_with_retry(
     http: &reqwest::Client,
     api_base: &str,
@@ -234,6 +246,9 @@ struct ReverseArgs {
     /// Optional ORCID ID to filter/boost results by author's ORCID (e.g. "0000-0002-1234-5678")
     #[serde(default)]
     orcid: Option<String>,
+    /// When true, allow live upstream provider queries in addition to the local corpus.
+    #[serde(default)]
+    use_live_queries: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -273,6 +288,9 @@ struct BatchArgs {
     /// CSL style for formatting
     #[serde(default = "default_style")]
     style: String,
+    /// When true, allow live upstream provider queries in addition to the local corpus.
+    #[serde(default)]
+    use_live_queries: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -299,6 +317,9 @@ struct AddToCollectionArgs {
     collection: String,
     /// DOI, ISBN, or free-text search to find the paper to add
     query: String,
+    /// When true, allow live upstream provider queries in addition to the local corpus.
+    #[serde(default)]
+    use_live_queries: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -340,6 +361,9 @@ struct CheckDuplicatesArgs {
     collection: String,
     /// DOI or free-text query to check for duplicates
     query: String,
+    /// When true, allow live upstream provider queries in addition to the local corpus.
+    #[serde(default)]
+    use_live_queries: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -348,6 +372,9 @@ struct BatchAddArgs {
     collection: String,
     /// List of DOIs or free-text queries to resolve and add
     queries: Vec<String>,
+    /// When true, allow live upstream provider queries in addition to the local corpus.
+    #[serde(default)]
+    use_live_queries: bool,
 }
 
 // --- Phase 2: Collection management ---
@@ -608,10 +635,10 @@ impl Server {
 
     #[tool(
         name = "reverse_lookup",
-        description = "Parse a messy citation string and find the matching paper. Returns ranked candidates. Optional filters (author, journal, year, orcid) boost matching results."
+        description = "Parse a messy citation string and find the matching paper. Returns ranked candidates from the local corpus by default. Set use_live_queries=true to allow live upstream provider calls. Optional filters (author, journal, year, orcid) boost matching results."
     )]
     async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> String {
-        let mut body = serde_json::json!({"text": args.text});
+        let mut body = resolve_text_body(&args.text, args.use_live_queries);
         // Build filters object for optional search cues
         let mut filters = serde_json::Map::new();
         if let Some(author) = &args.author {
@@ -630,14 +657,26 @@ impl Server {
             body["filters"] = serde_json::Value::Object(filters);
         }
         let r = self
-            .request(endpoints::REVERSE, &[])
+            .request(endpoints::RESOLVE, &[])
             .json(&body)
             .send()
             .await;
         match r {
             Ok(resp) if resp.status().is_success() => {
-                let candidates: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+                let payload: serde_json::Value = resp.json().await.unwrap_or_default();
+                let candidates = payload
+                    .get("candidates")
+                    .and_then(|value| value.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 let mut out = Vec::new();
+                if let Some(paper) = payload.get("paper") {
+                    let title = paper["title"].as_str().unwrap_or("?");
+                    let doi = paper["doi"].as_str().unwrap_or("?");
+                    let journal = paper["journal"].as_str().unwrap_or("N/A");
+                    out.push(format!("1. [score:100] {title} | {journal} (doi:{doi})"));
+                }
+                let offset = out.len();
                 for (i, c) in candidates.iter().enumerate() {
                     let title = c["metadata"]["title"].as_str().unwrap_or("?");
                     let doi = c["metadata"]["doi"].as_str().unwrap_or("?");
@@ -645,7 +684,7 @@ impl Server {
                     let score = c["score"].as_f64().unwrap_or(0.0);
                     out.push(format!(
                         "{}. [score:{:.0}] {title} | {journal} (doi:{doi})",
-                        i + 1,
+                        offset + i + 1,
                         score
                     ));
                 }
@@ -953,46 +992,30 @@ impl Server {
 
     #[tool(
         name = "batch_format",
-        description = "Resolve and format multiple messy citations at once. Pass citation strings in any format."
+        description = "Resolve and format multiple messy citations at once. Uses the local corpus by default; set use_live_queries=true to allow live upstream provider calls."
     )]
     async fn batch_format(&self, Parameters(args): Parameters<BatchArgs>) -> String {
         // Resolve all citations in parallel (up to 10 concurrent)
-        let api_base = self.api_base.clone();
+        let use_live_queries = args.use_live_queries;
         let futs: Vec<_> = args
             .citations
             .iter()
             .enumerate()
             .map(|(i, text)| {
-                let http = self.http.clone();
-                let api_base = api_base.clone();
+                let server = self.clone();
                 let text = text.clone();
                 async move {
-                    let r = http
-                        .post(endpoints::REVERSE.url(&api_base, &[]))
-                        .json(&serde_json::json!({"text": text}))
-                        .send()
-                        .await;
-                    match r {
-                        Ok(resp) if resp.status().is_success() => {
-                            let candidates: Vec<serde_json::Value> =
-                                resp.json().await.unwrap_or_default();
-                            if let Some(meta) = candidates.first().and_then(|c| c.get("metadata")) {
-                                Ok(meta.clone())
-                            } else {
-                                Err(format!(
-                                    "[{}] Not found: {}",
-                                    i + 1,
-                                    &text[..text.len().min(60)]
-                                ))
-                            }
-                        }
-                        Ok(resp) => Err(format!(
-                            "[{}] HTTP {}: {}",
+                    if let Some(meta) = server
+                        .resolve_query_to_metadata(&text, use_live_queries)
+                        .await
+                    {
+                        Ok(meta)
+                    } else {
+                        Err(format!(
+                            "[{}] Not found: {}",
                             i + 1,
-                            resp.status(),
                             &text[..text.len().min(60)]
-                        )),
-                        Err(e) => Err(format!("[{}] {e}: {}", i + 1, &text[..text.len().min(60)])),
+                        ))
                     }
                 }
             })
@@ -1089,7 +1112,7 @@ impl Server {
 
     #[tool(
         name = "add_to_collection",
-        description = "Add a citation to a collection. Searches by DOI, ISBN, or free-text (e.g. 'Goswami JCTC 2026'). Creates the collection if it doesn't exist."
+        description = "Add a citation to a collection. Searches by DOI, ISBN, or free-text (e.g. 'Goswami JCTC 2026'). Creates the collection if it doesn't exist. Free-text uses the local corpus by default; set use_live_queries=true to allow live upstream provider calls."
     )]
     async fn add_to_collection(&self, Parameters(args): Parameters<AddToCollectionArgs>) -> String {
         let col_id = match self.resolve_or_create_collection(&args.collection).await {
@@ -1100,18 +1123,17 @@ impl Server {
         let metadata = {
             let q = args.query.trim();
             if q.starts_with("10.") {
-                match self.resolve_query_to_metadata(q).await {
+                match self
+                    .resolve_query_to_metadata(q, args.use_live_queries)
+                    .await
+                {
                     Some(metadata) => metadata,
                     None => return format!("Could not resolve: {}", args.query),
                 }
             } else {
                 let resolve = self
                     .request(endpoints::RESOLVE, &[])
-                    .json(&serde_json::json!({
-                        "input": { "kind": "Text", "text": q },
-                        "filters": {},
-                        "options": {}
-                    }))
+                    .json(&resolve_text_body(q, args.use_live_queries))
                     .send()
                     .await;
                 match resolve {
@@ -1125,18 +1147,27 @@ impl Server {
                             if !candidates.is_empty() {
                                 return format_resolve_candidates(&args.query, candidates);
                             }
-                            match self.resolve_query_to_metadata(q).await {
+                            match self
+                                .resolve_query_to_metadata(q, args.use_live_queries)
+                                .await
+                            {
                                 Some(metadata) => metadata,
                                 None => return format!("Could not resolve: {}", args.query),
                             }
                         } else {
-                            match self.resolve_query_to_metadata(q).await {
+                            match self
+                                .resolve_query_to_metadata(q, args.use_live_queries)
+                                .await
+                            {
                                 Some(metadata) => metadata,
                                 None => return format!("Could not resolve: {}", args.query),
                             }
                         }
                     }
-                    _ => match self.resolve_query_to_metadata(q).await {
+                    _ => match self
+                        .resolve_query_to_metadata(q, args.use_live_queries)
+                        .await
+                    {
                         Some(metadata) => metadata,
                         None => return format!("Could not resolve: {}", args.query),
                     },
@@ -1320,22 +1351,23 @@ impl Server {
         match r {
             Ok(r) if r.status().is_success() => {
                 let c: serde_json::Value = r.json().await.unwrap_or_default();
-                c["id"]
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        format!(
-                            "Collection '{}' was created but the API response did not include an id.",
-                            name
-                        )
-                    })
+                c["id"].as_str().map(|s| s.to_string()).ok_or_else(|| {
+                    format!(
+                        "Collection '{}' was created but the API response did not include an id.",
+                        name
+                    )
+                })
             }
             Ok(r) => Err(classify_collection_create_failure(r, name).await),
             Err(e) => Err(format!("Failed to create collection '{}': {e}", name)),
         }
     }
 
-    async fn resolve_query_to_metadata(&self, query: &str) -> Option<serde_json::Value> {
+    async fn resolve_query_to_metadata(
+        &self,
+        query: &str,
+        use_live_queries: bool,
+    ) -> Option<serde_json::Value> {
         let q = query.trim();
         if q.starts_with("10.") {
             let r = self
@@ -1352,11 +1384,7 @@ impl Server {
         } else {
             let resolve = self
                 .request(endpoints::RESOLVE, &[])
-                .json(&serde_json::json!({
-                    "input": { "kind": "Text", "text": q },
-                    "filters": {},
-                    "options": {}
-                }))
+                .json(&resolve_text_body(q, use_live_queries))
                 .send()
                 .await;
             match resolve {
@@ -1367,6 +1395,10 @@ impl Server {
                     }
                 }
                 _ => {}
+            }
+
+            if !use_live_queries {
+                return None;
             }
 
             let reverse = self
@@ -1473,7 +1505,10 @@ impl Server {
             Err(e) => return e,
         };
 
-        let Some(metadata) = self.resolve_query_to_metadata(&args.query).await else {
+        let Some(metadata) = self
+            .resolve_query_to_metadata(&args.query, args.use_live_queries)
+            .await
+        else {
             return format!("Could not resolve: {}", args.query);
         };
 
@@ -1506,7 +1541,7 @@ impl Server {
 
     #[tool(
         name = "batch_add_to_collection",
-        description = "Add multiple citations to a collection at once. Each query can be a DOI or free-text search. Creates the collection if it doesn't exist, but batch collection workflows may require a paid plan or additional collection capacity."
+        description = "Add multiple citations to a collection at once. Each query can be a DOI or free-text search. Creates the collection if it doesn't exist, but batch collection workflows may require a paid plan or additional collection capacity. Free-text uses the local corpus by default; set use_live_queries=true to allow live upstream provider calls."
     )]
     async fn batch_add_to_collection(&self, Parameters(args): Parameters<BatchAddArgs>) -> String {
         let col_id = match self.resolve_or_create_collection(&args.collection).await {
@@ -1515,6 +1550,7 @@ impl Server {
         };
 
         // Resolve all queries in parallel (up to 10 concurrent)
+        let use_live_queries = args.use_live_queries;
         let futs: Vec<_> = args
             .queries
             .iter()
@@ -1524,7 +1560,7 @@ impl Server {
                 let query = query.clone();
                 async move {
                     let q = query.trim();
-                    let meta = server.resolve_query_to_metadata(q).await;
+                    let meta = server.resolve_query_to_metadata(q, use_live_queries).await;
                     match meta {
                         Some(m) => Ok(m),
                         None => Err(format!(
@@ -2501,17 +2537,21 @@ mod tests {
     async fn test_reverse_lookup_success() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/reverse"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {
-                    "metadata": {
-                        "title": "Stimulated Optical Radiation in Ruby",
-                        "doi": "10.1038/187493a0",
-                        "journal": "Nature"
-                    },
-                    "score": 95.0
-                }
-            ])))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "match_type": "candidate_list",
+                "candidates": [
+                    {
+                        "metadata": {
+                            "title": "Stimulated Optical Radiation in Ruby",
+                            "doi": "10.1038/187493a0",
+                            "journal": "Nature"
+                        },
+                        "score": 95.0
+                    }
+                ]
+            })))
             .mount(&mock)
             .await;
 
@@ -2523,6 +2563,7 @@ mod tests {
                 journal: None,
                 year: None,
                 orcid: None,
+                use_live_queries: false,
             }))
             .await;
         assert!(result.contains("Stimulated Optical Radiation"));
@@ -2533,8 +2574,11 @@ mod tests {
     async fn test_reverse_lookup_no_matches() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/reverse"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "candidates": []
+            })))
             .mount(&mock)
             .await;
 
@@ -2546,6 +2590,7 @@ mod tests {
                 journal: None,
                 year: None,
                 orcid: None,
+                use_live_queries: false,
             }))
             .await;
         assert_eq!(result, "No matches found");
@@ -2782,7 +2827,7 @@ mod tests {
 
         let s = test_server(&mock.uri());
         let metadata = s
-            .resolve_query_to_metadata("Wright 1931 genetics shifting balance")
+            .resolve_query_to_metadata("Wright 1931 genetics shifting balance", false)
             .await
             .expect("metadata");
 
@@ -2822,7 +2867,7 @@ mod tests {
 
         let s = test_server(&mock.uri());
         let metadata = s
-            .resolve_query_to_metadata("Wright 1931 genetics shifting balance")
+            .resolve_query_to_metadata("Wright 1931 genetics shifting balance", false)
             .await
             .expect("metadata");
 
@@ -2870,6 +2915,7 @@ mod tests {
             .add_to_collection(Parameters(AddToCollectionArgs {
                 collection: "My References".into(),
                 query: "Wright 1931 genetics shifting balance".into(),
+                use_live_queries: false,
             }))
             .await;
 
@@ -2925,6 +2971,7 @@ mod tests {
             .add_to_collection(Parameters(AddToCollectionArgs {
                 collection: "My References".into(),
                 query: "Wright 1931 genetics shifting balance".into(),
+                use_live_queries: false,
             }))
             .await;
 
@@ -2980,6 +3027,7 @@ mod tests {
             .batch_add_to_collection(Parameters(BatchAddArgs {
                 collection: "RuhiMastersThesis".into(),
                 queries: vec!["Wright 1931 genetics shifting balance".into()],
+                use_live_queries: false,
             }))
             .await;
 
@@ -3116,6 +3164,7 @@ mod tests {
                     "Kimura 1983 neutral theory".into(),
                     "qwertyzzz nothing matches this".into(),
                 ],
+                use_live_queries: false,
             }))
             .await;
 
@@ -3262,7 +3311,7 @@ mod tests {
     async fn test_reverse_lookup_rate_limited() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/reverse"))
+            .and(path("/api/v1/resolve"))
             .respond_with(ResponseTemplate::new(429).set_body_string("Daily limit reached"))
             .mount(&mock)
             .await;
@@ -3275,6 +3324,7 @@ mod tests {
                 journal: None,
                 year: None,
                 orcid: None,
+                use_live_queries: false,
             }))
             .await;
         assert!(result.starts_with("RATE LIMITED"));
@@ -3284,7 +3334,7 @@ mod tests {
     async fn test_reverse_lookup_temporary_upstream_failure() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/reverse"))
+            .and(path("/api/v1/resolve"))
             .respond_with(ResponseTemplate::new(503).set_body_string(
                 "Lookup service temporarily unavailable. Please try again shortly.",
             ))
@@ -3299,6 +3349,7 @@ mod tests {
                 journal: None,
                 year: None,
                 orcid: None,
+                use_live_queries: false,
             }))
             .await;
         assert!(result.starts_with("TEMPORARY ERROR"));
