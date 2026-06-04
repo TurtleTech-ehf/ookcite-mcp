@@ -90,7 +90,13 @@ jobs:
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --allow-dirty
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if curl -fsS "https://crates.io/api/v1/crates/ookcite-mcp/$VERSION" >/dev/null; then
+            echo "Version $VERSION already published, skipping"
+            exit 0
+          fi
+          cargo publish --allow-dirty
 
   npm-publish:
     name: Publish to npm
@@ -109,11 +115,13 @@ jobs:
 
       - name: Set version from tag and publish
         working-directory: npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
+          if npm view "@turtletech/ookcite-mcp@$VERSION" version >/dev/null 2>&1; then
+            echo "Version $VERSION already published, skipping"
+            exit 0
+          fi
           npm publish --access public --provenance 2>&1 || {
             if npm view "@turtletech/ookcite-mcp@$VERSION" version >/dev/null 2>&1; then
               echo "Version $VERSION already published, skipping"
