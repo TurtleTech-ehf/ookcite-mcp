@@ -62,19 +62,21 @@
 
 mod setup;
 
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use ookcite_mcp::endpoints::{self, Endpoint};
 use rmcp::ServerHandler;
 use rmcp::{
+    ServiceExt,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_handler, tool_router, ServiceExt,
+    tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 const API: &str = "https://ookcite-api.turtletech.us";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const MIN_CONFIDENT_REVERSE_LOOKUP_SCORE: f64 = 25.0;
 
 fn version_output() -> String {
     format!("ookcite-mcp {VERSION}")
@@ -136,18 +138,25 @@ async fn classify_collection_create_failure(resp: reqwest::Response, name: &str)
     }
 }
 
-fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<String> {
+struct ReverseLookupMatch {
+    output: String,
+    top_score: f64,
+}
+
+fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<ReverseLookupMatch> {
     let candidates = payload
         .get("candidates")
         .and_then(|value| value.as_array())
         .cloned()
         .unwrap_or_default();
     let mut out = Vec::new();
+    let mut top_score = f64::NEG_INFINITY;
     if let Some(paper) = payload.get("paper") {
         let title = paper["title"].as_str().unwrap_or("?");
         let doi = paper["doi"].as_str().unwrap_or("?");
         let journal = paper["journal"].as_str().unwrap_or("N/A");
         out.push(format!("1. [score:100] {title} | {journal} (doi:{doi})"));
+        top_score = top_score.max(100.0);
     }
     let offset = out.len();
     for (i, c) in candidates.iter().enumerate() {
@@ -155,6 +164,7 @@ fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<String> 
         let doi = c["metadata"]["doi"].as_str().unwrap_or("?");
         let journal = c["metadata"]["journal"].as_str().unwrap_or("N/A");
         let score = c["score"].as_f64().unwrap_or(0.0);
+        top_score = top_score.max(score);
         out.push(format!(
             "{}. [score:{:.0}] {title} | {journal} (doi:{doi})",
             offset + i + 1,
@@ -164,13 +174,16 @@ fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<String> 
     if out.is_empty() {
         None
     } else {
-        Some(out.join("\n"))
+        Some(ReverseLookupMatch {
+            output: out.join("\n"),
+            top_score,
+        })
     }
 }
 
 async fn classify_reverse_lookup_response(
     response: Result<reqwest::Response, reqwest::Error>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<ReverseLookupMatch>, String> {
     match response {
         Ok(resp) if resp.status().is_success() => {
             let payload: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -653,7 +666,9 @@ impl Server {
                 let volume = meta["volume"].as_str().unwrap_or("N/A");
                 let issue = meta["issue"].as_str().unwrap_or("N/A");
                 let doi = meta["doi"].as_str().unwrap_or(&args.doi);
-                format!("VALID\nDOI: {doi}\nTitle: {title}\nAuthors: {authors}\nYear: {year}\nJournal: {journal}\nVolume: {volume}\nIssue: {issue}")
+                format!(
+                    "VALID\nDOI: {doi}\nTitle: {title}\nAuthors: {authors}\nYear: {year}\nJournal: {journal}\nVolume: {volume}\nIssue: {issue}"
+                )
             }
             Ok(resp) => classify_lookup_doi_failure(resp, &args.doi).await,
             Err(e) => format!("ERROR: Could not reach citation service: {e}"),
@@ -710,7 +725,7 @@ impl Server {
 
     #[tool(
         name = "reverse_lookup",
-        description = "Parse a messy citation string and find the matching paper. Searches the local corpus first, then retries with live upstream providers when local search is empty. Set use_live_queries=true to allow live upstream providers on the first pass. Optional filters (author, journal, year, orcid) boost matching results."
+        description = "Parse a messy citation string and find the matching paper. Searches the local corpus first, then retries with live upstream providers when local search is empty or weak. Set use_live_queries=true to allow live upstream providers on the first pass. Optional filters (author, journal, year, orcid) boost matching results."
     )]
     async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> String {
         let body = reverse_lookup_resolve_body(&args, args.use_live_queries);
@@ -720,7 +735,23 @@ impl Server {
             .send()
             .await;
         match classify_reverse_lookup_response(r).await {
-            Ok(Some(output)) => output,
+            Ok(Some(local_match))
+                if !args.use_live_queries
+                    && local_match.top_score < MIN_CONFIDENT_REVERSE_LOOKUP_SCORE =>
+            {
+                let live_body = reverse_lookup_resolve_body(&args, true);
+                let live = self
+                    .request(endpoints::RESOLVE, &[])
+                    .json(&live_body)
+                    .send()
+                    .await;
+                match classify_reverse_lookup_response(live).await {
+                    Ok(Some(live_match)) => live_match.output,
+                    Ok(None) => local_match.output,
+                    Err(_) => local_match.output,
+                }
+            }
+            Ok(Some(local_match)) => local_match.output,
             Ok(None) if !args.use_live_queries => {
                 let live_body = reverse_lookup_resolve_body(&args, true);
                 let live = self
@@ -729,7 +760,7 @@ impl Server {
                     .send()
                     .await;
                 match classify_reverse_lookup_response(live).await {
-                    Ok(Some(output)) => output,
+                    Ok(Some(live_match)) => live_match.output,
                     Ok(None) => "No matches found".into(),
                     Err(message) => message,
                 }
@@ -897,10 +928,10 @@ impl Server {
         let meta: serde_json::Value = match lookup {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
             Ok(r) if r.status().as_u16() == 429 => {
-                return format!("RATE LIMITED: {}", error_detail(r).await)
+                return format!("RATE LIMITED: {}", error_detail(r).await);
             }
             Ok(r) if r.status().as_u16() == 403 => {
-                return format!("ACCESS DENIED: {}", error_detail(r).await)
+                return format!("ACCESS DENIED: {}", error_detail(r).await);
             }
             Ok(_) => return format!("DOI {} not found", args.doi),
             Err(e) => return format!("ERROR: {e}"),
@@ -1347,13 +1378,13 @@ impl Server {
             match self.request(endpoints::COLLECTIONS_LIST, &[]).send().await {
                 Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
                 Ok(r) if r.status().as_u16() == 401 => {
-                    return Err("Authentication required. Set OOKCITE_API_KEY.".into())
+                    return Err("Authentication required. Set OOKCITE_API_KEY.".into());
                 }
                 Ok(r) => {
                     return Err(format!(
                         "Failed to list collections: {}",
                         error_detail(r).await
-                    ))
+                    ));
                 }
                 Err(e) => return Err(format!("Failed to list collections: {e}")),
             };
@@ -2674,6 +2705,67 @@ mod tests {
 
         assert!(result.contains("High Throughput Reproducible Literate Phylogenetic Analysis"));
         assert!(result.contains("10.1109/pdgc56933.2022.10053210"));
+    }
+
+    #[tokio::test]
+    async fn test_reverse_lookup_falls_back_to_live_when_local_match_is_weak() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains(r#""use_live_queries":false"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "match_type": "candidate_list",
+                "candidates": [
+                    {
+                        "metadata": {
+                            "title": "Resource allocation based on redundancy models for high availability cloud",
+                            "doi": "10.1007/s00607-019-00728-1",
+                            "journal": "Computing"
+                        },
+                        "score": 2.0
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains(r#""use_live_queries":true"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "match_type": "candidate_list",
+                "candidates": [
+                    {
+                        "metadata": {
+                            "title": "Attention Is All You Need",
+                            "doi": "10.48550/arXiv.1706.03762",
+                            "journal": "arXiv"
+                        },
+                        "score": 88.0
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "Attention Is All You Need Vaswani 2017".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: false,
+            }))
+            .await;
+
+        assert!(result.contains("Attention Is All You Need"));
+        assert!(result.contains("10.48550/arXiv.1706.03762"));
+        assert!(!result.contains("Resource allocation based on redundancy models"));
     }
 
     #[tokio::test]
