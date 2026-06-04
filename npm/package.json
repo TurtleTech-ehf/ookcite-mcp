@@ -33,7 +33,7 @@
   "homepage": "https://ookcite.turtletech.us",
   "repository": {
     "type": "git",
-    "url": "https://github.com/TurtleTech-ehf/ookcite-mcp.git"
+    "url": "git+https://github.com/TurtleTech-ehf/ookcite-mcp.git"
   },
   "license": "MIT"
 }
