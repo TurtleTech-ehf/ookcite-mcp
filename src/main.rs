@@ -62,17 +62,16 @@
 
 mod setup;
 
-use futures::{StreamExt, stream};
+use futures::{stream, StreamExt};
 use ookcite_mcp::endpoints::{self, Endpoint};
 use rmcp::ServerHandler;
 use rmcp::{
-    ServiceExt,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_handler, tool_router,
+    tool, tool_handler, tool_router, ServiceExt,
 };
 use serde::Deserialize;
-use tokio::time::{Duration, sleep};
+use tokio::time::{sleep, Duration};
 
 const API: &str = "https://ookcite-api.turtletech.us";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
