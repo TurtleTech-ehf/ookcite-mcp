@@ -746,8 +746,12 @@ impl Server {
                     .send()
                     .await;
                 match classify_reverse_lookup_response(live).await {
-                    Ok(Some(live_match)) => live_match.output,
-                    Ok(None) => local_match.output,
+                    Ok(Some(live_match))
+                        if live_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE =>
+                    {
+                        live_match.output
+                    }
+                    Ok(Some(_)) | Ok(None) => "No confident matches found".into(),
                     Err(_) => local_match.output,
                 }
             }
@@ -2766,6 +2770,65 @@ mod tests {
         assert!(result.contains("Attention Is All You Need"));
         assert!(result.contains("10.48550/arXiv.1706.03762"));
         assert!(!result.contains("Resource allocation based on redundancy models"));
+    }
+
+    #[tokio::test]
+    async fn test_reverse_lookup_rejects_unconfident_local_and_live_matches() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains(r#""use_live_queries":false"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "match_type": "candidate_list",
+                "candidates": [
+                    {
+                        "metadata": {
+                            "title": "Resource allocation based on redundancy models for high availability cloud",
+                            "doi": "10.1007/s00607-019-00728-1",
+                            "journal": "Computing"
+                        },
+                        "score": 2.0
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains(r#""use_live_queries":true"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "match_type": "candidate_list",
+                "candidates": [
+                    {
+                        "metadata": {
+                            "title": "All You Need Is LSD",
+                            "doi": "10.5040/9781350101272.00000005",
+                            "journal": "All You Need Is LSD"
+                        },
+                        "score": 10.0
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "Attention Is All You Need Vaswani 2017".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: false,
+            }))
+            .await;
+
+        assert_eq!(result, "No confident matches found");
     }
 
     #[tokio::test]
