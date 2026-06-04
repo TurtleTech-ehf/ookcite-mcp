@@ -1369,9 +1369,8 @@ impl Server {
         // Auth / 5xx / transport errors propagate as-is so callers see the real
         // cause instead of a downstream "Failed to create collection" that
         // hides a list-collections auth failure.
-        match self.lookup_collection_id(name).await? {
-            Some(id) => return Ok(id),
-            None => {}
+        if let Some(id) = self.lookup_collection_id(name).await? {
+            return Ok(id);
         }
 
         let r = self
