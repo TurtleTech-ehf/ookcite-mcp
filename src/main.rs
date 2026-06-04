@@ -136,6 +136,81 @@ async fn classify_collection_create_failure(resp: reqwest::Response, name: &str)
     }
 }
 
+fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<String> {
+    let candidates = payload
+        .get("candidates")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    if let Some(paper) = payload.get("paper") {
+        let title = paper["title"].as_str().unwrap_or("?");
+        let doi = paper["doi"].as_str().unwrap_or("?");
+        let journal = paper["journal"].as_str().unwrap_or("N/A");
+        out.push(format!("1. [score:100] {title} | {journal} (doi:{doi})"));
+    }
+    let offset = out.len();
+    for (i, c) in candidates.iter().enumerate() {
+        let title = c["metadata"]["title"].as_str().unwrap_or("?");
+        let doi = c["metadata"]["doi"].as_str().unwrap_or("?");
+        let journal = c["metadata"]["journal"].as_str().unwrap_or("N/A");
+        let score = c["score"].as_f64().unwrap_or(0.0);
+        out.push(format!(
+            "{}. [score:{:.0}] {title} | {journal} (doi:{doi})",
+            offset + i + 1,
+            score
+        ));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out.join("\n"))
+    }
+}
+
+async fn classify_reverse_lookup_response(
+    response: Result<reqwest::Response, reqwest::Error>,
+) -> Result<Option<String>, String> {
+    match response {
+        Ok(resp) if resp.status().is_success() => {
+            let payload: serde_json::Value = resp.json().await.unwrap_or_default();
+            Ok(format_reverse_lookup_payload(&payload))
+        }
+        Ok(r) if r.status().as_u16() == 429 => {
+            Err(format!("RATE LIMITED: {}", error_detail(r).await))
+        }
+        Ok(r) if r.status().as_u16() == 403 => {
+            Err(format!("ACCESS DENIED: {}", error_detail(r).await))
+        }
+        Ok(r) if r.status().is_server_error() => {
+            Err(format!("TEMPORARY ERROR: {}", error_detail(r).await))
+        }
+        Ok(_) => Ok(None),
+        Err(e) => Err(format!("Reverse lookup failed: {e}")),
+    }
+}
+
+fn reverse_lookup_resolve_body(args: &ReverseArgs, use_live_queries: bool) -> serde_json::Value {
+    let mut body = resolve_text_body(&args.text, use_live_queries);
+    let mut filters = serde_json::Map::new();
+    if let Some(author) = &args.author {
+        filters.insert("author".into(), serde_json::json!(author));
+    }
+    if let Some(journal) = &args.journal {
+        filters.insert("journal".into(), serde_json::json!(journal));
+    }
+    if let Some(year) = args.year {
+        filters.insert("year".into(), serde_json::json!(year));
+    }
+    if let Some(orcid) = &args.orcid {
+        filters.insert("orcid".into(), serde_json::json!(orcid));
+    }
+    if !filters.is_empty() {
+        body["filters"] = serde_json::Value::Object(filters);
+    }
+    body
+}
+
 fn format_resolve_candidates(query: &str, candidates: &[serde_json::Value]) -> String {
     let mut lines = vec![format!("Ambiguous match for '{}'. Top candidates:", query)];
     for (idx, candidate) in candidates.iter().take(5).enumerate() {
@@ -635,76 +710,32 @@ impl Server {
 
     #[tool(
         name = "reverse_lookup",
-        description = "Parse a messy citation string and find the matching paper. Returns ranked candidates from the local corpus by default. Set use_live_queries=true to allow live upstream provider calls. Optional filters (author, journal, year, orcid) boost matching results."
+        description = "Parse a messy citation string and find the matching paper. Searches the local corpus first, then retries with live upstream providers when local search is empty. Set use_live_queries=true to allow live upstream providers on the first pass. Optional filters (author, journal, year, orcid) boost matching results."
     )]
     async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> String {
-        let mut body = resolve_text_body(&args.text, args.use_live_queries);
-        // Build filters object for optional search cues
-        let mut filters = serde_json::Map::new();
-        if let Some(author) = &args.author {
-            filters.insert("author".into(), serde_json::json!(author));
-        }
-        if let Some(journal) = &args.journal {
-            filters.insert("journal".into(), serde_json::json!(journal));
-        }
-        if let Some(year) = args.year {
-            filters.insert("year".into(), serde_json::json!(year));
-        }
-        if let Some(orcid) = &args.orcid {
-            filters.insert("orcid".into(), serde_json::json!(orcid));
-        }
-        if !filters.is_empty() {
-            body["filters"] = serde_json::Value::Object(filters);
-        }
+        let body = reverse_lookup_resolve_body(&args, args.use_live_queries);
         let r = self
             .request(endpoints::RESOLVE, &[])
             .json(&body)
             .send()
             .await;
-        match r {
-            Ok(resp) if resp.status().is_success() => {
-                let payload: serde_json::Value = resp.json().await.unwrap_or_default();
-                let candidates = payload
-                    .get("candidates")
-                    .and_then(|value| value.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                let mut out = Vec::new();
-                if let Some(paper) = payload.get("paper") {
-                    let title = paper["title"].as_str().unwrap_or("?");
-                    let doi = paper["doi"].as_str().unwrap_or("?");
-                    let journal = paper["journal"].as_str().unwrap_or("N/A");
-                    out.push(format!("1. [score:100] {title} | {journal} (doi:{doi})"));
-                }
-                let offset = out.len();
-                for (i, c) in candidates.iter().enumerate() {
-                    let title = c["metadata"]["title"].as_str().unwrap_or("?");
-                    let doi = c["metadata"]["doi"].as_str().unwrap_or("?");
-                    let journal = c["metadata"]["journal"].as_str().unwrap_or("N/A");
-                    let score = c["score"].as_f64().unwrap_or(0.0);
-                    out.push(format!(
-                        "{}. [score:{:.0}] {title} | {journal} (doi:{doi})",
-                        offset + i + 1,
-                        score
-                    ));
-                }
-                if out.is_empty() {
-                    "No matches found".into()
-                } else {
-                    out.join("\n")
+        match classify_reverse_lookup_response(r).await {
+            Ok(Some(output)) => output,
+            Ok(None) if !args.use_live_queries => {
+                let live_body = reverse_lookup_resolve_body(&args, true);
+                let live = self
+                    .request(endpoints::RESOLVE, &[])
+                    .json(&live_body)
+                    .send()
+                    .await;
+                match classify_reverse_lookup_response(live).await {
+                    Ok(Some(output)) => output,
+                    Ok(None) => "No matches found".into(),
+                    Err(message) => message,
                 }
             }
-            Ok(r) if r.status().as_u16() == 429 => {
-                format!("RATE LIMITED: {}", error_detail(r).await)
-            }
-            Ok(r) if r.status().as_u16() == 403 => {
-                format!("ACCESS DENIED: {}", error_detail(r).await)
-            }
-            Ok(r) if r.status().is_server_error() => {
-                format!("TEMPORARY ERROR: {}", error_detail(r).await)
-            }
-            Ok(_) => "No matches found".into(),
-            Err(e) => format!("Reverse lookup failed: {e}"),
+            Ok(None) => "No matches found".into(),
+            Err(message) => message,
         }
     }
 
