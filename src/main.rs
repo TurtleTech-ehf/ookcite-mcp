@@ -2597,6 +2597,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reverse_lookup_falls_back_to_live_when_local_empty() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains(r#""use_live_queries":false"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "candidates": []
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains(r#""use_live_queries":true"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "match_type": "candidate_list",
+                "candidates": [
+                    {
+                        "metadata": {
+                            "title": "High Throughput Reproducible Literate Phylogenetic Analysis",
+                            "doi": "10.1109/pdgc56933.2022.10053210",
+                            "journal": "2022 Seventh International Conference on Parallel, Distributed and Grid Computing (PDGC)"
+                        },
+                        "score": 91.0
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "Goswami Ruhila High Throughput Reproducible Literate Phylogenetic Analysis PDGC 2022".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: false,
+            }))
+            .await;
+
+        assert!(result.contains("High Throughput Reproducible Literate Phylogenetic Analysis"));
+        assert!(result.contains("10.1109/pdgc56933.2022.10053210"));
+    }
+
+    #[tokio::test]
     async fn test_health_check_success() {
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
@@ -3035,10 +3085,8 @@ mod tests {
         assert!(!result.contains("Could not resolve"));
     }
 
-    /// Regression for OokCite-9dw: `batch_add_to_collection` must auto-create
-    /// the target collection when it does not exist and succeed for mixed
-    /// DOI + free-text queries, mirroring the live report where six queries
-    /// were rejected with a generic "Failed to create collection" message.
+    /// `batch_add_to_collection` auto-creates a missing target collection and
+    /// accepts a mixed DOI plus free-text query batch.
     #[tokio::test]
     async fn test_batch_add_to_collection_auto_creates_for_mixed_queries() {
         let mock = MockServer::start().await;
