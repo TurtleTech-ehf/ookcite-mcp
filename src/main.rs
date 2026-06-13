@@ -1328,6 +1328,7 @@ impl Server {
                     || journal.contains(&query_lower)
             })
             .map(|e| {
+                let entry_id = e["id"].as_str().unwrap_or("?");
                 let meta = &e["metadata"];
                 let title = meta["title"].as_str().unwrap_or("?");
                 let authors = meta["authors"]
@@ -1343,7 +1344,7 @@ impl Server {
                     .as_i64()
                     .map(|y| format!(" ({y})"))
                     .unwrap_or_default();
-                format!("- {authors}{year}: {title}")
+                format!("- entry_id: {entry_id}; {authors}{year}: {title}")
             })
             .collect();
 
@@ -1760,13 +1761,27 @@ impl Server {
             .send()
             .await;
         match r {
-            Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
-                format!(
-                    "Removed entry {} from '{}'.",
-                    args.entry_id, args.collection
-                )
+            Ok(r) if r.status().is_success() => {
+                if r.status().as_u16() == 204 {
+                    return format!(
+                        "Removed entry {} from '{}'.",
+                        args.entry_id, args.collection
+                    );
+                }
+                let removed: serde_json::Value = r.json().await.unwrap_or_default();
+                let entry_id = removed["id"].as_str().unwrap_or(&args.entry_id);
+                let title = removed["metadata"]["title"].as_str().unwrap_or("");
+                if title.is_empty() {
+                    format!("Removed entry {entry_id} from '{}'.", args.collection)
+                } else {
+                    format!(
+                        "Removed entry {entry_id} from '{}': {title}",
+                        args.collection
+                    )
+                }
             }
-            _ => "Failed to remove entry.".into(),
+            Ok(r) => format!("Failed to remove entry: {}", error_detail(r).await),
+            Err(e) => format!("Failed to remove entry: {e}"),
         }
     }
 
