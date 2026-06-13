@@ -2,6 +2,26 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.4.9 - 2026-06-13
+#### Bugfixes
+- (**collections**) surface entry deletion results - (cc44ec8) - Rohit Goswami
+- (**reverse**) reject unconfident live retries - (202f7dd) - Rohit Goswami
+- (**reverse**) retry weak local matches live - (12ffd64) - Rohit Goswami
+#### Tests
+- (**collections**) cover mcp entry deletion flow - (093a88e) - Rohit Goswami
+- (**contract**) refresh encrypted fixture - (e96c67f) - Rohit Goswami
+- (**contract**) refresh OpenAPI fixture - (d4d0932) - Rohit Goswami
+#### Continuous Integration
+- (**release**) pin npm trusted publishing cli - (2e2d61a) - Rohit Goswami
+- (**release**) use trusted npm publishing - (796b381) - Rohit Goswami
+#### Maintenance
+- (**npm**) normalize repository url - (3d7da56) - Rohit Goswami
+#### Style
+- (**clippy**) simplify collection lookup - (71034f9) - Rohit Goswami
+- (**reverse**) match release formatting - (7c31d55) - Rohit Goswami
+
+- - -
+
 ## v0.4.6 - 2026-04-23
 #### Bugfixes
 - (**validate**) share doi lookup semantics with verify_references - (a537de5) - Rohit Goswami
