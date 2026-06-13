@@ -2904,6 +2904,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_collection_returns_stable_entry_ids() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-123", "name": "My Refs", "entry_count": 3}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "col-123",
+                "name": "My Refs",
+                "entries": [
+                    {
+                        "id": "entry-good",
+                        "metadata": {
+                            "title": "Keep This",
+                            "authors": [{"family": "Keeper"}],
+                            "date": {"year": 2026},
+                            "journal": "Examples"
+                        }
+                    },
+                    {
+                        "id": "entry-bad",
+                        "metadata": {
+                            "title": "Quasi-Monte Carlo Methods",
+                            "authors": [{"family": "Baldeaux"}],
+                            "date": {"year": 2008},
+                            "journal": "Monte Carlo Methods and Applications"
+                        }
+                    },
+                    {
+                        "id": "entry-other",
+                        "metadata": {
+                            "title": "Keep That",
+                            "authors": [{"family": "Keeper"}],
+                            "date": {"year": 2025},
+                            "journal": "Examples"
+                        }
+                    }
+                ]
+            })))
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .search_collection(Parameters(SearchCollectionArgs {
+                collection: "My Refs".into(),
+                query: "Quasi-Monte Carlo".into(),
+            }))
+            .await;
+
+        assert!(result.contains("entry_id: entry-bad"));
+        assert!(result.contains("Quasi-Monte Carlo Methods"));
+        assert!(!result.contains("entry-good"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_from_collection_names_removed_citation() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-123", "name": "My Refs", "entry_count": 3}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/collections/col-123/entries/entry-bad"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "entry-bad",
+                "metadata": {
+                    "title": "Quasi-Monte Carlo Methods",
+                    "authors": [{"family": "Baldeaux"}]
+                }
+            })))
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .remove_from_collection(Parameters(RemoveFromCollectionArgs {
+                collection: "My Refs".into(),
+                entry_id: "entry-bad".into(),
+            }))
+            .await;
+
+        assert!(result.contains("Removed entry entry-bad"));
+        assert!(result.contains("Quasi-Monte Carlo Methods"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_from_collection_surfaces_entry_not_found() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-123", "name": "My Refs", "entry_count": 3}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/collections/col-123/entries/alias-or-doi"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "Entry not found: alias-or-doi"
+            })))
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .remove_from_collection(Parameters(RemoveFromCollectionArgs {
+                collection: "My Refs".into(),
+                entry_id: "alias-or-doi".into(),
+            }))
+            .await;
+
+        assert!(result.contains("Entry not found: alias-or-doi"));
+        assert!(!result.contains("Removed entry"));
+    }
+
+    #[tokio::test]
     async fn test_resolve_or_create_collection_surfaces_limit_guidance() {
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
