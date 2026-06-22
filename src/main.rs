@@ -137,6 +137,125 @@ async fn classify_collection_create_failure(resp: reqwest::Response, name: &str)
     }
 }
 
+/// Normalize a DOI-like token for comparison (strip `doi:` prefix, lowercase).
+fn normalize_doi_token(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_prefix = trimmed
+        .strip_prefix("doi:")
+        .or_else(|| trimmed.strip_prefix("DOI:"))
+        .unwrap_or(trimmed)
+        .trim();
+    without_prefix.to_ascii_lowercase()
+}
+
+/// True when `raw` looks like a bare DOI or `doi:…` token (not a UUID/opaque id).
+fn looks_like_doi_token(raw: &str) -> bool {
+    let n = normalize_doi_token(raw);
+    n.starts_with("10.") && n.contains('/')
+}
+
+/// Canonical entry id from a collection entry object (`id` field, else `doi:<doi>`).
+fn entry_canonical_id(entry: &serde_json::Value) -> Option<String> {
+    if let Some(id) = entry["id"].as_str().filter(|s| !s.is_empty()) {
+        return Some(id.to_string());
+    }
+    let doi = entry_doi(entry)?;
+    Some(format!("doi:{}", normalize_doi_token(&doi)))
+}
+
+/// DOI from entry metadata, if present.
+fn entry_doi(entry: &serde_json::Value) -> Option<String> {
+    entry["metadata"]["doi"]
+        .as_str()
+        .or_else(|| entry["doi"].as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// Format one collection entry line for agent-facing search output.
+fn format_collection_entry_line(entry: &serde_json::Value) -> String {
+    let entry_id = entry_canonical_id(entry).unwrap_or_else(|| "?".into());
+    let meta = &entry["metadata"];
+    let title = meta["title"].as_str().unwrap_or("?");
+    let authors = meta["authors"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| p["family"].as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let year = meta["date"]["year"]
+        .as_i64()
+        .map(|y| format!(" ({y})"))
+        .unwrap_or_default();
+    let doi_hint = entry_doi(entry)
+        .map(|d| format!("; aliases: doi:{}", normalize_doi_token(&d)))
+        .unwrap_or_default();
+    // Only add alias hint when the canonical id is not already the doi: form.
+    let doi_hint = if entry_id
+        .strip_prefix("doi:")
+        .is_some_and(|rest| Some(rest.to_string()) == entry_doi(entry).map(|d| normalize_doi_token(&d)))
+    {
+        String::new()
+    } else {
+        doi_hint
+    };
+    format!("- entry_id: {entry_id}{doi_hint}; {authors}{year}: {title}")
+}
+
+/// Resolve a user-supplied entry reference (opaque id, `doi:…`, or bare DOI) to the
+/// canonical entry `id` used by the DELETE endpoint. Returns `None` if no match.
+fn resolve_entry_id_in_collection(
+    entries: &[serde_json::Value],
+    needle: &str,
+) -> Option<String> {
+    let needle_trim = needle.trim();
+    if needle_trim.is_empty() {
+        return None;
+    }
+
+    // 1. Exact id match
+    for e in entries {
+        if let Some(id) = e["id"].as_str() {
+            if id == needle_trim {
+                return Some(id.to_string());
+            }
+        }
+    }
+
+    // 2. Case-insensitive exact id match
+    let needle_lower = needle_trim.to_ascii_lowercase();
+    for e in entries {
+        if let Some(id) = e["id"].as_str() {
+            if id.to_ascii_lowercase() == needle_lower {
+                return Some(id.to_string());
+            }
+        }
+    }
+
+    // 3. DOI alias: bare DOI or `doi:…` (API often stores id as `doi:10.x/y`)
+    if looks_like_doi_token(needle_trim) || needle_trim.to_ascii_lowercase().starts_with("doi:") {
+        let want = normalize_doi_token(needle_trim);
+        let want_id = format!("doi:{want}");
+        for e in entries {
+            if let Some(id) = e["id"].as_str() {
+                if id.to_ascii_lowercase() == want_id || normalize_doi_token(id) == want {
+                    return Some(id.to_string());
+                }
+            }
+            if let Some(doi) = entry_doi(e) {
+                if normalize_doi_token(&doi) == want {
+                    return entry_canonical_id(e);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 struct ReverseLookupMatch {
     output: String,
     top_score: f64,
@@ -491,7 +610,7 @@ struct UpdateCollectionArgs {
 struct RemoveFromCollectionArgs {
     /// Collection name
     collection: String,
-    /// Entry ID to remove (from search_collection or list)
+    /// Entry to remove: opaque entry id from search_collection, `doi:10.x/y`, or bare DOI
     entry_id: String,
 }
 
@@ -1282,7 +1401,7 @@ impl Server {
 
     #[tool(
         name = "search_collection",
-        description = "Search within a collection by author name, title keywords, or journal. Returns matching entries."
+        description = "Search within a collection by author name, title keywords, or journal. Returns matching entries with entry_id values for remove_from_collection (opaque id, or pass a bare DOI / doi:10.x/y alias)."
     )]
     async fn search_collection(
         &self,
@@ -1323,29 +1442,17 @@ impl Server {
                     })
                     .unwrap_or_default();
                 let journal = meta["journal"].as_str().unwrap_or("").to_lowercase();
+                let doi = entry_doi(e)
+                    .map(|d| d.to_ascii_lowercase())
+                    .unwrap_or_default();
+                let entry_id = e["id"].as_str().unwrap_or("").to_ascii_lowercase();
                 title.contains(&query_lower)
                     || authors.contains(&query_lower)
                     || journal.contains(&query_lower)
+                    || doi.contains(&query_lower)
+                    || entry_id.contains(&query_lower)
             })
-            .map(|e| {
-                let entry_id = e["id"].as_str().unwrap_or("?");
-                let meta = &e["metadata"];
-                let title = meta["title"].as_str().unwrap_or("?");
-                let authors = meta["authors"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|p| p["family"].as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
-                let year = meta["date"]["year"]
-                    .as_i64()
-                    .map(|y| format!(" ({y})"))
-                    .unwrap_or_default();
-                format!("- entry_id: {entry_id}; {authors}{year}: {title}")
-            })
+            .map(format_collection_entry_line)
             .collect();
 
         if matches.is_empty() {
@@ -1361,6 +1468,45 @@ impl Server {
                 matches.join("\n")
             )
         }
+    }
+
+    /// Load collection entries and resolve `needle` to the canonical entry id for DELETE.
+    async fn resolve_collection_entry_id(
+        &self,
+        col_id: &str,
+        needle: &str,
+    ) -> Result<String, String> {
+        let r = self
+            .request(endpoints::COLLECTION_GET, &[("id", col_id)])
+            .send()
+            .await;
+        let collection: serde_json::Value = match r {
+            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+            Ok(r) => {
+                return Err(format!(
+                    "Failed to load collection for entry lookup: {}",
+                    error_detail(r).await
+                ));
+            }
+            Err(e) => return Err(format!("Failed to load collection for entry lookup: {e}")),
+        };
+        let entries = collection["entries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if let Some(id) = resolve_entry_id_in_collection(&entries, needle) {
+            return Ok(id);
+        }
+        // If it already looks like an opaque id (not a DOI alias), pass through for the API
+        // to validate — avoids breaking callers that have a valid id not present in a stale
+        // in-memory view. Still only pass through when we have zero entries to compare.
+        if entries.is_empty() && !looks_like_doi_token(needle) {
+            return Ok(needle.trim().to_string());
+        }
+        Err(format!(
+            "Entry not found in collection for reference '{}'. Use search_collection to list entry_id values (or pass a bare DOI / doi:10.x/y).",
+            needle.trim()
+        ))
     }
 
     // --- Helper: resolve collection name to ID ---
@@ -1594,7 +1740,7 @@ impl Server {
                         let similarity = m["similarity"].as_f64().unwrap_or(0.0);
                         let entry_id = m["entry_id"].as_str().unwrap_or("?");
                         out.push(format!(
-                            "- {match_type} ({similarity:.0}%) entry:{entry_id}"
+                            "- {match_type} ({similarity:.0}%) entry_id: {entry_id}"
                         ));
                     }
                     out.join("\n")
@@ -1743,7 +1889,7 @@ impl Server {
 
     #[tool(
         name = "remove_from_collection",
-        description = "Remove a specific entry from a collection by its entry ID."
+        description = "Remove a specific entry from a collection. Pass entry_id from search_collection, or a bare DOI / doi:10.x/y alias (resolved locally before the API call)."
     )]
     async fn remove_from_collection(
         &self,
@@ -1753,10 +1899,17 @@ impl Server {
             Ok(id) => id,
             Err(e) => return e,
         };
+        let resolved_eid = match self
+            .resolve_collection_entry_id(&col_id, &args.entry_id)
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
         let r = self
             .request(
                 endpoints::COLLECTION_ENTRY_REMOVE,
-                &[("id", &col_id), ("eid", &args.entry_id)],
+                &[("id", &col_id), ("eid", &resolved_eid)],
             )
             .send()
             .await;
@@ -1764,12 +1917,12 @@ impl Server {
             Ok(r) if r.status().is_success() => {
                 if r.status().as_u16() == 204 {
                     return format!(
-                        "Removed entry {} from '{}'.",
-                        args.entry_id, args.collection
+                        "Removed entry {resolved_eid} from '{}'.",
+                        args.collection
                     );
                 }
                 let removed: serde_json::Value = r.json().await.unwrap_or_default();
-                let entry_id = removed["id"].as_str().unwrap_or(&args.entry_id);
+                let entry_id = removed["id"].as_str().unwrap_or(&resolved_eid);
                 let title = removed["metadata"]["title"].as_str().unwrap_or("");
                 if title.is_empty() {
                     format!("Removed entry {entry_id} from '{}'.", args.collection)
@@ -2152,11 +2305,11 @@ impl ServerHandler for Server {
              use batch_add_to_collection to add multiple citations at once. \
              use import_bibliography to import BibTeX or RIS files into a collection. \
              use export_collection to get BibTeX for a collection. \
-             use search_collection to find entries within a collection. \
-             use check_duplicates to check if a citation already exists in a collection. \
+             use search_collection to find entries within a collection (returns entry_id for each match). \
+             use check_duplicates to check if a citation already exists in a collection (returns entry_id). \
              use delete_collection to remove a collection. \
              use update_collection to rename or change a collection's default style. \
-             use remove_from_collection to remove a specific entry. \
+             use remove_from_collection to remove a specific entry by entry_id, bare DOI, or doi:10.x/y. \
              use update_tags to set tags on a collection. \
              use reorder_collection to change the order of entries. \
              SHARING: \
@@ -2918,6 +3071,78 @@ mod tests {
         assert!(result.unwrap_err().contains("Authentication required"));
     }
 
+    #[test]
+    fn test_resolve_entry_id_accepts_bare_doi_and_doi_prefix() {
+        let entries = vec![serde_json::json!({
+            "id": "doi:10.1038/nature14539",
+            "metadata": {
+                "title": "Deep learning",
+                "doi": "10.1038/nature14539"
+            }
+        })];
+        assert_eq!(
+            resolve_entry_id_in_collection(&entries, "10.1038/nature14539").as_deref(),
+            Some("doi:10.1038/nature14539")
+        );
+        assert_eq!(
+            resolve_entry_id_in_collection(&entries, "doi:10.1038/nature14539").as_deref(),
+            Some("doi:10.1038/nature14539")
+        );
+        assert_eq!(
+            resolve_entry_id_in_collection(&entries, "DOI:10.1038/NATURE14539").as_deref(),
+            Some("doi:10.1038/nature14539")
+        );
+        assert!(resolve_entry_id_in_collection(&entries, "10.9999/missing").is_none());
+    }
+
+    #[test]
+    fn test_resolve_entry_id_matches_opaque_id_case_insensitively() {
+        let entries = vec![serde_json::json!({
+            "id": "entry-ABC",
+            "metadata": { "title": "X" }
+        })];
+        assert_eq!(
+            resolve_entry_id_in_collection(&entries, "entry-abc").as_deref(),
+            Some("entry-ABC")
+        );
+    }
+
+    #[test]
+    fn test_format_collection_entry_line_includes_entry_id() {
+        let entry = serde_json::json!({
+            "id": "doi:10.1103/physrevlett.77.3865",
+            "metadata": {
+                "title": "Generalized Gradient Approximation Made Simple",
+                "authors": [{"family": "Perdew"}],
+                "date": {"year": 1996},
+                "doi": "10.1103/PhysRevLett.77.3865"
+            }
+        });
+        let line = format_collection_entry_line(&entry);
+        assert!(line.contains("entry_id: doi:10.1103/physrevlett.77.3865"));
+        assert!(line.contains("Perdew"));
+        assert!(line.contains("1996"));
+        assert!(line.contains("Generalized Gradient Approximation Made Simple"));
+        // id is already the doi: form — no redundant aliases clause
+        assert!(!line.contains("aliases:"));
+    }
+
+    #[test]
+    fn test_format_collection_entry_line_hints_doi_alias_for_opaque_id() {
+        let entry = serde_json::json!({
+            "id": "entry-uuid-1",
+            "metadata": {
+                "title": "Example",
+                "authors": [{"family": "Author"}],
+                "date": {"year": 2020},
+                "doi": "10.1234/example"
+            }
+        });
+        let line = format_collection_entry_line(&entry);
+        assert!(line.contains("entry_id: entry-uuid-1"));
+        assert!(line.contains("aliases: doi:10.1234/example"));
+    }
+
     #[tokio::test]
     async fn test_search_collection_returns_stable_entry_ids() {
         let mock = MockServer::start().await;
@@ -2949,7 +3174,8 @@ mod tests {
                             "title": "Quasi-Monte Carlo Methods",
                             "authors": [{"family": "Baldeaux"}],
                             "date": {"year": 2008},
-                            "journal": "Monte Carlo Methods and Applications"
+                            "journal": "Monte Carlo Methods and Applications",
+                            "doi": "10.1515/mcma.2008.001"
                         }
                     },
                     {
@@ -2975,6 +3201,7 @@ mod tests {
             .await;
 
         assert!(result.contains("entry_id: entry-bad"));
+        assert!(result.contains("aliases: doi:10.1515/mcma.2008.001"));
         assert!(result.contains("Quasi-Monte Carlo Methods"));
         assert!(!result.contains("entry-good"));
     }
@@ -2987,6 +3214,24 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {"id": "col-123", "name": "My Refs", "entry_count": 3}
             ])))
+            .mount(&mock)
+            .await;
+        // remove_from_collection loads the collection first to resolve entry aliases
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "col-123",
+                "name": "My Refs",
+                "entries": [
+                    {
+                        "id": "entry-bad",
+                        "metadata": {
+                            "title": "Quasi-Monte Carlo Methods",
+                            "authors": [{"family": "Baldeaux"}]
+                        }
+                    }
+                ]
+            })))
             .mount(&mock)
             .await;
         Mock::given(method("DELETE"))
@@ -3014,6 +3259,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_remove_from_collection_resolves_bare_doi_alias() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-123", "name": "My Refs", "entry_count": 1}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "col-123",
+                "name": "My Refs",
+                "entries": [
+                    {
+                        "id": "doi:10.1038/nature14539",
+                        "metadata": {
+                            "title": "Deep learning",
+                            "doi": "10.1038/nature14539"
+                        }
+                    }
+                ]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/collections/col-123/entries/doi%3A10.1038%2Fnature14539"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "doi:10.1038/nature14539",
+                "metadata": { "title": "Deep learning" }
+            })))
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .remove_from_collection(Parameters(RemoveFromCollectionArgs {
+                collection: "My Refs".into(),
+                entry_id: "10.1038/nature14539".into(),
+            }))
+            .await;
+
+        assert!(result.contains("Removed entry doi:10.1038/nature14539"));
+        assert!(result.contains("Deep learning"));
+        assert!(!result.contains("Entry not found"));
+    }
+
+    #[tokio::test]
     async fn test_remove_from_collection_surfaces_entry_not_found() {
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
@@ -3023,10 +3317,17 @@ mod tests {
             ])))
             .mount(&mock)
             .await;
-        Mock::given(method("DELETE"))
-            .and(path("/api/v1/collections/col-123/entries/alias-or-doi"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
-                "message": "Entry not found: alias-or-doi"
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "col-123",
+                "name": "My Refs",
+                "entries": [
+                    {
+                        "id": "entry-good",
+                        "metadata": { "title": "Keep This" }
+                    }
+                ]
             })))
             .mount(&mock)
             .await;
@@ -3039,7 +3340,8 @@ mod tests {
             }))
             .await;
 
-        assert!(result.contains("Entry not found: alias-or-doi"));
+        assert!(result.contains("Entry not found"));
+        assert!(result.contains("alias-or-doi"));
         assert!(!result.contains("Removed entry"));
     }
 
