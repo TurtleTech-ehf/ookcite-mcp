@@ -1,0 +1,173 @@
+//! Reverse-lookup and free-text resolve helpers.
+
+use tokio::time::{sleep, Duration};
+
+use ookcite_mcp::endpoints;
+use crate::http_error::error_detail;
+use crate::tool_args::ReverseArgs;
+
+pub struct ReverseLookupMatch {
+    pub output: String,
+    pub top_score: f64,
+}
+
+pub fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<ReverseLookupMatch> {
+    let candidates = payload
+        .get("candidates")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    let mut top_score = f64::NEG_INFINITY;
+    if let Some(paper) = payload.get("paper") {
+        let title = paper["title"].as_str().unwrap_or("?");
+        let doi = paper["doi"].as_str().unwrap_or("?");
+        let journal = paper["journal"].as_str().unwrap_or("N/A");
+        out.push(format!("1. [score:100] {title} | {journal} (doi:{doi})"));
+        top_score = top_score.max(100.0);
+    }
+    let offset = out.len();
+    for (i, c) in candidates.iter().enumerate() {
+        let title = c["metadata"]["title"].as_str().unwrap_or("?");
+        let doi = c["metadata"]["doi"].as_str().unwrap_or("?");
+        let journal = c["metadata"]["journal"].as_str().unwrap_or("N/A");
+        let score = c["score"].as_f64().unwrap_or(0.0);
+        top_score = top_score.max(score);
+        out.push(format!(
+            "{}. [score:{:.0}] {title} | {journal} (doi:{doi})",
+            offset + i + 1,
+            score
+        ));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(ReverseLookupMatch {
+            output: out.join("\n"),
+            top_score,
+        })
+    }
+}
+
+pub async fn classify_reverse_lookup_response(
+    response: Result<reqwest::Response, reqwest::Error>,
+) -> Result<Option<ReverseLookupMatch>, String> {
+    match response {
+        Ok(resp) if resp.status().is_success() => {
+            let payload: serde_json::Value = resp.json().await.unwrap_or_default();
+            Ok(format_reverse_lookup_payload(&payload))
+        }
+        Ok(r) if r.status().as_u16() == 429 => {
+            Err(format!("RATE LIMITED: {}", error_detail(r).await))
+        }
+        Ok(r) if r.status().as_u16() == 403 => {
+            Err(format!("ACCESS DENIED: {}", error_detail(r).await))
+        }
+        Ok(r) if r.status().is_server_error() => {
+            Err(format!("TEMPORARY ERROR: {}", error_detail(r).await))
+        }
+        Ok(_) => Ok(None),
+        Err(e) => Err(format!("Reverse lookup failed: {e}")),
+    }
+}
+
+pub fn reverse_lookup_resolve_body(args: &ReverseArgs, use_live_queries: bool) -> serde_json::Value {
+    let mut body = resolve_text_body(&args.text, use_live_queries);
+    let mut filters = serde_json::Map::new();
+    if let Some(author) = &args.author {
+        filters.insert("author".into(), serde_json::json!(author));
+    }
+    if let Some(journal) = &args.journal {
+        filters.insert("journal".into(), serde_json::json!(journal));
+    }
+    if let Some(year) = args.year {
+        filters.insert("year".into(), serde_json::json!(year));
+    }
+    if let Some(orcid) = &args.orcid {
+        filters.insert("orcid".into(), serde_json::json!(orcid));
+    }
+    if !filters.is_empty() {
+        body["filters"] = serde_json::Value::Object(filters);
+    }
+    body
+}
+
+pub fn format_resolve_candidates(query: &str, candidates: &[serde_json::Value]) -> String {
+    let mut lines = vec![format!("Ambiguous match for '{}'. Top candidates:", query)];
+    for (idx, candidate) in candidates.iter().take(5).enumerate() {
+        let meta = candidate.get("metadata").unwrap_or(candidate);
+        let title = meta["title"].as_str().unwrap_or("?");
+        let doi = meta["doi"].as_str().unwrap_or("?");
+        let year = meta["date"]["year"]
+            .as_i64()
+            .map(|y| format!(" ({y})"))
+            .unwrap_or_default();
+        let journal = meta["journal"].as_str().unwrap_or("N/A");
+        lines.push(format!(
+            "{}. {}{} | {} | doi:{}",
+            idx + 1,
+            title,
+            year,
+            journal,
+            doi
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn resolve_payload_metadata(payload: &serde_json::Value) -> Option<serde_json::Value> {
+    if let Some(paper) = payload.get("paper").cloned() {
+        return Some(paper);
+    }
+
+    let verified = payload
+        .get("verification")
+        .and_then(|value| value.get("status"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("verified"));
+
+    if !verified {
+        return None;
+    }
+
+    payload
+        .get("candidates")
+        .and_then(|value| value.as_array())
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("metadata"))
+        .cloned()
+}
+
+pub fn resolve_text_body(query: &str, use_live_queries: bool) -> serde_json::Value {
+    serde_json::json!({
+        "input": { "kind": "text", "text": query },
+        "filters": {},
+        "options": {
+            "max_candidates": 5,
+            "prefer_exact_identifier": true,
+            "use_live_queries": use_live_queries
+        }
+    })
+}
+
+pub async fn lookup_doi_with_retry(
+    http: &reqwest::Client,
+    api_base: &str,
+    doi: &str,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut attempt = 0u8;
+    loop {
+        let response = http
+            .post(endpoints::LOOKUP_DOI.url(api_base, &[]))
+            .json(&serde_json::json!({ "doi": doi }))
+            .send()
+            .await?;
+        let status = response.status();
+        if attempt < 2 && matches!(status.as_u16(), 429 | 502 | 503 | 504) {
+            attempt += 1;
+            sleep(Duration::from_millis(150 * u64::from(attempt))).await;
+            continue;
+        }
+        return Ok(response);
+    }
+}
