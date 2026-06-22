@@ -1,7 +1,6 @@
 use ookcite_mcp::endpoints;
 
-const API: &str = "https://ookcite-api.turtletech.us";
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+use crate::constants::{API, VERSION};
 
 fn setup_banner() -> String {
     format!("OokCite MCP v{VERSION} -- Setup\n")

@@ -9,14 +9,6 @@ All notable changes to this project will be documented in this file. See [conven
 - (**mcp**) document entry_id and DOI alias remove/search workflow - (d0d1d61) - Rohit Goswami
 
 - - -
-
-## Unreleased
-#### Bugfixes
-- (**collections**) resolve entry IDs by DOI alias for remove/search - resolve bare DOI / `doi:10.x/y` before DELETE; always emit `entry_id:` from search and check_duplicates
-#### Documentation
-- (**mcp**) document entry_id / DOI alias workflow for search and remove
-
-- - -
 ## v0.4.9 - 2026-06-13
 #### Bugfixes
 - (**collections**) surface entry deletion results - (cc44ec8) - Rohit Goswami
