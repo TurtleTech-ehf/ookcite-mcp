@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.4.10 - 2026-06-22
+#### Bugfixes
+- (**collections**) resolve entry IDs by DOI alias for remove/search - (60f8b4f) - Rohit Goswami
+#### Documentation
+- (**mcp**) document entry_id and DOI alias remove/search workflow - (d0d1d61) - Rohit Goswami
+
+- - -
+
 ## Unreleased
 #### Bugfixes
 - (**collections**) resolve entry IDs by DOI alias for remove/search - resolve bare DOI / `doi:10.x/y` before DELETE; always emit `entry_id:` from search and check_duplicates
