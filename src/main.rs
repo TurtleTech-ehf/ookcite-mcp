@@ -27,11 +27,11 @@
 //! * **batch_add_to_collection** : Add multiple citations at once
 //! * **import_bibliography** : Import BibTeX/RIS files into a collection
 //! * **export_collection** : Export collection as BibTeX
-//! * **search_collection** : Search within a collection
-//! * **check_duplicates** : Check for duplicate entries
+//! * **search_collection** : Search within a collection (returns `entry_id` per match)
+//! * **check_duplicates** : Check for duplicate entries (returns `entry_id`)
 //! * **delete_collection** : Delete a collection
 //! * **update_collection** : Update collection metadata
-//! * **remove_from_collection** : Remove a specific entry
+//! * **remove_from_collection** : Remove an entry by `entry_id`, bare DOI, or `doi:10.x/y`
 //! * **update_tags** : Set tags on a collection
 //! * **reorder_collection** : Reorder entries
 //!
