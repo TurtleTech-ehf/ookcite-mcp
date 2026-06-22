@@ -137,8 +137,9 @@ Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
 | `batch_add_to_collection` | Add multiple citations at once           |
 | `import_bibliography`     | Import BibTeX/RIS files into a collection|
 | `export_collection`       | Export collection as BibTeX              |
-| `search_collection`       | Search within a collection               |
-| `check_duplicates`        | Check for duplicate entries              |
+| `search_collection`       | Search within a collection; returns `entry_id` per match |
+| `check_duplicates`        | Check for duplicates; returns `entry_id` for matches     |
+| `remove_from_collection`  | Remove by `entry_id`, bare DOI, or `doi:10.x/y`          |
 
 Typical workflow:
 
@@ -146,6 +147,10 @@ Typical workflow:
 2. Import that file into an OokCite collection with `import_bibliography`
 3. Use the collection to audit, deduplicate, and export while revising
 4. Keep the local `.bib` file as the source-controlled canonical bibliography
+
+To delete one paper from a collection, use `search_collection` (or
+`check_duplicates`) for `entry_id: …`, then `remove_from_collection` with that
+id — or pass a bare DOI / `doi:10.x/y` and let the server resolve it.
 
 ## Anti-Hallucination
 

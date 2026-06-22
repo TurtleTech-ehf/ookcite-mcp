@@ -140,11 +140,11 @@ Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
 | `batch_add_to_collection`  | Add multiple citations at once           |
 | `import_bibliography`      | Import BibTeX/RIS files into a collection|
 | `export_collection`        | Export collection as BibTeX              |
-| `search_collection`        | Search within a collection              |
-| `check_duplicates`         | Check for duplicate entries             |
+| `search_collection`        | Search within a collection; returns `entry_id` per match |
+| `check_duplicates`         | Check for duplicates; returns `entry_id` for matches     |
 | `delete_collection`        | Delete a collection                     |
 | `update_collection`        | Update name, description, or style      |
-| `remove_from_collection`   | Remove a specific entry                 |
+| `remove_from_collection`   | Remove an entry by `entry_id`, bare DOI, or `doi:10.x/y` |
 | `update_tags`              | Set tags on a collection                |
 | `reorder_collection`       | Reorder entries                         |
 
@@ -154,6 +154,11 @@ Typical workflow:
 2. Import that file into an OokCite collection with `import_bibliography`
 3. Use `search_collection`, `check_duplicates`, and `export_collection` while revising
 4. Treat the collection as an audit/export companion, not the only copy of your bibliography
+
+**Removing a single entry:** call `search_collection` (or `check_duplicates`) to
+see each hit as `entry_id: …` (and optionally `aliases: doi:…` when the stored id
+is opaque). Pass that `entry_id` to `remove_from_collection`, or pass the paper's
+bare DOI / `doi:10.x/y` — the server resolves aliases locally before the API call.
 
 ### Sharing & Bulk Operations (requires academic/business plan)
 
