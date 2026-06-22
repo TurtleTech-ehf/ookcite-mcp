@@ -208,6 +208,59 @@ REST API with no local database, and no heavy dependencies.
 or upgrade to academic ($4/mo) or business ($12/mo) for batch operations
 and larger collections.
 
+
+## Source layout
+
+The crate is a thin MCP (stdio) wrapper around the public OokCite REST API.
+There is no local citation database; all state lives on the API.
+
+| Path | Role |
+|------|------|
+| `src/main.rs` | Binary entry: `--version`, `setup`, start MCP server |
+| `src/cli.rs` | Startup probes (validate `OOKCITE_API_KEY` via `/api/v1/me`, update check) |
+| `src/setup.rs` | `ookcite-mcp setup` / `npx add-mcp` client config installer |
+| `src/server.rs` | `Server` + `#[tool_router]` MCP tool handlers (plus unit tests at bottom) |
+| `src/tool_args.rs` | Tool argument structs (`serde` + `schemars`) |
+| `src/constants.rs` | API base URL, package version, reverse-lookup confidence threshold |
+| `src/http_error.rs` | `error_detail` and HTTP status classification for agent-facing strings |
+| `src/collection_entries.rs` | Collection entry ids, bare DOI / `doi:` alias resolution, search lines |
+| `src/resolve_helpers.rs` | Reverse-lookup and free-text resolve payload helpers |
+| `src/endpoints.rs` | Endpoint registry (`lib` crate surface); contract-tested |
+| `src/lib.rs` | Library root (exports `endpoints` only) |
+| `tests/api_contract.rs` | Decrypts `contract/openapi.json.age`; asserts every endpoint exists |
+| `contract/` | Age-encrypted OpenAPI snapshot + `regen.sh` |
+| `npm/` | `@turtletech/ookcite-mcp` installer/wrapper (downloads release binary) |
+| `demo/` | Asciinema recording scripts |
+| `scripts/set-version.sh` | Cocogitto pre-bump hook: `Cargo.toml` + `npm/package.json` version |
+
+**Collections / entry ids:** `search_collection` and `check_duplicates` emit
+`entry_id: …` lines. `remove_from_collection` accepts that id, a bare DOI, or
+`doi:10.x/y` (resolved locally in `collection_entries` before the DELETE call).
+
+**Release:** tag `v*` runs `.github/workflows/release.yml` (multi-arch GitHub
+Release assets, crates.io, npm). Version bumps use [cocogitto](https://docs.cocogitto.io/)
+(`cog.toml` + `scripts/set-version.sh`).
+
+**Why `server.rs` is large:** `rmcp`'s `#[tool_router]` / `#[tool]` macros keep
+handlers on one `impl Server`. Further file splits without macro workarounds
+add little user value; peel tests or add small helpers (`resolve_many`, shared
+`Me` type) before fighting the macro.
+
+## Contributing / local checks
+
+```bash
+cargo test --bin ookcite-mcp          # unit tests (no contract key needed)
+cargo build --release
+./target/release/ookcite-mcp --version
+
+# Contract tests (optional locally; required in CI with secret):
+export OOKCITE_CONTRACT_KEY=$(pass show turtletech/ookcite-contract-key)
+cargo test --test api_contract
+```
+
+Live MCP smoke (optional; needs `OOKCITE_API_KEY`): add/search/remove with a
+bare DOI on a throwaway collection, then `delete_collection`.
+
 ## Documentation
 
 - [Full MCP setup guide](https://ookcite.turtletech.us/docs/howto/mcp-setup/)

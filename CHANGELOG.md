@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## Unreleased
+#### Refactors
+- (**structure**) split binary `main.rs` into `server`, `tool_args`, `cli`, `collection_entries`, `resolve_helpers`, `http_error`, `constants` (behavior unchanged; see README Source layout)
+#### Documentation
+- (**readme**) source layout, contributing checks, entry_id/DOI remove notes (carried from v0.4.10)
+- (**crate**) `lib.rs` documents binary module map and public `endpoints` surface
+
+- - -
 ## v0.4.10 - 2026-06-22
 #### Bugfixes
 - (**collections**) resolve entry IDs by DOI alias for remove/search - (60f8b4f) - Rohit Goswami
