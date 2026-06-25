@@ -1,0 +1,14 @@
+{
+  "name": "ookcite",
+  "version": "0.4.10",
+  "description": "Citation metadata validation and formatting via the OokCite API. Validate DOIs, format bibliographies in 2900+ CSL styles, manage collections, and catch hallucinated references. Returns metadata only — not PDFs or full-text.",
+  "author": {
+    "name": "TurtleTech ehf",
+    "email": "hello@turtletech.us",
+    "url": "https://turtletech.us"
+  },
+  "homepage": "https://ookcite.turtletech.us",
+  "repository": "https://github.com/TurtleTech-ehf/ookcite-mcp",
+  "license": "MIT",
+  "keywords": ["ookcite", "citations", "doi", "bibtex", "mcp", "bibliography"]
+}
