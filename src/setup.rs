@@ -45,9 +45,47 @@ async fn validate_key(api_key: &str) -> Option<MeResponse> {
     resp.json::<MeResponse>().await.ok()
 }
 
+/// Print client-specific config snippets for agents/IDEs that setup cannot fully
+/// auto-configure (notably Grok Build) plus copy-paste fallbacks for Claude/Codex.
+fn print_client_specific_guides(api_key: Option<&str>) {
+    let key_line = api_key
+        .map(|k| format!("      \"OOKCITE_API_KEY\": \"{k}\""))
+        .unwrap_or_else(|| "      \"OOKCITE_API_KEY\": \"your_key_here\"".into());
+    let key_env = api_key.unwrap_or("your_key_here");
+
+    println!("\n--- Client-specific install (when add-mcp is not enough) ---");
+
+    println!("\nGrok Build (plugin / marketplace — NOT covered by add-mcp):");
+    println!("  grok plugin install https://github.com/TurtleTech-ehf/ookcite-mcp.git");
+    println!("  # or after marketplace publish: /marketplace → search ookcite → install");
+    println!("  # set OOKCITE_API_KEY in the environment; trust the plugin for MCP");
+    println!("  # repo ships plugin.json + .mcp.json at the root");
+
+    println!("\nClaude Desktop (manual JSON if add-mcp misses it):");
+    println!("  Linux:  ~/.config/Claude/claude_desktop_config.json");
+    println!("  macOS:  ~/Library/Application Support/Claude/claude_desktop_config.json");
+    println!("  Merge under mcpServers:");
+    println!("  {{\n    \"mcpServers\": {{\n      \"ookcite\": {{\n        \"command\": \"npx\",\n        \"args\": [\"-y\", \"@turtletech/ookcite-mcp\"],\n        \"env\": {{\n{key_line}\n        }}\n      }}\n    }}\n  }}");
+
+    println!("\nClaude Code (project or user):");
+    println!("  Project: .mcp.json in the repo root (same mcpServers shape as Desktop)");
+    println!("  User:    ~/.claude/settings.json → mcpServers.ookcite");
+
+    println!("\nCodex CLI:");
+    println!("  codex mcp add ookcite --env OOKCITE_API_KEY={key_env} -- npx -y @turtletech/ookcite-mcp");
+    println!("  # or edit ~/.codex/config.toml with an [mcp_servers.ookcite] table");
+
+    println!("\nCursor / VS Code / other IDEs:");
+    println!("  Prefer add-mcp above; else Settings → MCP Servers with the same command/args/env.");
+
+    println!("\nEnv knobs (all clients):");
+    println!("  OOKCITE_API_KEY          optional; collections + higher rate limits");
+    println!("  OOKCITE_STARTUP_PROBES=1 optional; extra auth/update checks on stderr at MCP launch");
+}
+
 /// Run `npx add-mcp` to install the ookcite MCP server to all detected clients.
 /// add-mcp handles Claude Code, Claude Desktop, Cursor, VS Code, Codex, Zed,
-/// OpenCode, Cline, Gemini CLI, Goose, and more.
+/// OpenCode, Cline, Gemini CLI, Goose, and more — but not Grok Build (plugin path).
 fn run_add_mcp(api_key: Option<&str>) -> bool {
     // Determine the command target: full binary path if installed, else npx package.
     let target = if let Some(bin_path) = find_binary() {
@@ -107,20 +145,22 @@ pub async fn run(args: &[String]) {
         println!("  Then re-run: ookcite-mcp setup --key YOUR_KEY\n");
     }
 
-    // Use add-mcp to configure all detected clients
+    // Use add-mcp to configure all detected clients (not Grok Build)
     if run_add_mcp(api_key.as_deref()) {
-        println!("\nSetup complete.");
+        println!("\nSetup complete for clients detected by add-mcp.");
     } else {
         println!("\nadd-mcp failed. You can configure manually:");
         let target = find_binary().unwrap_or_else(|| "npx -y @turtletech/ookcite-mcp".into());
         println!("  npx add-mcp {} --name ookcite", target);
     }
 
+    print_client_specific_guides(api_key.as_deref());
+
     if api_key.is_none() {
         println!("\nTo add an API key later, re-run:");
         println!("  ookcite-mcp setup --key YOUR_KEY");
     }
-    println!("\nRestart your MCP clients to activate OokCite.");
+    println!("\nRestart your MCP clients (or reload MCP servers) to activate OokCite.");
 }
 
 #[cfg(test)]
@@ -131,5 +171,16 @@ mod tests {
     fn setup_banner_includes_current_version() {
         assert!(setup_banner().contains(VERSION));
         assert!(setup_banner().contains("OokCite MCP v"));
+    }
+
+    #[test]
+    fn client_guides_mention_grok_claude_codex() {
+        // Smoke: helper compiles and documents the three named clients.
+        let _ = print_client_specific_guides as fn(Option<&str>);
+        let src = include_str!("setup.rs");
+        assert!(src.contains("Grok Build"));
+        assert!(src.contains("Claude Desktop"));
+        assert!(src.contains("Codex CLI"));
+        assert!(src.contains("OOKCITE_STARTUP_PROBES"));
     }
 }
