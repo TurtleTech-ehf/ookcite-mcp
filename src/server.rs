@@ -11,7 +11,7 @@ use rmcp::{
 use crate::collection_entries::{
     entry_doi, format_collection_entry_line, looks_like_doi_token, resolve_entry_id_in_collection,
 };
-use crate::constants::{API, MIN_CONFIDENT_REVERSE_LOOKUP_SCORE};
+use crate::constants::{build_api_client, API, MIN_CONFIDENT_REVERSE_LOOKUP_SCORE};
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail,
 };
@@ -40,19 +40,12 @@ impl Server {
                 auth_val.set_sensitive(true);
                 headers.insert(reqwest::header::AUTHORIZATION, auth_val);
             }
-        } else {
-            eprintln!(
-                "ookcite-mcp: OOKCITE_API_KEY not set; requests will be anonymous/IP-rate-limited"
-            );
         }
+        // Anonymous notice is emitted once from main when probes are off.
 
         Self {
             tool_router: Self::tool_router(),
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .default_headers(headers)
-                .build()
-                .unwrap(),
+            http: build_api_client(30, headers),
             api_base: API.to_string(),
         }
     }
@@ -76,7 +69,8 @@ impl Server {
 
     #[tool(
         name = "search_styles",
-        description = "Search for available CSL citation styles by name. Returns a list of matching style IDs to use in formatting tools."
+        description = "Search for available CSL citation styles by name. Returns a list of matching style IDs to use in formatting tools.",
+        annotations(title = "Search CSL styles", read_only_hint = true, idempotent_hint = true)
     )]
     async fn search_styles(&self, Parameters(args): Parameters<StyleSearchArgs>) -> String {
         let r = self
@@ -105,7 +99,8 @@ impl Server {
 
     #[tool(
         name = "validate_doi",
-        description = "Check if a DOI exists and return its metadata. Use this to verify citations are real. Returns title, authors, year, journal, volume, and issue."
+        description = "Check if a DOI exists and return its metadata. Use this to verify citations are real. Returns title, authors, year, journal, volume, and issue. Prefer verify_references for multiple DOIs in one call.",
+        annotations(title = "Validate DOI", read_only_hint = true, idempotent_hint = true)
     )]
     async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
         let r = lookup_doi_with_retry(&self.http, &self.api_base, &args.doi).await;
@@ -141,7 +136,8 @@ impl Server {
 
     #[tool(
         name = "lookup_isbn",
-        description = "Look up a book by ISBN. Returns title, authors, publisher, year, and pages."
+        description = "Look up a book by ISBN. Returns title, authors, publisher, year, and pages.",
+        annotations(title = "Lookup ISBN", read_only_hint = true, idempotent_hint = true)
     )]
     async fn lookup_isbn(&self, Parameters(args): Parameters<IsbnArgs>) -> String {
         let r = self
@@ -189,7 +185,8 @@ impl Server {
 
     #[tool(
         name = "reverse_lookup",
-        description = "Parse a messy citation string and find the matching paper. Searches the local corpus first, then retries with live upstream providers when local search is empty or weak. Set use_live_queries=true to allow live upstream providers on the first pass. Optional filters (author, journal, year, orcid) boost matching results."
+        description = "Parse a messy citation string and find the matching paper. Searches the local corpus first, then retries with live upstream providers when local search is empty or weak. Set use_live_queries=true to allow live upstream providers on the first pass. Optional filters (author, journal, year, orcid) boost matching results. For many citations prefer batch_format.",
+        annotations(title = "Reverse lookup citation", read_only_hint = true, idempotent_hint = true)
     )]
     async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> String {
         let body = reverse_lookup_resolve_body(&args, args.use_live_queries);
@@ -240,7 +237,8 @@ impl Server {
 
     #[tool(
         name = "parse_citations",
-        description = "Parse raw bibliography text into structured citation units. Splits multi-citation blocks, extracts DOIs/ISBNs, and provides title/author/year hints. Use this to break down pasted bibliographies before resolving individual citations."
+        description = "Parse raw bibliography text into structured citation units. Splits multi-citation blocks, extracts DOIs/ISBNs, and provides title/author/year hints. Use this to break down pasted bibliographies before resolving individual citations.",
+        annotations(title = "Parse bibliography text", read_only_hint = true, idempotent_hint = true)
     )]
     async fn parse_citations(&self, Parameters(args): Parameters<ParseCitationsArgs>) -> String {
         let r = self
@@ -306,7 +304,8 @@ impl Server {
 
     #[tool(
         name = "debug_resolve",
-        description = "Debug why a citation resolves incorrectly. Returns the search query used, active ranking weights, and per-backend candidate lists with scores. Use this to diagnose bad matches."
+        description = "Debug why a citation resolves incorrectly. Returns the search query used, active ranking weights, and per-backend candidate lists with scores. Use this to diagnose bad matches. Requires OOKCITE_API_KEY.",
+        annotations(title = "Debug citation resolve", read_only_hint = true, idempotent_hint = true)
     )]
     async fn debug_resolve(&self, Parameters(args): Parameters<DebugResolveArgs>) -> String {
         let r = self
@@ -385,7 +384,8 @@ impl Server {
 
     #[tool(
         name = "format_citation",
-        description = "Format a citation by DOI in a specific CSL style. Returns both the in-text marker and the full bibliography entry."
+        description = "Format a citation by DOI in a specific CSL style. Returns both the in-text marker and the full bibliography entry. Prefer batch_format for multiple citations.",
+        annotations(title = "Format citation", read_only_hint = true, idempotent_hint = true)
     )]
     async fn format_citation(&self, Parameters(args): Parameters<FormatArgs>) -> String {
         let lookup = self
@@ -427,7 +427,8 @@ impl Server {
 
     #[tool(
         name = "group_cite",
-        description = "Generate a grouped in-text citation marker (e.g., '[1-3]') for multiple DOIs."
+        description = "Generate a grouped in-text citation marker (e.g., '[1-3]') for multiple DOIs.",
+        annotations(title = "Group in-text cites", read_only_hint = true, idempotent_hint = true)
     )]
     async fn group_cite(&self, Parameters(args): Parameters<GroupCiteArgs>) -> String {
         let api_base = self.api_base.clone();
@@ -488,7 +489,8 @@ impl Server {
 
     #[tool(
         name = "verify_references",
-        description = "Batch verify that a list of DOIs exist. Returns VALID or INVALID for each."
+        description = "Batch verify that a list of DOIs exist. Returns VALID or INVALID for each. Prefer this over repeated validate_doi calls.",
+        annotations(title = "Verify DOIs (batch)", read_only_hint = true, idempotent_hint = true)
     )]
     async fn verify_references(&self, Parameters(args): Parameters<VerifyArgs>) -> String {
         let api_base = self.api_base.clone();
@@ -522,7 +524,8 @@ impl Server {
 
     #[tool(
         name = "batch_format",
-        description = "Resolve and format multiple messy citations at once. Uses the local corpus by default; set use_live_queries=true to allow live upstream provider calls."
+        description = "Resolve and format multiple messy citations at once. Uses the local corpus by default; set use_live_queries=true to allow live upstream provider calls. Prefer over N× reverse_lookup + format_citation.",
+        annotations(title = "Batch format citations", read_only_hint = true, idempotent_hint = true)
     )]
     async fn batch_format(&self, Parameters(args): Parameters<BatchArgs>) -> String {
         // Resolve all citations in parallel (up to 10 concurrent)
@@ -593,7 +596,8 @@ impl Server {
 
     #[tool(
         name = "list_collections",
-        description = "List all citation collections for the authenticated user. Requires OOKCITE_API_KEY."
+        description = "List all citation collections for the authenticated user. Requires OOKCITE_API_KEY.",
+        annotations(title = "List collections", read_only_hint = true, idempotent_hint = true)
     )]
     async fn list_collections(
         &self,
@@ -642,7 +646,8 @@ impl Server {
 
     #[tool(
         name = "add_to_collection",
-        description = "Add a citation to a collection. Searches by DOI, ISBN, or free-text (e.g. 'Goswami JCTC 2026'). Creates the collection if it doesn't exist. Free-text uses the local corpus by default; set use_live_queries=true to allow live upstream provider calls."
+        description = "Add a citation to a collection. Searches by DOI, ISBN, or free-text (e.g. 'Goswami JCTC 2026'). Creates the collection if it doesn't exist. Free-text uses the local corpus by default; set use_live_queries=true to allow live upstream provider calls. Prefer batch_add_to_collection for multiple items.",
+        annotations(title = "Add to collection", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
     )]
     async fn add_to_collection(&self, Parameters(args): Parameters<AddToCollectionArgs>) -> String {
         let col_id = match self.resolve_or_create_collection(&args.collection).await {
@@ -722,7 +727,8 @@ impl Server {
 
     #[tool(
         name = "export_collection",
-        description = "Export a collection as BibTeX. Returns the full .bib file content with Better BibTeX keys."
+        description = "Export a collection as BibTeX. Returns the full .bib file content with Better BibTeX keys.",
+        annotations(title = "Export collection BibTeX", read_only_hint = true, idempotent_hint = true)
     )]
     async fn export_collection(
         &self,
@@ -747,7 +753,8 @@ impl Server {
 
     #[tool(
         name = "search_collection",
-        description = "Search within a collection by author name, title keywords, or journal. Returns matching entries with entry_id values for remove_from_collection (opaque id, or pass a bare DOI / doi:10.x/y alias)."
+        description = "Search within a collection by author name, title keywords, or journal. Returns matching entries with entry_id values for remove_from_collection (opaque id, or pass a bare DOI / doi:10.x/y alias).",
+        annotations(title = "Search collection", read_only_hint = true, idempotent_hint = true)
     )]
     async fn search_collection(
         &self,
@@ -977,7 +984,8 @@ impl Server {
 
     #[tool(
         name = "health_check",
-        description = "Check if the OokCite API is reachable and healthy. Returns service status and cache statistics."
+        description = "Check if the OokCite API is reachable and healthy. Returns service status and cache statistics.",
+        annotations(title = "API health check", read_only_hint = true, idempotent_hint = true)
     )]
     async fn health_check(
         &self,
@@ -1004,7 +1012,8 @@ impl Server {
 
     #[tool(
         name = "import_bibliography",
-        description = "Import a BibTeX (.bib) or RIS file into a collection. Pass the file content as a string. Creates the collection if it doesn't exist, but collection import may require a paid plan or additional collection capacity."
+        description = "Import a BibTeX (.bib) or RIS file into a collection. Pass the file content as a string. Creates the collection if it doesn't exist, but collection import may require a paid plan or additional collection capacity.",
+        annotations(title = "Import bibliography file", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
     )]
     async fn import_bibliography(
         &self,
@@ -1054,7 +1063,8 @@ impl Server {
 
     #[tool(
         name = "check_duplicates",
-        description = "Check if a citation already exists in a collection. Resolves the query first, then checks for duplicates."
+        description = "Check if a citation already exists in a collection. Resolves the query first, then checks for duplicates. Returns entry_id for matches.",
+        annotations(title = "Check collection duplicates", read_only_hint = true, idempotent_hint = true)
     )]
     async fn check_duplicates(&self, Parameters(args): Parameters<CheckDuplicatesArgs>) -> String {
         let col_id = match self.resolve_collection_id(&args.collection).await {
@@ -1098,7 +1108,8 @@ impl Server {
 
     #[tool(
         name = "batch_add_to_collection",
-        description = "Add multiple citations to a collection at once. Each query can be a DOI or free-text search. Creates the collection if it doesn't exist, but batch collection workflows may require a paid plan or additional collection capacity. Free-text uses the local corpus by default; set use_live_queries=true to allow live upstream provider calls."
+        description = "Add multiple citations to a collection at once. Each query can be a DOI or free-text search. Creates the collection if it doesn't exist, but batch collection workflows may require a paid plan or additional collection capacity. Free-text uses the local corpus by default; set use_live_queries=true to allow live upstream provider calls. Prefer over N× add_to_collection.",
+        annotations(title = "Batch add to collection", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
     )]
     async fn batch_add_to_collection(&self, Parameters(args): Parameters<BatchAddArgs>) -> String {
         let col_id = match self.resolve_or_create_collection(&args.collection).await {
@@ -1172,7 +1183,8 @@ impl Server {
 
     #[tool(
         name = "delete_collection",
-        description = "Delete a citation collection. This is irreversible."
+        description = "Delete a citation collection. This is irreversible.",
+        annotations(title = "Delete collection", read_only_hint = false, destructive_hint = true, idempotent_hint = false)
     )]
     async fn delete_collection(
         &self,
@@ -1197,7 +1209,8 @@ impl Server {
 
     #[tool(
         name = "update_collection",
-        description = "Update a collection's name, description, or default citation style."
+        description = "Update a collection's name, description, or default citation style.",
+        annotations(title = "Update collection metadata", read_only_hint = false, destructive_hint = false, idempotent_hint = true)
     )]
     async fn update_collection(
         &self,
@@ -1235,7 +1248,8 @@ impl Server {
 
     #[tool(
         name = "remove_from_collection",
-        description = "Remove a specific entry from a collection. Pass entry_id from search_collection, or a bare DOI / doi:10.x/y alias (resolved locally before the API call)."
+        description = "Remove a specific entry from a collection. Pass entry_id from search_collection, or a bare DOI / doi:10.x/y alias (resolved locally before the API call).",
+        annotations(title = "Remove collection entry", read_only_hint = false, destructive_hint = true, idempotent_hint = false)
     )]
     async fn remove_from_collection(
         &self,
@@ -1286,7 +1300,8 @@ impl Server {
 
     #[tool(
         name = "update_tags",
-        description = "Set tags on a collection. Replaces all existing tags."
+        description = "Set tags on a collection. Replaces all existing tags.",
+        annotations(title = "Update collection tags", read_only_hint = false, destructive_hint = false, idempotent_hint = true)
     )]
     async fn update_tags(&self, Parameters(args): Parameters<UpdateTagsArgs>) -> String {
         let col_id = match self.resolve_collection_id(&args.collection).await {
@@ -1308,7 +1323,8 @@ impl Server {
 
     #[tool(
         name = "reorder_collection",
-        description = "Reorder entries in a collection. Provide the entry IDs in the desired order."
+        description = "Reorder entries in a collection. Provide the entry IDs in the desired order.",
+        annotations(title = "Reorder collection entries", read_only_hint = false, destructive_hint = false, idempotent_hint = true)
     )]
     async fn reorder_collection(
         &self,
@@ -1335,7 +1351,8 @@ impl Server {
 
     #[tool(
         name = "share_collection",
-        description = "Create a shareable link for a collection. Anyone with the link can view it."
+        description = "Create a shareable link for a collection. Anyone with the link can view it. Requires academic/business plan.",
+        annotations(title = "Share collection", read_only_hint = false, destructive_hint = false, idempotent_hint = true)
     )]
     async fn share_collection(&self, Parameters(args): Parameters<ShareCollectionArgs>) -> String {
         let col_id = match self.resolve_collection_id(&args.collection).await {
@@ -1358,7 +1375,8 @@ impl Server {
 
     #[tool(
         name = "unshare_collection",
-        description = "Revoke the shareable link for a collection."
+        description = "Revoke the shareable link for a collection.",
+        annotations(title = "Unshare collection", read_only_hint = false, destructive_hint = true, idempotent_hint = true)
     )]
     async fn unshare_collection(
         &self,
@@ -1382,7 +1400,8 @@ impl Server {
 
     #[tool(
         name = "merge_collections",
-        description = "Merge multiple collections into one. All entries are combined, duplicates are skipped."
+        description = "Merge multiple collections into one. All entries are combined, duplicates are skipped.",
+        annotations(title = "Merge collections", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
     )]
     async fn merge_collections(
         &self,
@@ -1438,7 +1457,8 @@ impl Server {
 
     #[tool(
         name = "batch_move_entries",
-        description = "Move entries from one collection to another."
+        description = "Move entries from one collection to another.",
+        annotations(title = "Batch move entries", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
     )]
     async fn batch_move_entries(&self, Parameters(args): Parameters<BatchMoveArgs>) -> String {
         let source_id = match self.resolve_collection_id(&args.source).await {
@@ -1474,7 +1494,8 @@ impl Server {
 
     #[tool(
         name = "view_shared",
-        description = "View a shared collection using its share token."
+        description = "View a shared collection using its share token.",
+        annotations(title = "View shared collection", read_only_hint = true, idempotent_hint = true)
     )]
     async fn view_shared(&self, Parameters(args): Parameters<ViewSharedArgs>) -> String {
         let r = self
@@ -1523,7 +1544,8 @@ impl Server {
 
     #[tool(
         name = "generate_citation_keys",
-        description = "Generate Better BibTeX-style citation keys (e.g. 'goswami2026') for a list of DOIs. Requires academic/business plan."
+        description = "Generate Better BibTeX-style citation keys (e.g. 'goswami2026') for a list of DOIs. Requires academic/business plan.",
+        annotations(title = "Generate citation keys", read_only_hint = true, idempotent_hint = true)
     )]
     async fn generate_citation_keys(
         &self,
@@ -1595,7 +1617,8 @@ impl Server {
 
     #[tool(
         name = "expand_journal",
-        description = "Expand a journal abbreviation to its full name (e.g. 'JACS' -> 'Journal of the American Chemical Society'). 16,000+ journals supported. Requires academic/business plan."
+        description = "Expand a journal abbreviation to its full name (e.g. 'JACS' -> 'Journal of the American Chemical Society'). 16,000+ journals supported. Requires academic/business plan.",
+        annotations(title = "Expand journal abbreviation", read_only_hint = true, idempotent_hint = true)
     )]
     async fn expand_journal(&self, Parameters(args): Parameters<ExpandJournalArgs>) -> String {
         let r = self
@@ -1633,6 +1656,10 @@ impl ServerHandler for Server {
              full-text articles, or paper content. It returns structured metadata (title, authors, \
              year, journal, DOI) and formatted bibliography entries. \
              ALWAYS use these tools instead of searching the web for DOI or citation metadata. \
+             PERFORMANCE: prefer batch tools over repeated single calls -- verify_references for many DOIs, \
+             batch_format for many messy citations, batch_add_to_collection for many collection inserts, \
+             import_bibliography for whole .bib/.ris files. Destructive tools (delete_collection, \
+             remove_from_collection, unshare_collection) permanently change or revoke data; confirm intent first. \
              When the user mentions a DOI, ISBN, paper title, citation, or reference: \
              use validate_doi to verify DOIs exist before citing them. \
              use lookup_isbn for book references. \
@@ -1645,7 +1672,7 @@ impl ServerHandler for Server {
              use search_styles to find CSL style IDs by name. \
              use group_cite to generate grouped in-text markers like [1-3]. \
              use health_check to verify the API is reachable (use when lookups fail). \
-             COLLECTION MANAGEMENT: \
+             COLLECTION MANAGEMENT (requires OOKCITE_API_KEY): \
              use list_collections to see saved citation collections. \
              use add_to_collection to save a citation to a named collection (creates if needed). \
              use batch_add_to_collection to add multiple citations at once. \
@@ -1653,16 +1680,16 @@ impl ServerHandler for Server {
              use export_collection to get BibTeX for a collection. \
              use search_collection to find entries within a collection (returns entry_id for each match). \
              use check_duplicates to check if a citation already exists in a collection (returns entry_id). \
-             use delete_collection to remove a collection. \
+             use delete_collection to remove a collection (destructive/irreversible). \
              use update_collection to rename or change a collection's default style. \
-             use remove_from_collection to remove a specific entry by entry_id, bare DOI, or doi:10.x/y. \
+             use remove_from_collection to remove a specific entry by entry_id, bare DOI, or doi:10.x/y (destructive). \
              use update_tags to set tags on a collection. \
              use reorder_collection to change the order of entries. \
-             SHARING: \
+             SHARING (academic/business plan): \
              use share_collection to create a shareable link. \
-             use unshare_collection to revoke sharing. \
+             use unshare_collection to revoke sharing (destructive to the link). \
              use view_shared to view a shared collection by token. \
-             BULK OPERATIONS: \
+             BULK OPERATIONS (academic/business plan): \
              use merge_collections to combine multiple collections. \
              use batch_move_entries to move entries between collections. \
              UTILITIES (requires academic/business plan): \
@@ -1679,10 +1706,7 @@ impl Server {
     fn new_with_base(api_base: String) -> Self {
         Self {
             tool_router: Self::tool_router(),
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap(),
+            http: build_api_client(5, reqwest::header::HeaderMap::new()),
             api_base,
         }
     }
@@ -1715,6 +1739,17 @@ mod tests {
             version_output(),
             format!("ookcite-mcp {}", env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    #[test]
+    fn get_info_instructions_cover_batch_and_destructive_guidance() {
+        let info = Server::new().get_info();
+        let instr = info.instructions.expect("server instructions set");
+        assert!(instr.contains("PERFORMANCE: prefer batch tools"));
+        assert!(instr.contains("delete_collection"));
+        assert!(instr.contains("destructive"));
+        assert!(instr.contains("METADATA"));
+        assert_eq!(info.server_info.name, "ookcite-mcp");
     }
 
     #[test]

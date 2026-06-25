@@ -18,10 +18,7 @@ pub async fn validate_auth() {
         }
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap();
+    let client = crate::constants::build_api_client(5, reqwest::header::HeaderMap::new());
     let resp = client
         .get(endpoints::ME.url(API, &[]))
         .header("origin", "https://ookcite.turtletech.us")
@@ -57,10 +54,7 @@ pub async fn validate_auth() {
 
 pub async fn check_for_updates() {
     let current = env!("CARGO_PKG_VERSION");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .unwrap();
+    let client = crate::constants::build_api_client(3, reqwest::header::HeaderMap::new());
 
     #[derive(Deserialize)]
     struct NpmPackage {

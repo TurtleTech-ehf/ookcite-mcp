@@ -111,6 +111,13 @@ published, or point Grok at this package's upstream repo plugin files
 collection tools. Full steps:
 [Grok Build section in the main README](https://github.com/TurtleTech-ehf/ookcite-mcp#grok-build).
 
+### Claude / Codex / env
+
+Claude Desktop/Code and Codex use the same `npx -y @turtletech/ookcite-mcp`
+stdio server. `ookcite-mcp setup` runs `add-mcp` for many IDEs; Grok is plugin-only.
+Optional: `OOKCITE_STARTUP_PROBES=1` for launch-time auth checks on stderr.
+Details: [main README configure section](https://github.com/TurtleTech-ehf/ookcite-mcp#configure).
+
 For Codex, the equivalent global registration also works from the CLI:
 
 ```bash

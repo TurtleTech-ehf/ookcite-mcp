@@ -22,7 +22,7 @@ mod tool_args;
 use rmcp::ServiceExt;
 
 use crate::cli::{check_for_updates, validate_auth};
-use crate::constants::version_output;
+use crate::constants::{startup_probes_enabled, version_output};
 use crate::server::Server;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -36,8 +36,17 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    validate_auth().await;
-    check_for_updates().await;
+    // MCP stdio: never write banners to stdout (JSON-RPC only). Optional
+    // startup probes stay on stderr and are off by default for faster connect.
+    if startup_probes_enabled() {
+        validate_auth().await;
+        check_for_updates().await;
+    } else if std::env::var("OOKCITE_API_KEY").is_err() {
+        eprintln!(
+            "ookcite-mcp: OOKCITE_API_KEY not set (anonymous/IP-rate-limited). \
+             Set OOKCITE_STARTUP_PROBES=1 for full auth/update checks at launch."
+        );
+    }
 
     let server = Server::new();
     let service = server.serve(rmcp::transport::io::stdio()).await?;

@@ -141,6 +141,29 @@ server is allowed to start.
 This repository ships that config as `.mcp.json` plus `plugin.json` for Grok
 plugin discovery. After changing MCP config, restart Grok or reload MCP servers.
 
+Optional env (stdio MCP, all clients):
+
+| Variable | Purpose |
+| -------- | ------- |
+| `OOKCITE_API_KEY` | Higher rate limits + collection tools (optional for basic lookup/format) |
+| `OOKCITE_STARTUP_PROBES=1` | Run auth + npm update checks on **stderr** before accepting MCP connections (default off for faster connect) |
+
+### Claude Desktop / Claude Code
+
+`ookcite-mcp setup` uses `add-mcp` for most Claude installs. Manual fallback
+uses the same `mcpServers.ookcite` JSON as above:
+
+| Client | Config location |
+| ------ | --------------- |
+| Claude Desktop (Linux) | `~/.config/Claude/claude_desktop_config.json` |
+| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Claude Code (project) | `.mcp.json` in the project root |
+| Claude Code (user) | `~/.claude/settings.json` → `mcpServers` |
+
+Restart the app or reload MCP servers after edits.
+
+### Codex
+
 For Codex, the equivalent global registration also works from the CLI:
 
 ```bash
@@ -148,6 +171,17 @@ codex mcp add ookcite --env OOKCITE_API_KEY=your_key_here -- npx -y @turtletech/
 ```
 
 Then restart Codex so the new stdio server starts with the updated environment.
+You can also declare `[mcp_servers.ookcite]` in `~/.codex/config.toml`.
+
+### MCP / agent usage tips
+
+- Prefer **batch** tools (`verify_references`, `batch_format`, `batch_add_to_collection`,
+  `import_bibliography`) over many single-citation calls.
+- Collection mutations require `OOKCITE_API_KEY`. Destructive tools
+  (`delete_collection`, `remove_from_collection`, `unshare_collection`) are
+  annotated for clients that honor MCP tool hints.
+- The server writes diagnostics to **stderr** only on the MCP path; stdout is
+  reserved for JSON-RPC.
 
 ## Tools
 

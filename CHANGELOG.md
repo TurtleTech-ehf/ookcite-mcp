@@ -3,12 +3,17 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 ## Unreleased
+#### Features
+- (**mcp**) tool annotations (read-only / destructive / idempotent hints) on shipped tools for protocol-aware clients
+- (**startup**) skip blocking auth/npm probes on MCP connect by default (`OOKCITE_STARTUP_PROBES=1` restores them on stderr)
+- (**http**) shared API client with connect timeout, pool reuse, and TCP keepalive
 #### Refactors
 - (**structure**) split binary `main.rs` into `server`, `tool_args`, `cli`, `collection_entries`, `resolve_helpers`, `http_error`, `constants` (behavior unchanged; see README Source layout)
 #### Documentation
 - (**readme**) source layout, contributing checks, entry_id/DOI remove notes (carried from v0.4.10)
 - (**crate**) `lib.rs` documents binary module map and public `endpoints` surface
 - (**grok**) Grok Build plugin surface (`.mcp.json`, `plugin.json`) and client setup in README/npm README
+- (**clients**) setup prints Grok/Claude/Codex-specific install paths; README covers env knobs and batch/destructive usage tips
 
 - - -
 ## v0.4.10 - 2026-06-22
