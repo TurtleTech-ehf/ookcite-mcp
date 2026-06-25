@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file. See [conven
 #### Documentation
 - (**readme**) source layout, contributing checks, entry_id/DOI remove notes (carried from v0.4.10)
 - (**crate**) `lib.rs` documents binary module map and public `endpoints` surface
+- (**grok**) Grok Build plugin surface (`.mcp.json`, `plugin.json`) and client setup in README/npm README
 
 - - -
 ## v0.4.10 - 2026-06-22

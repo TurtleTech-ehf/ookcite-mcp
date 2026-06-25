@@ -6,7 +6,8 @@
 
 Give any LLM the ability to validate DOIs, format citations, manage
 bibliography collections, and catch hallucinated references. Works with any
-MCP client: Claude, Codex, Cursor, Windsurf, OpenCode, Qwen agents, and more.
+MCP client: Grok Build, Claude, Codex, Cursor, Windsurf, OpenCode, Qwen agents,
+and more.
 
 ## Quick Start
 
@@ -16,9 +17,11 @@ One command to install and configure:
 npx @turtletech/ookcite-mcp setup
 ```
 
-This auto-detects your MCP clients (Claude Desktop, Claude Code, Cursor, Codex)
-and writes the config for you. Add an API key for higher rate limits and
-collection tools:
+This auto-detects supported MCP clients (Claude Desktop, Claude Code, Cursor,
+Codex) and writes the config for you. Grok Build is not covered by `setup` —
+install via the plugin marketplace or the Grok config in the main
+[README](https://github.com/TurtleTech-ehf/ookcite-mcp#grok-build). Add an API
+key for higher rate limits and collection tools:
 
 ```bash
 npx @turtletech/ookcite-mcp setup --key YOUR_API_KEY
@@ -93,11 +96,20 @@ Common config file locations:
 
 | Client                 | Config file                                                       |
 | ---------------------- | ----------------------------------------------------------------- |
+| Grok Build             | Plugin install or project `.mcp.json` (see main README)           |
 | Claude Desktop (Linux) | `~/.config/Claude/claude_desktop_config.json`                     |
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Claude Code            | `.mcp.json` (project) or `~/.claude/settings.json` (global)       |
 | Cursor                 | Settings > MCP Servers                                            |
 | Codex                  | `~/.codex/config.toml`                                            |
+
+### Grok Build
+
+Install from the xAI plugin marketplace (`/marketplace`, search `ookcite`) once
+published, or point Grok at this package's upstream repo plugin files
+(`.mcp.json` + `plugin.json` at the repo root). Set `OOKCITE_API_KEY` for
+collection tools. Full steps:
+[Grok Build section in the main README](https://github.com/TurtleTech-ehf/ookcite-mcp#grok-build).
 
 For Codex, the equivalent global registration also works from the CLI:
 

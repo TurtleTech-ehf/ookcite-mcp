@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "ookcite": {
+      "command": "npx",
+      "args": ["-y", "@turtletech/ookcite-mcp"],
+      "env": {
+        "OOKCITE_API_KEY": "${OOKCITE_API_KEY}"
+      }
+    }
+  }
+}
