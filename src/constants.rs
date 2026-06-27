@@ -13,6 +13,19 @@ pub fn api_base_url() -> String {
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MIN_CONFIDENT_REVERSE_LOOKUP_SCORE: f64 = 25.0;
 
+/// Concurrent fan-out for read-only multi-lookup batches (verify_references, batch_format, …).
+/// Override with OOKCITE_MCP_READ_CONCURRENCY (1–64).
+pub const READ_ONLY_BATCH_CONCURRENCY: usize = 18;
+
+/// Conservative concurrency for mutating multi-item tools (batch_add_to_collection).
+pub const MUTATE_BATCH_CONCURRENCY: usize = 10;
+
+/// Process-local exact-DOI metadata TTL (seconds). Identity-gated on store/load.
+pub const DOI_CACHE_TTL_SECS: u64 = 600;
+
+/// Anonymous / no-key: refuse metered batches larger than this (IP daily limit ~10).
+pub const ANON_BATCH_SOFT_CAP: u32 = 8;
+
 /// When set to `1`/`true`/`yes`, MCP stdio startup runs blocking auth + npm
 /// update probes on stderr before accepting connections. Default is off so
 /// clients reach the server faster; probes are diagnostics only.
