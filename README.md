@@ -146,6 +146,10 @@ Optional env (stdio MCP, all clients):
 | Variable | Purpose |
 | -------- | ------- |
 | `OOKCITE_API_KEY` | Higher rate limits + collection tools (optional for basic lookup/format) |
+| `OOKCITE_API` | Override API base URL (default `https://ookcite-api.turtletech.us`) |
+| `OOKCITE_MCP_READ_ONLY` | `1` hard-disables collection mutations (review / CI agents) |
+| `OOKCITE_MCP_ALLOW_MUTATE` | `0` denies mutations; unset or `1` allows (API key still required server-side) |
+| `OOKCITE_STARTUP_PROBES` | `1` runs auth/update checks on stderr at MCP launch |
 | `OOKCITE_STARTUP_PROBES=1` | Run auth + npm update checks on **stderr** before accepting MCP connections (default off for faster connect) |
 
 ### Claude Desktop / Claude Code

@@ -11,10 +11,13 @@ use rmcp::{
 use crate::collection_entries::{
     entry_doi, format_collection_entry_line, looks_like_doi_token, resolve_entry_id_in_collection,
 };
-use crate::constants::{build_api_client, API, MIN_CONFIDENT_REVERSE_LOOKUP_SCORE};
+use crate::constants::{
+    api_base_url, build_api_client, setup_help_block, MIN_CONFIDENT_REVERSE_LOOKUP_SCORE,
+};
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail,
 };
+use crate::policy::{self, block_mutate};
 use crate::resolve_helpers::{
     classify_reverse_lookup_response, format_resolve_candidates, lookup_doi_with_retry,
     resolve_payload_metadata, resolve_text_body, reverse_lookup_resolve_body,
@@ -46,8 +49,72 @@ impl Server {
         Self {
             tool_router: Self::tool_router(),
             http: build_api_client(30, headers),
-            api_base: API.to_string(),
+            api_base: api_base_url(),
         }
+    }
+
+    /// Sync lines for `ookcite-mcp doctor` before async probes.
+    pub fn doctor_report_sync_prelude() -> String {
+        policy::policy_summary_lines().join("\n")
+    }
+
+    /// Full readiness report (API health + optional /me; never prints full API key).
+    pub async fn doctor_report(&self) -> String {
+        let mut out = policy::policy_summary_lines();
+        out.push(format!("API base: {}", self.api_base));
+
+        let health = self.request(endpoints::HEALTH, &[]).send().await;
+        match health {
+            Ok(resp) if resp.status().is_success() => {
+                let data: serde_json::Value = resp.json().await.unwrap_or_default();
+                let status = data["status"].as_str().unwrap_or("unknown");
+                let version = data["version"].as_str().unwrap_or("unknown");
+                out.push(format!("API health: {status} (server version {version})"));
+            }
+            Ok(resp) => {
+                out.push(format!("API health: HTTP {} (unhealthy)", resp.status()));
+                out.push(setup_help_block());
+            }
+            Err(e) => {
+                out.push(format!("API health: unreachable ({e})"));
+                out.push(setup_help_block());
+            }
+        }
+
+        if std::env::var("OOKCITE_API_KEY").is_ok() {
+            match self.request(endpoints::ME, &[]).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let data: serde_json::Value = resp.json().await.unwrap_or_default();
+                    let plan = data["plan"].as_str().unwrap_or("?");
+                    let user = data["username"].as_str().unwrap_or("?");
+                    let rem = data["lookups_remaining"].as_u64();
+                    let lim = data["lookups_limit"].as_u64();
+                    let quota = match (rem, lim) {
+                        (Some(r), Some(l)) => format!("{r}/{l} lookups remaining"),
+                        _ => "quota n/a".into(),
+                    };
+                    // Never include token material from the response body.
+                    out.push(format!("Auth /me: ok user={user} plan={plan} ({quota})"));
+                }
+                Ok(resp) => {
+                    out.push(format!(
+                        "Auth /me: HTTP {} (key rejected or expired?)",
+                        resp.status()
+                    ));
+                    out.push(setup_help_block());
+                }
+                Err(e) => out.push(format!("Auth /me: request failed ({e})")),
+            }
+        } else {
+            out.push(
+                "Auth /me: skipped (no OOKCITE_API_KEY; anonymous IP limits apply)".into(),
+            );
+        }
+
+        out.push(String::new());
+        out.push("Next: health_check for a short probe; doctor after env changes.".into());
+        out.push("Never paste full API keys into chat; use redact-friendly doctor output.".into());
+        out.join("\n")
     }
 
     /// Build a request to a registered endpoint, substituting any path
@@ -650,6 +717,9 @@ impl Server {
         annotations(title = "Add to collection", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
     )]
     async fn add_to_collection(&self, Parameters(args): Parameters<AddToCollectionArgs>) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
         let col_id = match self.resolve_or_create_collection(&args.collection).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -1005,9 +1075,25 @@ impl Server {
                 }
                 out
             }
-            Ok(resp) => format!("API unhealthy: HTTP {}", resp.status()),
-            Err(e) => format!("API unreachable: {e}"),
+            Ok(resp) => format!(
+                "API unhealthy: HTTP {}\n\n{}",
+                resp.status(),
+                setup_help_block()
+            ),
+            Err(e) => format!("API unreachable: {e}\n\n{}", setup_help_block()),
         }
+    }
+
+    #[tool(
+        name = "doctor",
+        description = "Diagnose ookcite-mcp readiness: MCP version, mutate/read-only policy, redacted API key presence, API health, and /me plan when a key is set. Use when setup is unclear or tools fail. Never returns the full API key.",
+        annotations(title = "ookcite doctor", read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn doctor(
+        &self,
+        #[allow(unused)] Parameters(_args): Parameters<HealthCheckArgs>,
+    ) -> String {
+        self.doctor_report().await
     }
 
     #[tool(
@@ -1019,6 +1105,9 @@ impl Server {
         &self,
         Parameters(args): Parameters<ImportBibliographyArgs>,
     ) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
         let col_id = match self.resolve_or_create_collection(&args.collection).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -1112,6 +1201,9 @@ impl Server {
         annotations(title = "Batch add to collection", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
     )]
     async fn batch_add_to_collection(&self, Parameters(args): Parameters<BatchAddArgs>) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
         let col_id = match self.resolve_or_create_collection(&args.collection).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -1190,6 +1282,9 @@ impl Server {
         &self,
         Parameters(args): Parameters<DeleteCollectionArgs>,
     ) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
         let col_id = match self.resolve_collection_id(&args.collection).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -1216,6 +1311,9 @@ impl Server {
         &self,
         Parameters(args): Parameters<UpdateCollectionArgs>,
     ) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
         let col_id = match self.resolve_collection_id(&args.collection).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -1255,6 +1353,9 @@ impl Server {
         &self,
         Parameters(args): Parameters<RemoveFromCollectionArgs>,
     ) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
         let col_id = match self.resolve_collection_id(&args.collection).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -1304,6 +1405,9 @@ impl Server {
         annotations(title = "Update collection tags", read_only_hint = false, destructive_hint = false, idempotent_hint = true)
     )]
     async fn update_tags(&self, Parameters(args): Parameters<UpdateTagsArgs>) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
         let col_id = match self.resolve_collection_id(&args.collection).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -1330,6 +1434,9 @@ impl Server {
         &self,
         Parameters(args): Parameters<ReorderCollectionArgs>,
     ) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
         let col_id = match self.resolve_collection_id(&args.collection).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -1355,6 +1462,9 @@ impl Server {
         annotations(title = "Share collection", read_only_hint = false, destructive_hint = false, idempotent_hint = true)
     )]
     async fn share_collection(&self, Parameters(args): Parameters<ShareCollectionArgs>) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
         let col_id = match self.resolve_collection_id(&args.collection).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -1382,6 +1492,9 @@ impl Server {
         &self,
         Parameters(args): Parameters<UnshareCollectionArgs>,
     ) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
         let col_id = match self.resolve_collection_id(&args.collection).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -1407,6 +1520,9 @@ impl Server {
         &self,
         Parameters(args): Parameters<MergeCollectionsArgs>,
     ) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
         if args.collections.len() < 2 {
             return "Need at least 2 collection names to merge.".into();
         }
@@ -1461,6 +1577,9 @@ impl Server {
         annotations(title = "Batch move entries", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
     )]
     async fn batch_move_entries(&self, Parameters(args): Parameters<BatchMoveArgs>) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
         let source_id = match self.resolve_collection_id(&args.source).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -1672,6 +1791,7 @@ impl ServerHandler for Server {
              use search_styles to find CSL style IDs by name. \
              use group_cite to generate grouped in-text markers like [1-3]. \
              use health_check to verify the API is reachable (use when lookups fail). \
+             use doctor for MCP version, mutate policy, redacted key status, and API /me (use when setup is unclear). \
              COLLECTION MANAGEMENT (requires OOKCITE_API_KEY): \
              use list_collections to see saved citation collections. \
              use add_to_collection to save a citation to a named collection (creates if needed). \
@@ -1719,7 +1839,17 @@ mod tests {
         format_collection_entry_line, resolve_entry_id_in_collection,
     };
     use crate::constants::version_output;
+    use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{default_style, BatchMoveArgs, FormatArgs, ReverseArgs, VerifyArgs};
+
+    #[test]
+    fn doctor_prelude_has_version_not_raw_key() {
+        let prelude = Server::doctor_report_sync_prelude();
+        assert!(prelude.contains("ookcite-mcp"));
+        assert!(!prelude.contains("ookc_"));
+        assert!(redact_api_key_hint(Some("ookc_secretkey12")).contains("…"));
+        assert!(mutate_block_message().contains("BLOCKED"));
+    }
 
     #[test]
     fn test_endpoint_url_construction() {

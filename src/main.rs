@@ -14,6 +14,7 @@ mod cli;
 mod collection_entries;
 mod constants;
 mod http_error;
+mod policy;
 mod resolve_helpers;
 mod server;
 mod setup;
@@ -35,6 +36,13 @@ async fn main() -> anyhow::Result<()> {
         setup::run(&args).await;
         return Ok(());
     }
+    if args.iter().any(|a| a == "doctor") {
+        // Stdout OK for human CLI; MCP never uses this path for JSON-RPC.
+        println!("{}", Server::doctor_report_sync_prelude());
+        let report = Server::new().doctor_report().await;
+        println!("{report}");
+        return Ok(());
+    }
 
     // MCP stdio: never write banners to stdout (JSON-RPC only). Optional
     // startup probes stay on stderr and are off by default for faster connect.
@@ -44,7 +52,8 @@ async fn main() -> anyhow::Result<()> {
     } else if std::env::var("OOKCITE_API_KEY").is_err() {
         eprintln!(
             "ookcite-mcp: OOKCITE_API_KEY not set (anonymous/IP-rate-limited). \
-             Set OOKCITE_STARTUP_PROBES=1 for full auth/update checks at launch."
+             Set OOKCITE_STARTUP_PROBES=1 for full auth/update checks at launch. \
+             Run `ookcite-mcp doctor` for a full readiness report."
         );
     }
 
