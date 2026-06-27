@@ -11,8 +11,13 @@ use rmcp::{
 use crate::collection_entries::{
     entry_doi, format_collection_entry_line, looks_like_doi_token, resolve_entry_id_in_collection,
 };
+use crate::batch_limits::{
+    collect_dois_from_collection_body, format_member_valid_lines, plan_metered_batch,
+    read_only_concurrency, DoiResponseCache, MeQuota,
+};
 use crate::constants::{
-    api_base_url, build_api_client, setup_help_block, MIN_CONFIDENT_REVERSE_LOOKUP_SCORE,
+    api_base_url, build_api_client, setup_help_block, MUTATE_BATCH_CONCURRENCY,
+    MIN_CONFIDENT_REVERSE_LOOKUP_SCORE,
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail,
@@ -23,12 +28,21 @@ use crate::resolve_helpers::{
     resolve_payload_metadata, resolve_text_body, reverse_lookup_resolve_body,
 };
 use crate::tool_args::*;
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+
+/// Process-wide identity-safe exact-DOI cache (shared across Server clones).
+fn shared_doi_cache() -> &'static DoiResponseCache {
+    static CACHE: OnceLock<DoiResponseCache> = OnceLock::new();
+    CACHE.get_or_init(DoiResponseCache::with_default_ttl)
+}
 
 #[derive(Clone)]
 pub struct Server {
     tool_router: ToolRouter<Self>,
     http: reqwest::Client,
     api_base: String,
+    doi_cache: DoiResponseCache,
 }
 
 #[tool_router]
@@ -50,6 +64,79 @@ impl Server {
             tool_router: Self::tool_router(),
             http: build_api_client(30, headers),
             api_base: api_base_url(),
+            doi_cache: shared_doi_cache().clone(),
+        }
+    }
+
+    async fn fetch_me_quota(&self) -> Option<MeQuota> {
+        if std::env::var("OOKCITE_API_KEY").is_err() {
+            return None;
+        }
+        let resp = self.request(endpoints::ME, &[]).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let v: serde_json::Value = resp.json().await.ok()?;
+        Some(MeQuota::from_json(&v))
+    }
+
+    /// Load DOIs from all collections (bounded: first page of list + each GET).
+    /// Used for upfront membership so collection-local DOIs skip metered fan-out.
+    async fn load_collection_doi_membership(
+        &self,
+    ) -> (HashSet<String>, HashMap<String, String>) {
+        let mut dois = HashSet::new();
+        let mut titles = HashMap::new();
+        if std::env::var("OOKCITE_API_KEY").is_err() {
+            return (dois, titles);
+        }
+        let Ok(resp) = self.request(endpoints::COLLECTIONS_LIST, &[]).send().await else {
+            return (dois, titles);
+        };
+        if !resp.status().is_success() {
+            return (dois, titles);
+        }
+        let list: serde_json::Value = resp.json().await.unwrap_or_default();
+        let cols = list
+            .as_array()
+            .cloned()
+            .or_else(|| list["collections"].as_array().cloned())
+            .unwrap_or_default();
+        // Cap collections scanned so preflight stays cheaper than the batch.
+        for col in cols.into_iter().take(32) {
+            let id = col["id"].as_str().unwrap_or("");
+            if id.is_empty() {
+                continue;
+            }
+            let Ok(cr) = self
+                .request(endpoints::COLLECTION_GET, &[("id", id)])
+                .send()
+                .await
+            else {
+                continue;
+            };
+            if !cr.status().is_success() {
+                continue;
+            }
+            let body: serde_json::Value = cr.json().await.unwrap_or_default();
+            collect_dois_from_collection_body(&body, &mut dois, &mut titles);
+        }
+        (dois, titles)
+    }
+
+    async fn lookup_doi_json_cached(&self, doi: &str) -> Result<serde_json::Value, String> {
+        if let Some(meta) = self.doi_cache.get_valid(doi) {
+            return Ok(meta);
+        }
+        let r = lookup_doi_with_retry(&self.http, &self.api_base, doi).await;
+        match r {
+            Ok(resp) if resp.status().is_success() => {
+                let meta: serde_json::Value = resp.json().await.unwrap_or_default();
+                self.doi_cache.put_if_identity_ok(doi, meta.clone());
+                Ok(meta)
+            }
+            Ok(resp) => Err(classify_lookup_doi_failure(resp, doi).await),
+            Err(e) => Err(format!("ERROR {doi} : {e}")),
         }
     }
 
@@ -170,10 +257,8 @@ impl Server {
         annotations(title = "Validate DOI", read_only_hint = true, idempotent_hint = true)
     )]
     async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
-        let r = lookup_doi_with_retry(&self.http, &self.api_base, &args.doi).await;
-        match r {
-            Ok(resp) if resp.status().is_success() => {
-                let meta: serde_json::Value = resp.json().await.unwrap_or_default();
+        match self.lookup_doi_json_cached(&args.doi).await {
+            Ok(meta) => {
                 let title = meta["title"].as_str().unwrap_or("?");
                 let authors = meta["authors"]
                     .as_array()
@@ -196,8 +281,7 @@ impl Server {
                     "VALID\nDOI: {doi}\nTitle: {title}\nAuthors: {authors}\nYear: {year}\nJournal: {journal}\nVolume: {volume}\nIssue: {issue}"
                 )
             }
-            Ok(resp) => classify_lookup_doi_failure(resp, &args.doi).await,
-            Err(e) => format!("ERROR: Could not reach citation service: {e}"),
+            Err(msg) => msg,
         }
     }
 
@@ -522,7 +606,7 @@ impl Server {
             })
             .collect();
         let entries: Vec<serde_json::Value> = stream::iter(futs)
-            .buffer_unordered(10)
+            .buffer_unordered(read_only_concurrency())
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -556,55 +640,110 @@ impl Server {
 
     #[tool(
         name = "verify_references",
-        description = "Batch verify that a list of DOIs exist. Returns VALID or INVALID for each. Prefer this over repeated validate_doi calls.",
+        description = "Batch verify that a list of DOIs exist. Returns VALID or INVALID for each. Checks daily quota and collection membership upfront so oversized batches refuse before burning lookups; collection members are reported without a metered call. Prefer over repeated validate_doi.",
         annotations(title = "Verify DOIs (batch)", read_only_hint = true, idempotent_hint = true)
     )]
     async fn verify_references(&self, Parameters(args): Parameters<VerifyArgs>) -> String {
-        let api_base = self.api_base.clone();
-        let futs: Vec<_> = args
-            .dois
+        let has_key = std::env::var("OOKCITE_API_KEY").is_ok();
+        let quota = self.fetch_me_quota().await;
+        let (member_dois, member_titles) = if has_key {
+            self.load_collection_doi_membership().await
+        } else {
+            (HashSet::new(), HashMap::new())
+        };
+        let pf = plan_metered_batch(
+            &args.dois,
+            &member_dois,
+            &member_titles,
+            quota.as_ref(),
+            has_key,
+        );
+        if let Some(msg) = pf.refuse_message {
+            let mut out = vec![msg];
+            out.extend(format_member_valid_lines(&pf.members));
+            return out.join("\n");
+        }
+        let mut results = format_member_valid_lines(&pf.members);
+        let conc = read_only_concurrency();
+        let futs: Vec<_> = pf
+            .need_lookup
             .iter()
             .map(|doi| {
-                let http = self.http.clone();
-                let api_base = api_base.clone();
+                let server = self.clone();
                 let doi = doi.clone();
                 async move {
-                    let r = lookup_doi_with_retry(&http, &api_base, &doi).await;
-                    match r {
-                        Ok(resp) if resp.status().is_success() => {
-                            let meta: serde_json::Value = resp.json().await.unwrap_or_default();
+                    match server.lookup_doi_json_cached(&doi).await {
+                        Ok(meta) => {
                             let title = meta["title"].as_str().unwrap_or("?");
                             format!("VALID {doi} : {title}")
                         }
-                        Ok(resp) => classify_lookup_doi_failure(resp, &doi).await,
-                        Err(e) => format!("ERROR {doi} : {e}"),
+                        Err(e) => e,
                     }
                 }
             })
             .collect();
-        let results = stream::iter(futs)
-            .buffer_unordered(10)
+        let looked_up = stream::iter(futs)
+            .buffer_unordered(conc)
             .collect::<Vec<_>>()
             .await;
+        results.extend(looked_up);
         results.join("\n")
     }
 
     #[tool(
         name = "batch_format",
-        description = "Resolve and format multiple messy citations at once. Uses the local corpus by default; set use_live_queries=true to allow live upstream provider calls. Prefer over N× reverse_lookup + format_citation.",
+        description = "Resolve and format multiple messy citations at once. Checks quota upfront for DOI-shaped items and prefers collection membership; uses the local corpus by default. Prefer over N× reverse_lookup + format_citation. Import large bibliographies into a collection for free revisits.",
         annotations(title = "Batch format citations", read_only_hint = true, idempotent_hint = true)
     )]
     async fn batch_format(&self, Parameters(args): Parameters<BatchArgs>) -> String {
-        // Resolve all citations in parallel (up to 10 concurrent)
+        let has_key = std::env::var("OOKCITE_API_KEY").is_ok();
+        let quota = self.fetch_me_quota().await;
+        let (member_dois, member_titles) = if has_key {
+            self.load_collection_doi_membership().await
+        } else {
+            (HashSet::new(), HashMap::new())
+        };
+        let pf = plan_metered_batch(
+            &args.citations,
+            &member_dois,
+            &member_titles,
+            quota.as_ref(),
+            has_key,
+        );
+        if let Some(msg) = pf.refuse_message {
+            return msg;
+        }
+
         let use_live_queries = args.use_live_queries;
-        let futs: Vec<_> = args
-            .citations
+        let mut entries = Vec::new();
+        // Collection members: synthesize minimal metadata for format when we only have title.
+        for (doi, title) in &pf.members {
+            if let Ok(meta) = self.lookup_doi_json_cached(doi).await {
+                entries.push(meta);
+            } else {
+                entries.push(serde_json::json!({
+                    "doi": doi,
+                    "title": title.as_deref().unwrap_or("?"),
+                    "entry_type": "article",
+                    "authors": [],
+                }));
+            }
+        }
+
+        let conc = read_only_concurrency();
+        let futs: Vec<_> = pf
+            .need_lookup
             .iter()
             .enumerate()
             .map(|(i, text)| {
                 let server = self.clone();
                 let text = text.clone();
                 async move {
+                    if looks_like_doi_token(&text) {
+                        if let Ok(meta) = server.lookup_doi_json_cached(&text).await {
+                            return Ok(meta);
+                        }
+                    }
                     if let Some(meta) = server
                         .resolve_query_to_metadata(&text, use_live_queries)
                         .await
@@ -620,9 +759,8 @@ impl Server {
                 }
             })
             .collect();
-        let resolved: Vec<_> = stream::iter(futs).buffer_unordered(10).collect().await;
+        let resolved: Vec<_> = stream::iter(futs).buffer_unordered(conc).collect().await;
 
-        let mut entries = Vec::new();
         let mut errors = Vec::new();
         for result in resolved {
             match result {
@@ -1232,7 +1370,10 @@ impl Server {
                 }
             })
             .collect();
-        let resolved: Vec<_> = stream::iter(futs).buffer_unordered(10).collect().await;
+        let resolved: Vec<_> = stream::iter(futs)
+            .buffer_unordered(MUTATE_BATCH_CONCURRENCY)
+            .collect()
+            .await;
 
         let mut entries = Vec::new();
         let mut errors = Vec::new();
@@ -1695,7 +1836,7 @@ impl Server {
             })
             .collect();
         let entries: Vec<serde_json::Value> = stream::iter(futs)
-            .buffer_unordered(10)
+            .buffer_unordered(read_only_concurrency())
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -1828,6 +1969,7 @@ impl Server {
             tool_router: Self::tool_router(),
             http: build_api_client(5, reqwest::header::HeaderMap::new()),
             api_base,
+            doi_cache: DoiResponseCache::with_default_ttl(),
         }
     }
 }
@@ -1840,7 +1982,30 @@ mod tests {
     };
     use crate::constants::version_output;
     use crate::policy::{mutate_block_message, redact_api_key_hint};
-    use crate::tool_args::{default_style, BatchMoveArgs, FormatArgs, ReverseArgs, VerifyArgs};
+    use crate::tool_args::{
+        default_style, BatchMoveArgs, DoiArgs, FormatArgs, ReverseArgs, VerifyArgs,
+    };
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: tests are sequential for this key; restore on drop.
+            unsafe { std::env::set_var(key, val) };
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     #[test]
     fn doctor_prelude_has_version_not_raw_key() {
@@ -1849,6 +2014,152 @@ mod tests {
         assert!(!prelude.contains("ookc_"));
         assert!(redact_api_key_hint(Some("ookc_secretkey12")).contains("…"));
         assert!(mutate_block_message().contains("BLOCKED"));
+    }
+
+    /// Quota preflight must refuse before any LOOKUP_DOI POST (wiremock count 0).
+    #[tokio::test]
+    async fn verify_references_refuses_when_quota_insufficient_without_lookup_posts() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "authenticated": true,
+                "username": "test",
+                "plan": "free",
+                "lookups_remaining": 1,
+                "lookups_limit": 30
+            })))
+            .expect(1..)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(0..)
+            .mount(&mock)
+            .await;
+        // Any lookup would fail the test via expect(0) — use a separate mock that must not be hit.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1/x",
+                "title": "should not be fetched"
+            })))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_testkey_for_preflight");
+        let s = test_server(&mock.uri());
+        let out = s
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec![
+                    "10.1/a".into(),
+                    "10.1/b".into(),
+                    "10.1/c".into(),
+                ],
+            }))
+            .await;
+        assert!(
+            out.contains("REFUSED"),
+            "expected REFUSED quota message, got: {out}"
+        );
+        assert!(
+            !out.contains("should not be fetched"),
+            "must not have performed metered lookups: {out}"
+        );
+    }
+
+    /// Collection members are labeled without requiring LOOKUP_DOI when quota is tight
+    /// but membership covers part of the batch (remaining 0 → refuse, members still listed).
+    #[tokio::test]
+    async fn verify_references_lists_collection_members_without_lookup_when_refused() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan": "free",
+                "lookups_remaining": 0,
+                "lookups_limit": 30
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-1", "name": "lab"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": "doi:10.1038/187493a0",
+                    "metadata": {
+                        "doi": "10.1038/187493a0",
+                        "title": "Stimulated Optical Radiation in Ruby"
+                    }
+                }]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_testkey_members");
+        let s = test_server(&mock.uri());
+        let out = s
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec![
+                    "10.1038/187493a0".into(),
+                    "10.1/not-in-collection".into(),
+                ],
+            }))
+            .await;
+        assert!(out.contains("REFUSED"), "got: {out}");
+        assert!(
+            out.contains("collection") || out.contains("187493a0"),
+            "member should appear in output: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_doi_cache_avoids_second_api_post() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/187493a0",
+                "title": "Stimulated Optical Radiation in Ruby",
+                "authors": [{"family": "Maiman"}],
+                "date": {"year": 1960},
+                "journal": "Nature",
+                "volume": "187",
+                "issue": "4736"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let a = s
+            .validate_doi(Parameters(DoiArgs {
+                doi: "10.1038/187493a0".into(),
+            }))
+            .await;
+        let b = s
+            .validate_doi(Parameters(DoiArgs {
+                doi: "10.1038/187493a0".into(),
+            }))
+            .await;
+        assert!(a.contains("VALID") && a.contains("Ruby"), "first: {a}");
+        assert!(b.contains("VALID") && b.contains("Ruby"), "second: {b}");
+        // second must not trigger another POST — enforced by mock expect(1)
     }
 
     #[test]

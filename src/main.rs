@@ -10,6 +10,7 @@
 //! Implementation lives in [`server`]; argument types in [`tool_args`]; pure
 //! helpers in [`collection_entries`], [`resolve_helpers`], and [`http_error`].
 
+mod batch_limits;
 mod cli;
 mod collection_entries;
 mod constants;
