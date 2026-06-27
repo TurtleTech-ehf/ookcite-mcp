@@ -80,7 +80,11 @@ fn print_client_specific_guides(api_key: Option<&str>) {
 
     println!("\nEnv knobs (all clients):");
     println!("  OOKCITE_API_KEY          optional; collections + higher rate limits");
+    println!("  OOKCITE_API              optional; override API base (default ookcite-api.turtletech.us)");
     println!("  OOKCITE_STARTUP_PROBES=1 optional; extra auth/update checks on stderr at MCP launch");
+    println!("  OOKCITE_MCP_READ_ONLY=1  hard-disable collection mutations (review agents)");
+    println!("  OOKCITE_MCP_ALLOW_MUTATE=0 deny mutations; omit or =1 to allow (default allow)");
+    println!("  ookcite-mcp doctor       CLI readiness report (policy + API health + /me)");
 }
 
 /// Run `npx add-mcp` to install the ookcite MCP server to all detected clients.
