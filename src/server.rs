@@ -391,14 +391,17 @@ impl Server {
 
     #[tool(
         name = "reverse_lookup",
-        description = "Parse a messy citation string and find the matching paper. Searches the local corpus first, then retries with live upstream providers when local search is empty or weak. Set use_live_queries=true to allow live upstream providers on the first pass. Optional filters (author, journal, year, orcid) boost matching results. For many citations prefer batch_format.",
+        description = "Parse a messy citation string or author name and find matching papers. Uses /api/v1/reverse (author-aware lexical ranking) first, then falls back to live resolve when empty or weak. Optional author/journal/year/orcid filters are folded into the query. Set use_live_queries=true to force the live resolve path earlier. For many citations prefer batch_format.",
         annotations(title = "Reverse lookup citation", read_only_hint = true, idempotent_hint = true)
     )]
     async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> String {
-        let body = reverse_lookup_resolve_body(&args, args.use_live_queries);
+        // Prefer /api/v1/reverse for free-text author ranking (same path as the
+        // web demo). Fall back to /resolve with live queries when reverse is
+        // empty/weak or the caller forced use_live_queries.
+        let reverse_body = crate::resolve_helpers::reverse_lookup_body(&args);
         let r = self
-            .request(endpoints::RESOLVE, &[])
-            .json(&body)
+            .request(endpoints::REVERSE, &[])
+            .json(&reverse_body)
             .send()
             .await;
         match classify_reverse_lookup_response(r).await {
@@ -420,6 +423,25 @@ impl Server {
                     }
                     Ok(Some(_)) | Ok(None) => "No confident matches found".into(),
                     Err(_) => local_match.output,
+                }
+            }
+            Ok(Some(local_match)) if args.use_live_queries => {
+                // Caller asked for live on first pass: still prefer reverse
+                // hits when confident; otherwise try resolve+live.
+                if local_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE {
+                    local_match.output
+                } else {
+                    let live_body = reverse_lookup_resolve_body(&args, true);
+                    let live = self
+                        .request(endpoints::RESOLVE, &[])
+                        .json(&live_body)
+                        .send()
+                        .await;
+                    match classify_reverse_lookup_response(live).await {
+                        Ok(Some(live_match)) => live_match.output,
+                        Ok(None) => local_match.output,
+                        Err(_) => local_match.output,
+                    }
                 }
             }
             Ok(Some(local_match)) => local_match.output,
@@ -2574,22 +2596,20 @@ mod tests {
     #[tokio::test]
     async fn test_reverse_lookup_success() {
         let mock = MockServer::start().await;
+        // reverse_lookup prefers /api/v1/reverse (bare array of candidates).
         Mock::given(method("POST"))
-            .and(path("/api/v1/resolve"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "query_type": "text",
-                "match_type": "candidate_list",
-                "candidates": [
-                    {
-                        "metadata": {
-                            "title": "Stimulated Optical Radiation in Ruby",
-                            "doi": "10.1038/187493a0",
-                            "journal": "Nature"
-                        },
-                        "score": 95.0
-                    }
-                ]
-            })))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "metadata": {
+                        "title": "Stimulated Optical Radiation in Ruby",
+                        "doi": "10.1038/187493a0",
+                        "journal": "Nature",
+                        "authors": [{"family": "Maiman", "given": "T. H."}]
+                    },
+                    "score": 95.0
+                }
+            ])))
             .mount(&mock)
             .await;
 
@@ -2611,6 +2631,12 @@ mod tests {
     #[tokio::test]
     async fn test_reverse_lookup_no_matches() {
         let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&mock)
+            .await;
+        // Live fallback resolve also empty.
         Mock::given(method("POST"))
             .and(path("/api/v1/resolve"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -2638,12 +2664,8 @@ mod tests {
     async fn test_reverse_lookup_falls_back_to_live_when_local_empty() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/resolve"))
-            .and(body_string_contains(r#""use_live_queries":false"#))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "query_type": "text",
-                "candidates": []
-            })))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
             .expect(1)
             .mount(&mock)
             .await;
@@ -2688,22 +2710,17 @@ mod tests {
     async fn test_reverse_lookup_falls_back_to_live_when_local_match_is_weak() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/resolve"))
-            .and(body_string_contains(r#""use_live_queries":false"#))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "query_type": "text",
-                "match_type": "candidate_list",
-                "candidates": [
-                    {
-                        "metadata": {
-                            "title": "Resource allocation based on redundancy models for high availability cloud",
-                            "doi": "10.1007/s00607-019-00728-1",
-                            "journal": "Computing"
-                        },
-                        "score": 2.0
-                    }
-                ]
-            })))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "metadata": {
+                        "title": "Resource allocation based on redundancy models for high availability cloud",
+                        "doi": "10.1007/s00607-019-00728-1",
+                        "journal": "Computing"
+                    },
+                    "score": 2.0
+                }
+            ])))
             .expect(1)
             .mount(&mock)
             .await;
@@ -2749,22 +2766,17 @@ mod tests {
     async fn test_reverse_lookup_rejects_unconfident_local_and_live_matches() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/resolve"))
-            .and(body_string_contains(r#""use_live_queries":false"#))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "query_type": "text",
-                "match_type": "candidate_list",
-                "candidates": [
-                    {
-                        "metadata": {
-                            "title": "Resource allocation based on redundancy models for high availability cloud",
-                            "doi": "10.1007/s00607-019-00728-1",
-                            "journal": "Computing"
-                        },
-                        "score": 2.0
-                    }
-                ]
-            })))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "metadata": {
+                        "title": "Resource allocation based on redundancy models for high availability cloud",
+                        "doi": "10.1007/s00607-019-00728-1",
+                        "journal": "Computing"
+                    },
+                    "score": 2.0
+                }
+            ])))
             .expect(1)
             .mount(&mock)
             .await;
@@ -3791,7 +3803,7 @@ mod tests {
     async fn test_reverse_lookup_rate_limited() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/resolve"))
+            .and(path("/api/v1/reverse"))
             .respond_with(ResponseTemplate::new(429).set_body_string("Daily limit reached"))
             .mount(&mock)
             .await;
@@ -3814,7 +3826,7 @@ mod tests {
     async fn test_reverse_lookup_temporary_upstream_failure() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/resolve"))
+            .and(path("/api/v1/reverse"))
             .respond_with(ResponseTemplate::new(503).set_body_string(
                 "Lookup service temporarily unavailable. Please try again shortly.",
             ))

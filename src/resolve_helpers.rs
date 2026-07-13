@@ -12,29 +12,40 @@ pub struct ReverseLookupMatch {
 }
 
 pub fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<ReverseLookupMatch> {
-    let candidates = payload
-        .get("candidates")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
+    // /api/v1/reverse returns a bare array; /api/v1/resolve returns an object
+    // with candidates/paper. Accept both so reverse_lookup can use reverse.
+    let array_candidates: Vec<serde_json::Value> = if let Some(arr) = payload.as_array() {
+        arr.clone()
+    } else {
+        payload
+            .get("candidates")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
     let mut out = Vec::new();
     let mut top_score = f64::NEG_INFINITY;
     if let Some(paper) = payload.get("paper") {
         let title = paper["title"].as_str().unwrap_or("?");
         let doi = paper["doi"].as_str().unwrap_or("?");
         let journal = paper["journal"].as_str().unwrap_or("N/A");
-        out.push(format!("1. [score:100] {title} | {journal} (doi:{doi})"));
+        let authors = format_author_list(paper);
+        out.push(format!(
+            "1. [score:100] {title} | {authors} | {journal} (doi:{doi})"
+        ));
         top_score = top_score.max(100.0);
     }
     let offset = out.len();
-    for (i, c) in candidates.iter().enumerate() {
-        let title = c["metadata"]["title"].as_str().unwrap_or("?");
-        let doi = c["metadata"]["doi"].as_str().unwrap_or("?");
-        let journal = c["metadata"]["journal"].as_str().unwrap_or("N/A");
+    for (i, c) in array_candidates.iter().enumerate() {
+        let meta = c.get("metadata").unwrap_or(c);
+        let title = meta["title"].as_str().unwrap_or("?");
+        let doi = meta["doi"].as_str().unwrap_or("?");
+        let journal = meta["journal"].as_str().unwrap_or("N/A");
+        let authors = format_author_list(meta);
         let score = c["score"].as_f64().unwrap_or(0.0);
         top_score = top_score.max(score);
         out.push(format!(
-            "{}. [score:{:.0}] {title} | {journal} (doi:{doi})",
+            "{}. [score:{:.0}] {title} | {authors} | {journal} (doi:{doi})",
             offset + i + 1,
             score
         ));
@@ -46,6 +57,27 @@ pub fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<Reve
             output: out.join("\n"),
             top_score,
         })
+    }
+}
+
+fn format_author_list(meta: &serde_json::Value) -> String {
+    let Some(authors) = meta.get("authors").and_then(|a| a.as_array()) else {
+        return "Unknown author".into();
+    };
+    let names: Vec<String> = authors
+        .iter()
+        .take(3)
+        .map(|a| {
+            let given = a["given"].as_str().unwrap_or("").trim();
+            let family = a["family"].as_str().unwrap_or("").trim();
+            format!("{given} {family}").trim().to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.is_empty() {
+        "Unknown author".into()
+    } else {
+        names.join("; ")
     }
 }
 
@@ -63,6 +95,12 @@ pub async fn classify_reverse_lookup_response(
         Ok(r) if r.status().as_u16() == 403 => {
             Err(format!("ACCESS DENIED: {}", error_detail(r).await))
         }
+        Ok(r) if r.status().as_u16() == 504 || r.status().as_u16() == 408 => {
+            Err(format!(
+                "TIMEOUT: {}",
+                error_detail(r).await
+            ))
+        }
         Ok(r) if r.status().is_server_error() => {
             Err(format!("TEMPORARY ERROR: {}", error_detail(r).await))
         }
@@ -71,6 +109,36 @@ pub async fn classify_reverse_lookup_response(
     }
 }
 
+/// Body for `/api/v1/reverse` — folds structured filters into free text so
+/// author/orcid/year hints still bias the lexical search (same approach as
+/// the OokCite web client).
+pub fn reverse_lookup_body(args: &ReverseArgs) -> serde_json::Value {
+    let mut parts = vec![args.text.trim().to_string()];
+    if let Some(author) = &args.author {
+        if !author.trim().is_empty() {
+            parts.push(author.trim().to_string());
+        }
+    }
+    if let Some(journal) = &args.journal {
+        if !journal.trim().is_empty() {
+            parts.push(journal.trim().to_string());
+        }
+    }
+    if let Some(year) = args.year {
+        parts.push(year.to_string());
+    }
+    if let Some(orcid) = &args.orcid {
+        if !orcid.trim().is_empty() {
+            parts.push(orcid.trim().to_string());
+        }
+    }
+    serde_json::json!({
+        "text": parts.join(" ").trim(),
+        "use_neural": false
+    })
+}
+
+/// Body for `/api/v1/resolve` when structured filters + live queries are needed.
 pub fn reverse_lookup_resolve_body(args: &ReverseArgs, use_live_queries: bool) -> serde_json::Value {
     let mut body = resolve_text_body(&args.text, use_live_queries);
     let mut filters = serde_json::Map::new();
