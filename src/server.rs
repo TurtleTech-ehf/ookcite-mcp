@@ -1,23 +1,15 @@
 //! MCP server: tool router, HTTP client, and handlers.
 
-use futures::{stream, StreamExt};
-use ookcite_mcp::endpoints::{self, Endpoint};
-use rmcp::ServerHandler;
-use rmcp::{
-    handler::server::{tool::ToolRouter, wrapper::Parameters},
-    model::*,
-    tool, tool_handler, tool_router,
-};
-use crate::collection_entries::{
-    entry_doi, format_collection_entry_line, looks_like_doi_token, resolve_entry_id_in_collection,
-};
 use crate::batch_limits::{
     collect_dois_from_collection_body, format_member_valid_lines, plan_metered_batch,
     read_only_concurrency, DoiResponseCache, MeQuota,
 };
+use crate::collection_entries::{
+    entry_doi, format_collection_entry_line, looks_like_doi_token, resolve_entry_id_in_collection,
+};
 use crate::constants::{
-    api_base_url, build_api_client, setup_help_block, MUTATE_BATCH_CONCURRENCY,
-    MIN_CONFIDENT_REVERSE_LOOKUP_SCORE,
+    api_base_url, build_api_client, setup_help_block, MIN_CONFIDENT_REVERSE_LOOKUP_SCORE,
+    MUTATE_BATCH_CONCURRENCY,
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail,
@@ -28,6 +20,14 @@ use crate::resolve_helpers::{
     resolve_payload_metadata, resolve_text_body, reverse_lookup_resolve_body,
 };
 use crate::tool_args::*;
+use futures::{stream, StreamExt};
+use ookcite_mcp::endpoints::{self, Endpoint};
+use rmcp::ServerHandler;
+use rmcp::{
+    handler::server::{tool::ToolRouter, wrapper::Parameters},
+    model::*,
+    tool, tool_handler, tool_router,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -82,9 +82,7 @@ impl Server {
 
     /// Load DOIs from all collections (bounded: first page of list + each GET).
     /// Used for upfront membership so collection-local DOIs skip metered fan-out.
-    async fn load_collection_doi_membership(
-        &self,
-    ) -> (HashSet<String>, HashMap<String, String>) {
+    async fn load_collection_doi_membership(&self) -> (HashSet<String>, HashMap<String, String>) {
         let mut dois = HashSet::new();
         let mut titles = HashMap::new();
         if std::env::var("OOKCITE_API_KEY").is_err() {
@@ -162,13 +160,7 @@ impl Server {
         } else {
             (HashSet::new(), HashMap::new())
         };
-        let pf = plan_metered_batch(
-            dois,
-            &member_dois,
-            &member_titles,
-            quota.as_ref(),
-            has_key,
-        );
+        let pf = plan_metered_batch(dois, &member_dois, &member_titles, quota.as_ref(), has_key);
         if let Some(msg) = pf.refuse_message {
             return Err(msg);
         }
@@ -248,9 +240,7 @@ impl Server {
                 Err(e) => out.push(format!("Auth /me: request failed ({e})")),
             }
         } else {
-            out.push(
-                "Auth /me: skipped (no OOKCITE_API_KEY; anonymous IP limits apply)".into(),
-            );
+            out.push("Auth /me: skipped (no OOKCITE_API_KEY; anonymous IP limits apply)".into());
         }
 
         out.push(String::new());
@@ -279,7 +269,11 @@ impl Server {
     #[tool(
         name = "search_styles",
         description = "Search for available CSL citation styles by name. Returns a list of matching style IDs to use in formatting tools.",
-        annotations(title = "Search CSL styles", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Search CSL styles",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn search_styles(&self, Parameters(args): Parameters<StyleSearchArgs>) -> String {
         let r = self
@@ -392,7 +386,11 @@ impl Server {
     #[tool(
         name = "reverse_lookup",
         description = "Parse a messy citation string or author name and find matching papers. Uses /api/v1/reverse (author-aware lexical ranking) first, then falls back to live resolve when empty or weak. Optional author/journal/year/orcid filters are folded into the query. Set use_live_queries=true to force the live resolve path earlier. For many citations prefer batch_format.",
-        annotations(title = "Reverse lookup citation", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Reverse lookup citation",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> String {
         // Prefer /api/v1/reverse for free-text author ranking (same path as the
@@ -466,7 +464,11 @@ impl Server {
     #[tool(
         name = "parse_citations",
         description = "Parse raw bibliography text into structured citation units. Splits multi-citation blocks, extracts DOIs/ISBNs, and provides title/author/year hints. Use this to break down pasted bibliographies before resolving individual citations.",
-        annotations(title = "Parse bibliography text", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Parse bibliography text",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn parse_citations(&self, Parameters(args): Parameters<ParseCitationsArgs>) -> String {
         let r = self
@@ -533,7 +535,11 @@ impl Server {
     #[tool(
         name = "debug_resolve",
         description = "Debug why a citation resolves incorrectly. Returns the search query used, active ranking weights, and per-backend candidate lists with scores. Use this to diagnose bad matches. Requires OOKCITE_API_KEY.",
-        annotations(title = "Debug citation resolve", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Debug citation resolve",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn debug_resolve(&self, Parameters(args): Parameters<DebugResolveArgs>) -> String {
         let r = self
@@ -613,7 +619,11 @@ impl Server {
     #[tool(
         name = "format_citation",
         description = "Format a citation by DOI in a specific CSL style. Returns both the in-text marker and the full bibliography entry. Prefer batch_format for multiple citations.",
-        annotations(title = "Format citation", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Format citation",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn format_citation(&self, Parameters(args): Parameters<FormatArgs>) -> String {
         let lookup = self
@@ -656,7 +666,11 @@ impl Server {
     #[tool(
         name = "group_cite",
         description = "Generate a grouped in-text citation marker (e.g., '[1-3]') for multiple DOIs.",
-        annotations(title = "Group in-text cites", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Group in-text cites",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn group_cite(&self, Parameters(args): Parameters<GroupCiteArgs>) -> String {
         let entries = match self.resolve_dois_with_preflight(&args.dois).await {
@@ -692,7 +706,11 @@ impl Server {
     #[tool(
         name = "verify_references",
         description = "Batch verify that a list of DOIs exist. Returns VALID or INVALID for each. Checks daily quota and collection membership upfront so oversized batches refuse before burning lookups; collection members are reported without a metered call. Prefer over repeated validate_doi.",
-        annotations(title = "Verify DOIs (batch)", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Verify DOIs (batch)",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn verify_references(&self, Parameters(args): Parameters<VerifyArgs>) -> String {
         let has_key = std::env::var("OOKCITE_API_KEY").is_ok();
@@ -744,7 +762,11 @@ impl Server {
     #[tool(
         name = "batch_format",
         description = "Resolve and format multiple messy citations at once. Checks quota upfront for DOI-shaped items and prefers collection membership; uses the local corpus by default. Prefer over N× reverse_lookup + format_citation. Import large bibliographies into a collection for free revisits.",
-        annotations(title = "Batch format citations", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Batch format citations",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn batch_format(&self, Parameters(args): Parameters<BatchArgs>) -> String {
         let has_key = std::env::var("OOKCITE_API_KEY").is_ok();
@@ -845,7 +867,11 @@ impl Server {
     #[tool(
         name = "list_collections",
         description = "List all citation collections for the authenticated user. Requires OOKCITE_API_KEY.",
-        annotations(title = "List collections", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "List collections",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn list_collections(
         &self,
@@ -895,7 +921,12 @@ impl Server {
     #[tool(
         name = "add_to_collection",
         description = "Add a citation to a collection. Searches by DOI, ISBN, or free-text (e.g. 'Goswami JCTC 2026'). Creates the collection if it doesn't exist. Free-text uses the local corpus by default; set use_live_queries=true to allow live upstream provider calls. Prefer batch_add_to_collection for multiple items.",
-        annotations(title = "Add to collection", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
+        annotations(
+            title = "Add to collection",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
     )]
     async fn add_to_collection(&self, Parameters(args): Parameters<AddToCollectionArgs>) -> String {
         if let Some(msg) = block_mutate() {
@@ -979,7 +1010,11 @@ impl Server {
     #[tool(
         name = "export_collection",
         description = "Export a collection as BibTeX. Returns the full .bib file content with Better BibTeX keys.",
-        annotations(title = "Export collection BibTeX", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Export collection BibTeX",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn export_collection(
         &self,
@@ -1005,7 +1040,11 @@ impl Server {
     #[tool(
         name = "search_collection",
         description = "Search within a collection by author name, title keywords, or journal. Returns matching entries with entry_id values for remove_from_collection (opaque id, or pass a bare DOI / doi:10.x/y alias).",
-        annotations(title = "Search collection", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Search collection",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn search_collection(
         &self,
@@ -1236,7 +1275,11 @@ impl Server {
     #[tool(
         name = "health_check",
         description = "Check if the OokCite API is reachable and healthy. Returns service status and cache statistics.",
-        annotations(title = "API health check", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "API health check",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn health_check(
         &self,
@@ -1268,7 +1311,11 @@ impl Server {
     #[tool(
         name = "doctor",
         description = "Diagnose ookcite-mcp readiness: MCP version, mutate/read-only policy, redacted API key presence, API health, and /me plan when a key is set. Use when setup is unclear or tools fail. Never returns the full API key.",
-        annotations(title = "ookcite doctor", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "ookcite doctor",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn doctor(
         &self,
@@ -1280,7 +1327,12 @@ impl Server {
     #[tool(
         name = "import_bibliography",
         description = "Import a BibTeX (.bib) or RIS file into a collection. Pass the file content as a string. Creates the collection if it doesn't exist, but collection import may require a paid plan or additional collection capacity.",
-        annotations(title = "Import bibliography file", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
+        annotations(
+            title = "Import bibliography file",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
     )]
     async fn import_bibliography(
         &self,
@@ -1334,7 +1386,11 @@ impl Server {
     #[tool(
         name = "check_duplicates",
         description = "Check if a citation already exists in a collection. Resolves the query first, then checks for duplicates. Returns entry_id for matches.",
-        annotations(title = "Check collection duplicates", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Check collection duplicates",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn check_duplicates(&self, Parameters(args): Parameters<CheckDuplicatesArgs>) -> String {
         let col_id = match self.resolve_collection_id(&args.collection).await {
@@ -1379,7 +1435,12 @@ impl Server {
     #[tool(
         name = "batch_add_to_collection",
         description = "Add multiple citations to a collection at once. Each query can be a DOI or free-text search. Creates the collection if it doesn't exist, but batch collection workflows may require a paid plan or additional collection capacity. Free-text uses the local corpus by default; set use_live_queries=true to allow live upstream provider calls. Prefer over N× add_to_collection.",
-        annotations(title = "Batch add to collection", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
+        annotations(
+            title = "Batch add to collection",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
     )]
     async fn batch_add_to_collection(&self, Parameters(args): Parameters<BatchAddArgs>) -> String {
         if let Some(msg) = block_mutate() {
@@ -1460,7 +1521,12 @@ impl Server {
     #[tool(
         name = "delete_collection",
         description = "Delete a citation collection. This is irreversible.",
-        annotations(title = "Delete collection", read_only_hint = false, destructive_hint = true, idempotent_hint = false)
+        annotations(
+            title = "Delete collection",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
     )]
     async fn delete_collection(
         &self,
@@ -1489,7 +1555,12 @@ impl Server {
     #[tool(
         name = "update_collection",
         description = "Update a collection's name, description, or default citation style.",
-        annotations(title = "Update collection metadata", read_only_hint = false, destructive_hint = false, idempotent_hint = true)
+        annotations(
+            title = "Update collection metadata",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
     )]
     async fn update_collection(
         &self,
@@ -1531,7 +1602,12 @@ impl Server {
     #[tool(
         name = "remove_from_collection",
         description = "Remove a specific entry from a collection. Pass entry_id from search_collection, or a bare DOI / doi:10.x/y alias (resolved locally before the API call).",
-        annotations(title = "Remove collection entry", read_only_hint = false, destructive_hint = true, idempotent_hint = false)
+        annotations(
+            title = "Remove collection entry",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
     )]
     async fn remove_from_collection(
         &self,
@@ -1561,10 +1637,7 @@ impl Server {
         match r {
             Ok(r) if r.status().is_success() => {
                 if r.status().as_u16() == 204 {
-                    return format!(
-                        "Removed entry {resolved_eid} from '{}'.",
-                        args.collection
-                    );
+                    return format!("Removed entry {resolved_eid} from '{}'.", args.collection);
                 }
                 let removed: serde_json::Value = r.json().await.unwrap_or_default();
                 let entry_id = removed["id"].as_str().unwrap_or(&resolved_eid);
@@ -1586,7 +1659,12 @@ impl Server {
     #[tool(
         name = "update_tags",
         description = "Set tags on a collection. Replaces all existing tags.",
-        annotations(title = "Update collection tags", read_only_hint = false, destructive_hint = false, idempotent_hint = true)
+        annotations(
+            title = "Update collection tags",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
     )]
     async fn update_tags(&self, Parameters(args): Parameters<UpdateTagsArgs>) -> String {
         if let Some(msg) = block_mutate() {
@@ -1612,7 +1690,12 @@ impl Server {
     #[tool(
         name = "reorder_collection",
         description = "Reorder entries in a collection. Provide the entry IDs in the desired order.",
-        annotations(title = "Reorder collection entries", read_only_hint = false, destructive_hint = false, idempotent_hint = true)
+        annotations(
+            title = "Reorder collection entries",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
     )]
     async fn reorder_collection(
         &self,
@@ -1643,7 +1726,12 @@ impl Server {
     #[tool(
         name = "share_collection",
         description = "Create a shareable link for a collection. Anyone with the link can view it. Requires academic/business plan.",
-        annotations(title = "Share collection", read_only_hint = false, destructive_hint = false, idempotent_hint = true)
+        annotations(
+            title = "Share collection",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
     )]
     async fn share_collection(&self, Parameters(args): Parameters<ShareCollectionArgs>) -> String {
         if let Some(msg) = block_mutate() {
@@ -1670,7 +1758,12 @@ impl Server {
     #[tool(
         name = "unshare_collection",
         description = "Revoke the shareable link for a collection.",
-        annotations(title = "Unshare collection", read_only_hint = false, destructive_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Unshare collection",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn unshare_collection(
         &self,
@@ -1698,7 +1791,12 @@ impl Server {
     #[tool(
         name = "merge_collections",
         description = "Merge multiple collections into one. All entries are combined, duplicates are skipped.",
-        annotations(title = "Merge collections", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
+        annotations(
+            title = "Merge collections",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
     )]
     async fn merge_collections(
         &self,
@@ -1758,7 +1856,12 @@ impl Server {
     #[tool(
         name = "batch_move_entries",
         description = "Move entries from one collection to another.",
-        annotations(title = "Batch move entries", read_only_hint = false, destructive_hint = false, idempotent_hint = false)
+        annotations(
+            title = "Batch move entries",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
     )]
     async fn batch_move_entries(&self, Parameters(args): Parameters<BatchMoveArgs>) -> String {
         if let Some(msg) = block_mutate() {
@@ -1798,7 +1901,11 @@ impl Server {
     #[tool(
         name = "view_shared",
         description = "View a shared collection using its share token.",
-        annotations(title = "View shared collection", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "View shared collection",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn view_shared(&self, Parameters(args): Parameters<ViewSharedArgs>) -> String {
         let r = self
@@ -1848,7 +1955,11 @@ impl Server {
     #[tool(
         name = "generate_citation_keys",
         description = "Generate Better BibTeX-style citation keys (e.g. 'goswami2026') for a list of DOIs. Requires academic/business plan.",
-        annotations(title = "Generate citation keys", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Generate citation keys",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn generate_citation_keys(
         &self,
@@ -1894,7 +2005,11 @@ impl Server {
     #[tool(
         name = "expand_journal",
         description = "Expand a journal abbreviation to its full name (e.g. 'JACS' -> 'Journal of the American Chemical Society'). 16,000+ journals supported. Requires academic/business plan.",
-        annotations(title = "Expand journal abbreviation", read_only_hint = true, idempotent_hint = true)
+        annotations(
+            title = "Expand journal abbreviation",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
     )]
     async fn expand_journal(&self, Parameters(args): Parameters<ExpandJournalArgs>) -> String {
         let r = self
@@ -1993,9 +2108,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collection_entries::{
-        format_collection_entry_line, resolve_entry_id_in_collection,
-    };
+    use crate::collection_entries::{format_collection_entry_line, resolve_entry_id_in_collection};
     use crate::constants::version_output;
     use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{
@@ -2083,11 +2196,7 @@ mod tests {
         let s = test_server(&mock.uri());
         let out = s
             .verify_references(Parameters(VerifyArgs {
-                dois: vec![
-                    "10.1/a".into(),
-                    "10.1/b".into(),
-                    "10.1/c".into(),
-                ],
+                dois: vec!["10.1/a".into(), "10.1/b".into(), "10.1/c".into()],
             }))
             .await;
         assert!(
@@ -2145,10 +2254,7 @@ mod tests {
         let s = test_server(&mock.uri());
         let out = s
             .verify_references(Parameters(VerifyArgs {
-                dois: vec![
-                    "10.1038/187493a0".into(),
-                    "10.1/not-in-collection".into(),
-                ],
+                dois: vec!["10.1038/187493a0".into(), "10.1/not-in-collection".into()],
             }))
             .await;
         assert!(out.contains("REFUSED"), "got: {out}");
@@ -2256,10 +2362,7 @@ mod tests {
         let s = test_server(&mock.uri());
         let out = s
             .batch_format(Parameters(crate::tool_args::BatchArgs {
-                citations: vec![
-                    "10.1038/187493a0".into(),
-                    "10.1/other".into(),
-                ],
+                citations: vec!["10.1038/187493a0".into(), "10.1/other".into()],
                 style: default_style(),
                 use_live_queries: false,
             }))
@@ -3104,7 +3207,9 @@ mod tests {
             .mount(&mock)
             .await;
         Mock::given(method("DELETE"))
-            .and(path("/api/v1/collections/col-123/entries/doi%3A10.1038%2Fnature14539"))
+            .and(path(
+                "/api/v1/collections/col-123/entries/doi%3A10.1038%2Fnature14539",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "doi:10.1038/nature14539",
                 "metadata": { "title": "Deep learning" }
