@@ -231,7 +231,7 @@ pub async fn lookup_doi_with_retry(
             .send()
             .await?;
         let status = response.status();
-        if attempt < 2 && matches!(status.as_u16(), 429 | 502 | 503 | 504) {
+        if attempt < 2 && matches!(status.as_u16(), 502 | 503 | 504) {
             attempt += 1;
             sleep(Duration::from_millis(150 * u64::from(attempt))).await;
             continue;
