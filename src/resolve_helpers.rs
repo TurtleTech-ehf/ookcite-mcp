@@ -3,7 +3,7 @@
 use tokio::time::{sleep, Duration};
 
 use ookcite_mcp::endpoints;
-use crate::http_error::error_detail;
+use crate::http_error::HttpFailure;
 use crate::tool_args::ReverseArgs;
 
 pub struct ReverseLookupMatch {
@@ -83,29 +83,20 @@ fn format_author_list(meta: &serde_json::Value) -> String {
 
 pub async fn classify_reverse_lookup_response(
     response: Result<reqwest::Response, reqwest::Error>,
-) -> Result<Option<ReverseLookupMatch>, String> {
+) -> Result<Option<ReverseLookupMatch>, HttpFailure> {
     match response {
         Ok(resp) if resp.status().is_success() => {
             let payload: serde_json::Value = resp.json().await.unwrap_or_default();
             Ok(format_reverse_lookup_payload(&payload))
         }
-        Ok(r) if r.status().as_u16() == 429 => {
-            Err(format!("RATE LIMITED: {}", error_detail(r).await))
-        }
-        Ok(r) if r.status().as_u16() == 403 => {
-            Err(format!("ACCESS DENIED: {}", error_detail(r).await))
-        }
+        Ok(r) if r.status().as_u16() == 429 => Err(HttpFailure::from_response(r, None).await),
+        Ok(r) if r.status().as_u16() == 403 => Err(HttpFailure::from_response(r, None).await),
         Ok(r) if r.status().as_u16() == 504 || r.status().as_u16() == 408 => {
-            Err(format!(
-                "TIMEOUT: {}",
-                error_detail(r).await
-            ))
+            Err(HttpFailure::from_response(r, None).await)
         }
-        Ok(r) if r.status().is_server_error() => {
-            Err(format!("TEMPORARY ERROR: {}", error_detail(r).await))
-        }
+        Ok(r) if r.status().is_server_error() => Err(HttpFailure::from_response(r, None).await),
         Ok(_) => Ok(None),
-        Err(e) => Err(format!("Reverse lookup failed: {e}")),
+        Err(e) => Err(HttpFailure::transport(format!("Reverse lookup failed: {e}"))),
     }
 }
 

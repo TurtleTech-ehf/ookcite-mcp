@@ -21,7 +21,7 @@ pub struct HttpFailure {
 
 impl HttpFailure {
     pub async fn from_response(resp: Response, subject: Option<&str>) -> Self {
-        let failure = ResponseFailure::read(resp).await;
+        let failure = ResponseFailure::read(resp, true).await;
         let (kind, label) = classify_status(failure.status);
         let message = match subject {
             Some(subject) => format!("{label} {subject} : {}", failure.detail),
@@ -38,8 +38,12 @@ impl HttpFailure {
     }
 
     pub fn transport(message: impl Into<String>) -> Self {
+        Self::tool("transport_error", message)
+    }
+
+    pub fn tool(kind: &'static str, message: impl Into<String>) -> Self {
         Self {
-            kind: "transport_error",
+            kind,
             http_status: None,
             message: message.into(),
             retry_after: None,
@@ -157,7 +161,7 @@ struct ResponseFailure {
 }
 
 impl ResponseFailure {
-    async fn read(resp: Response) -> Self {
+    async fn read(resp: Response, bound_json_message: bool) -> Self {
         let status = resp.status();
         let retry_after = resp
             .headers()
@@ -170,7 +174,7 @@ impl ResponseFailure {
 
         Self {
             status,
-            detail: format_error_detail(status, &body),
+            detail: format_error_detail(status, &body, bound_json_message),
             retry_after,
         }
     }
@@ -197,44 +201,33 @@ fn append_retry_after(mut message: String, retry_after: Option<&str>) -> String 
     message
 }
 
-fn format_error_detail(status: StatusCode, body: &str) -> String {
+fn format_error_detail(status: StatusCode, body: &str, bound_json_message: bool) -> String {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
         if let Some(message) = json["message"].as_str() {
+            let message = if bound_json_message {
+                message.chars().take(MAX_ERROR_BODY_CHARS).collect()
+            } else {
+                message.to_string()
+            };
             return format!("{status}: {message}");
         }
     }
 
     if body.is_empty() {
         format!("{status}")
-    } else if body.chars().count() > MAX_ERROR_BODY_CHARS {
-        let body: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
-        format!("{status}: {body}")
     } else {
+        let body: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
         format!("{status}: {body}")
     }
 }
 
 /// Extract a useful error message from a failed HTTP response.
 pub async fn error_detail(resp: reqwest::Response) -> String {
-    ResponseFailure::read(resp).await.detail
+    ResponseFailure::read(resp, false).await.detail
 }
 
 pub async fn lookup_doi_failure(resp: reqwest::Response, doi: &str) -> HttpFailure {
     HttpFailure::from_response(resp, Some(doi)).await
-}
-
-pub async fn classify_lookup_doi_failure(resp: reqwest::Response, doi: &str) -> String {
-    if resp.status().as_u16() == 429 {
-        format!("RATE LIMITED {doi} : {}", error_detail(resp).await)
-    } else if matches!(resp.status().as_u16(), 401 | 403) {
-        format!("ACCESS DENIED {doi} : {}", error_detail(resp).await)
-    } else if resp.status().is_server_error() {
-        format!("TEMPORARY ERROR {doi} : {}", error_detail(resp).await)
-    } else if resp.status().is_client_error() && resp.status().as_u16() != 404 {
-        format!("CLIENT ERROR {doi} : {}", error_detail(resp).await)
-    } else {
-        format!("INVALID {doi} : HTTP {}", resp.status())
-    }
 }
 
 pub async fn classify_collection_create_failure(resp: reqwest::Response, name: &str) -> String {

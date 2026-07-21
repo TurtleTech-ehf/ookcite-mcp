@@ -12,7 +12,8 @@ use crate::constants::{
     MUTATE_BATCH_CONCURRENCY,
 };
 use crate::http_error::{
-    classify_collection_create_failure, classify_lookup_doi_failure, error_detail,
+    classify_collection_create_failure, error_detail, lookup_doi_failure, HttpFailure,
+    ToolResponse,
 };
 use crate::policy::{self, block_mutate};
 use crate::resolve_helpers::{
@@ -122,7 +123,7 @@ impl Server {
         (dois, titles)
     }
 
-    async fn lookup_doi_json_cached(&self, doi: &str) -> Result<serde_json::Value, String> {
+    async fn lookup_doi_json_cached(&self, doi: &str) -> Result<serde_json::Value, HttpFailure> {
         if let Some(meta) = self.doi_cache.get_valid(doi) {
             return Ok(meta);
         }
@@ -133,8 +134,8 @@ impl Server {
                 self.doi_cache.put_if_identity_ok(doi, meta.clone());
                 Ok(meta)
             }
-            Ok(resp) => Err(classify_lookup_doi_failure(resp, doi).await),
-            Err(e) => Err(format!("ERROR {doi} : {e}")),
+            Ok(resp) => Err(lookup_doi_failure(resp, doi).await),
+            Err(e) => Err(HttpFailure::transport(format!("ERROR {doi} : {e}"))),
         }
     }
 
@@ -176,14 +177,23 @@ impl Server {
             .map(|doi| {
                 let server = self.clone();
                 let doi = doi.clone();
-                async move { server.lookup_doi_json_cached(&doi).await.ok() }
+                async move { server.lookup_doi_json_cached(&doi).await }
             })
             .collect();
         let looked: Vec<_> = stream::iter(futs)
             .buffer_unordered(conc)
             .collect::<Vec<_>>()
             .await;
-        entries.extend(looked.into_iter().flatten());
+        let mut failures = Vec::new();
+        for result in looked {
+            match result {
+                Ok(metadata) => entries.push(metadata),
+                Err(failure) => failures.push(failure.into_message()),
+            }
+        }
+        if !failures.is_empty() {
+            return Err(failures.join("\n"));
+        }
         Ok(entries)
     }
 
@@ -275,7 +285,7 @@ impl Server {
             idempotent_hint = true
         )
     )]
-    async fn search_styles(&self, Parameters(args): Parameters<StyleSearchArgs>) -> String {
+    async fn search_styles(&self, Parameters(args): Parameters<StyleSearchArgs>) -> ToolResponse {
         let r = self
             .request(endpoints::STYLES_SEARCH, &[])
             .query(&[("q", args.query.as_str())])
@@ -293,10 +303,13 @@ impl Server {
                 if out.is_empty() {
                     "No styles found".into()
                 } else {
-                    out.join("\n")
+                    out.join("\n").into()
                 }
             }
-            _ => "Style search failed".into(),
+            Ok(resp) => HttpFailure::from_response(resp, None).await.into(),
+            Err(error) => {
+                HttpFailure::transport(format!("Style search failed: {error}")).into()
+            }
         }
     }
 
@@ -305,7 +318,7 @@ impl Server {
         description = "Check if a DOI exists and return its metadata. Use this to verify citations are real. Returns title, authors, year, journal, volume, and issue. Prefer verify_references for multiple DOIs in one call.",
         annotations(title = "Validate DOI", read_only_hint = true, idempotent_hint = true)
     )]
-    async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
+    async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> ToolResponse {
         match self.lookup_doi_json_cached(&args.doi).await {
             Ok(meta) => {
                 let title = meta["title"].as_str().unwrap_or("?");
@@ -329,8 +342,9 @@ impl Server {
                 format!(
                     "VALID\nDOI: {doi}\nTitle: {title}\nAuthors: {authors}\nYear: {year}\nJournal: {journal}\nVolume: {volume}\nIssue: {issue}"
                 )
+                .into()
             }
-            Err(msg) => msg,
+            Err(failure) => failure.into(),
         }
     }
 
@@ -339,7 +353,8 @@ impl Server {
         description = "Look up a book by ISBN. Returns title, authors, publisher, year, and pages.",
         annotations(title = "Lookup ISBN", read_only_hint = true, idempotent_hint = true)
     )]
-    async fn lookup_isbn(&self, Parameters(args): Parameters<IsbnArgs>) -> String {
+    async fn lookup_isbn(&self, Parameters(args): Parameters<IsbnArgs>) -> ToolResponse {
+        let subject = format!("ISBN {}", args.isbn);
         let r = self
             .request(endpoints::LOOKUP_ISBN, &[])
             .json(&serde_json::json!({"isbn": args.isbn}))
@@ -368,18 +383,16 @@ impl Server {
                     "VALID\nISBN: {}\nTitle: {title}\nAuthors: {authors}\nYear: {year}\nPublisher: {publisher}\nPages: {pages}",
                     args.isbn
                 )
+                .into()
             }
-            Ok(r) if r.status().as_u16() == 429 => {
-                format!("RATE LIMITED: {}", error_detail(r).await)
+            Ok(resp) if resp.status().as_u16() == 404 => {
+                HttpFailure::from_response(resp, Some(&subject))
+                    .await
+                    .with_message(format!("ISBN {} not found", args.isbn))
+                    .into()
             }
-            Ok(r) if r.status().as_u16() == 403 => {
-                format!("ACCESS DENIED: {}", error_detail(r).await)
-            }
-            Ok(r) if r.status().is_server_error() => {
-                format!("TEMPORARY ERROR: {}", error_detail(r).await)
-            }
-            Ok(_) => format!("ISBN {} not found", args.isbn),
-            Err(e) => format!("ERROR: {e}"),
+            Ok(resp) => HttpFailure::from_response(resp, Some(&subject)).await.into(),
+            Err(error) => HttpFailure::transport(format!("ISBN lookup failed: {error}")).into(),
         }
     }
 
@@ -392,7 +405,7 @@ impl Server {
             idempotent_hint = true
         )
     )]
-    async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> String {
+    async fn reverse_lookup(&self, Parameters(args): Parameters<ReverseArgs>) -> ToolResponse {
         // Prefer /api/v1/reverse for free-text author ranking (same path as the
         // web demo). Fall back to /resolve with live queries when reverse is
         // empty/weak or the caller forced use_live_queries.
@@ -417,17 +430,17 @@ impl Server {
                     Ok(Some(live_match))
                         if live_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE =>
                     {
-                        live_match.output
+                        live_match.output.into()
                     }
                     Ok(Some(_)) | Ok(None) => "No confident matches found".into(),
-                    Err(_) => local_match.output,
+                    Err(_) => local_match.output.into(),
                 }
             }
             Ok(Some(local_match)) if args.use_live_queries => {
                 // Caller asked for live on first pass: still prefer reverse
                 // hits when confident; otherwise try resolve+live.
                 if local_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE {
-                    local_match.output
+                    local_match.output.into()
                 } else {
                     let live_body = reverse_lookup_resolve_body(&args, true);
                     let live = self
@@ -436,13 +449,13 @@ impl Server {
                         .send()
                         .await;
                     match classify_reverse_lookup_response(live).await {
-                        Ok(Some(live_match)) => live_match.output,
-                        Ok(None) => local_match.output,
-                        Err(_) => local_match.output,
+                        Ok(Some(live_match)) => live_match.output.into(),
+                        Ok(None) => local_match.output.into(),
+                        Err(_) => local_match.output.into(),
                     }
                 }
             }
-            Ok(Some(local_match)) => local_match.output,
+            Ok(Some(local_match)) => local_match.output.into(),
             Ok(None) if !args.use_live_queries => {
                 let live_body = reverse_lookup_resolve_body(&args, true);
                 let live = self
@@ -451,13 +464,13 @@ impl Server {
                     .send()
                     .await;
                 match classify_reverse_lookup_response(live).await {
-                    Ok(Some(live_match)) => live_match.output,
+                    Ok(Some(live_match)) => live_match.output.into(),
                     Ok(None) => "No matches found".into(),
-                    Err(message) => message,
+                    Err(failure) => failure.into(),
                 }
             }
             Ok(None) => "No matches found".into(),
-            Err(message) => message,
+            Err(failure) => failure.into(),
         }
     }
 
@@ -470,7 +483,10 @@ impl Server {
             idempotent_hint = true
         )
     )]
-    async fn parse_citations(&self, Parameters(args): Parameters<ParseCitationsArgs>) -> String {
+    async fn parse_citations(
+        &self,
+        Parameters(args): Parameters<ParseCitationsArgs>,
+    ) -> ToolResponse {
         let r = self
             .request(endpoints::PARSE_CITATIONS, &[])
             .json(&serde_json::json!({"text": args.text}))
@@ -513,22 +529,15 @@ impl Server {
                             }
                             out.push(entry);
                         }
-                        format!("Found {} citations:\n\n{}", arr.len(), out.join("\n\n"))
+                        format!("Found {} citations:\n\n{}", arr.len(), out.join("\n\n")).into()
                     }
                     None => "No citations found in text".into(),
                 }
             }
-            Ok(r) if r.status().as_u16() == 429 => {
-                format!("RATE LIMITED: {}", error_detail(r).await)
+            Ok(resp) => HttpFailure::from_response(resp, None).await.into(),
+            Err(error) => {
+                HttpFailure::transport(format!("Parse citations failed: {error}")).into()
             }
-            Ok(r) if r.status().as_u16() == 403 => {
-                format!("ACCESS DENIED: {}", error_detail(r).await)
-            }
-            Ok(r) if r.status().is_server_error() => {
-                format!("TEMPORARY ERROR: {}", error_detail(r).await)
-            }
-            Ok(_) => "Failed to parse citations".into(),
-            Err(e) => format!("Parse citations failed: {e}"),
         }
     }
 
@@ -541,7 +550,7 @@ impl Server {
             idempotent_hint = true
         )
     )]
-    async fn debug_resolve(&self, Parameters(args): Parameters<DebugResolveArgs>) -> String {
+    async fn debug_resolve(&self, Parameters(args): Parameters<DebugResolveArgs>) -> ToolResponse {
         let r = self
             .request(endpoints::RESOLVE_DEBUG, &[])
             .json(&serde_json::json!({
@@ -597,22 +606,14 @@ impl Server {
                     }
                 }
 
-                out.join("\n")
+                out.join("\n").into()
             }
-            Ok(r) if r.status().as_u16() == 401 => {
-                "AUTH REQUIRED: debug_resolve requires authentication (API key)".into()
-            }
-            Ok(r) if r.status().as_u16() == 429 => {
-                format!("RATE LIMITED: {}", error_detail(r).await)
-            }
-            Ok(r) if r.status().as_u16() == 403 => {
-                format!("ACCESS DENIED: {}", error_detail(r).await)
-            }
-            Ok(r) if r.status().is_server_error() => {
-                format!("TEMPORARY ERROR: {}", error_detail(r).await)
-            }
-            Ok(_) => "Debug resolve failed".into(),
-            Err(e) => format!("Debug resolve failed: {e}"),
+            Ok(resp) if resp.status().as_u16() == 401 => HttpFailure::from_response(resp, None)
+                .await
+                .with_message("AUTH REQUIRED: debug_resolve requires authentication (API key)")
+                .into(),
+            Ok(resp) => HttpFailure::from_response(resp, None).await.into(),
+            Err(error) => HttpFailure::transport(format!("Debug resolve failed: {error}")).into(),
         }
     }
 
@@ -625,22 +626,10 @@ impl Server {
             idempotent_hint = true
         )
     )]
-    async fn format_citation(&self, Parameters(args): Parameters<FormatArgs>) -> String {
-        let lookup = self
-            .request(endpoints::LOOKUP_DOI, &[])
-            .json(&serde_json::json!({"doi": args.doi}))
-            .send()
-            .await;
-        let meta: serde_json::Value = match lookup {
-            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-            Ok(r) if r.status().as_u16() == 429 => {
-                return format!("RATE LIMITED: {}", error_detail(r).await);
-            }
-            Ok(r) if r.status().as_u16() == 403 => {
-                return format!("ACCESS DENIED: {}", error_detail(r).await);
-            }
-            Ok(_) => return format!("DOI {} not found", args.doi),
-            Err(e) => return format!("ERROR: {e}"),
+    async fn format_citation(&self, Parameters(args): Parameters<FormatArgs>) -> ToolResponse {
+        let meta = match self.lookup_doi_json_cached(&args.doi).await {
+            Ok(metadata) => metadata,
+            Err(failure) => return failure.into(),
         };
 
         let fmt = self
@@ -657,9 +646,10 @@ impl Server {
                     .and_then(|a| a.first())
                     .and_then(|c| c["plain"].as_str())
                     .unwrap_or("");
-                format!("In-text: {intext}\nReference: {plain}")
+                format!("In-text: {intext}\nReference: {plain}").into()
             }
-            _ => "Format failed".into(),
+            Ok(resp) => HttpFailure::from_response(resp, None).await.into(),
+            Err(error) => HttpFailure::transport(format!("Format failed: {error}")).into(),
         }
     }
 
@@ -672,14 +662,14 @@ impl Server {
             idempotent_hint = true
         )
     )]
-    async fn group_cite(&self, Parameters(args): Parameters<GroupCiteArgs>) -> String {
+    async fn group_cite(&self, Parameters(args): Parameters<GroupCiteArgs>) -> ToolResponse {
         let entries = match self.resolve_dois_with_preflight(&args.dois).await {
             Ok(e) => e,
-            Err(msg) => return msg,
+            Err(message) => return HttpFailure::tool("batch_failed", message).into(),
         };
 
         if entries.is_empty() {
-            return "Failed to resolve any DOIs.".into();
+            return HttpFailure::tool("not_found", "Failed to resolve any DOIs.").into();
         }
 
         let indices: Vec<usize> = (0..entries.len()).collect();
@@ -697,9 +687,12 @@ impl Server {
             Ok(resp) if resp.status().is_success() => {
                 let result: serde_json::Value = resp.json().await.unwrap_or_default();
                 let plain = result["plain"].as_str().unwrap_or("");
-                format!("Grouped Citation: {plain}")
+                format!("Grouped Citation: {plain}").into()
             }
-            _ => "Group citation failed".into(),
+            Ok(resp) => HttpFailure::from_response(resp, None).await.into(),
+            Err(error) => {
+                HttpFailure::transport(format!("Group citation failed: {error}")).into()
+            }
         }
     }
 
@@ -746,7 +739,7 @@ impl Server {
                             let title = meta["title"].as_str().unwrap_or("?");
                             format!("VALID {doi} : {title}")
                         }
-                        Err(e) => e,
+                        Err(failure) => failure.into_message(),
                     }
                 }
             })
@@ -768,7 +761,7 @@ impl Server {
             idempotent_hint = true
         )
     )]
-    async fn batch_format(&self, Parameters(args): Parameters<BatchArgs>) -> String {
+    async fn batch_format(&self, Parameters(args): Parameters<BatchArgs>) -> ToolResponse {
         let has_key = std::env::var("OOKCITE_API_KEY").is_ok();
         let quota = self.fetch_me_quota().await;
         let (member_dois, member_titles) = if has_key {
@@ -784,7 +777,7 @@ impl Server {
             has_key,
         );
         if let Some(msg) = pf.refuse_message {
-            return msg;
+            return msg.into();
         }
 
         let use_live_queries = args.use_live_queries;
@@ -805,20 +798,24 @@ impl Server {
                 let text = text.clone();
                 async move {
                     if looks_like_doi_token(&text) {
-                        if let Ok(meta) = server.lookup_doi_json_cached(&text).await {
-                            return Ok(meta);
-                        }
+                        return match server.lookup_doi_json_cached(&text).await {
+                            Ok(metadata) => Ok(metadata),
+                            Err(failure) => {
+                                let message = format!("[{}] {}", i + 1, failure.message());
+                                Err(failure.with_message(message))
+                            }
+                        };
                     }
-                    if let Some(meta) = server
+                    if let Some(metadata) = server
                         .resolve_query_to_metadata(&text, use_live_queries)
                         .await
                     {
-                        Ok(meta)
+                        Ok(metadata)
                     } else {
-                        Err(format!(
-                            "[{}] Not found: {}",
-                            i + 1,
-                            &text[..text.len().min(60)]
+                        let excerpt: String = text.chars().take(60).collect();
+                        Err(HttpFailure::tool(
+                            "not_found",
+                            format!("[{}] Not found: {excerpt}", i + 1),
                         ))
                     }
                 }
@@ -830,12 +827,25 @@ impl Server {
         for result in resolved {
             match result {
                 Ok(meta) => entries.push(meta),
-                Err(e) => errors.push(e),
+                Err(failure) => errors.push(failure),
             }
         }
 
         if entries.is_empty() {
-            return format!("No citations resolved.\n{}", errors.join("\n"));
+            let details = errors
+                .iter()
+                .map(HttpFailure::message)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let message = if details.is_empty() {
+                "No citations resolved.".to_string()
+            } else {
+                format!("No citations resolved.\n{details}")
+            };
+            if let [failure] = errors.as_slice() {
+                return failure.clone().with_message(message).into();
+            }
+            return HttpFailure::tool("batch_failed", message).into();
         }
         let fmt = self
             .request(endpoints::FORMAT, &[])
@@ -855,12 +865,18 @@ impl Server {
                 }
                 if !errors.is_empty() {
                     out.push("\n*** Unresolved ***".into());
-                    out.extend(errors);
+                    out.extend(
+                        errors
+                            .iter()
+                            .map(|failure| failure.message().to_string()),
+                    );
                 }
-                out.join("\n")
+                out.join("\n").into()
             }
-            Ok(r) => format!("Batch format failed: HTTP {}", r.status()),
-            Err(e) => format!("Batch format failed: {e}"),
+            Ok(resp) => HttpFailure::from_response(resp, None).await.into(),
+            Err(error) => {
+                HttpFailure::transport(format!("Batch format failed: {error}")).into()
+            }
         }
     }
 
@@ -876,7 +892,7 @@ impl Server {
     async fn list_collections(
         &self,
         #[allow(unused)] Parameters(_args): Parameters<ListCollectionsArgs>,
-    ) -> String {
+    ) -> ToolResponse {
         let r = self.request(endpoints::COLLECTIONS_LIST, &[]).send().await;
         match r {
             Ok(r) if r.status().is_success() => {
@@ -907,14 +923,24 @@ impl Server {
                     })
                     .collect::<Vec<_>>()
                     .join("\n")
+                    .into()
             }
-            Ok(r) if r.status().as_u16() == 401 => {
-                "Authentication required. Set OOKCITE_API_KEY.".into()
+            Ok(resp) if resp.status().as_u16() == 401 => {
+                HttpFailure::from_response(resp, None)
+                    .await
+                    .with_message("Authentication required. Set OOKCITE_API_KEY.")
+                    .into()
             }
-            Ok(r) if r.status().as_u16() == 503 => {
-                "Collections not available (S3 not configured).".into()
+            Ok(resp) if resp.status().as_u16() == 503 => {
+                HttpFailure::from_response(resp, None)
+                    .await
+                    .with_message("Collections not available (S3 not configured).")
+                    .into()
             }
-            _ => "Failed to list collections.".into(),
+            Ok(resp) => HttpFailure::from_response(resp, None).await.into(),
+            Err(error) => {
+                HttpFailure::transport(format!("Failed to list collections: {error}")).into()
+            }
         }
     }
 
