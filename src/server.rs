@@ -2114,6 +2114,7 @@ mod tests {
     use crate::tool_args::{
         default_style, BatchMoveArgs, DoiArgs, FormatArgs, ReverseArgs, VerifyArgs,
     };
+    use rmcp::handler::server::tool::IntoCallToolResult;
 
     /// Serializes OOKCITE_API_KEY mutations across parallel tokio tests.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -2377,6 +2378,49 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn batch_format_preserves_exact_doi_rate_limit_without_fallback() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan": "academic",
+                "lookups_remaining": 100,
+                "lookups_limit": 1000
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "60")
+                    .set_body_string("Lookup quota exhausted"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_batch_rate_limit");
+        let s = test_server(&mock.uri());
+        let result = s
+            .batch_format(Parameters(crate::tool_args::BatchArgs {
+                citations: vec!["10.1038/187493a0".into()],
+                style: default_style(),
+                use_live_queries: true,
+            }))
+            .await;
+
+        let message = assert_structured_rate_limit(result, "60");
+        assert!(message.contains("[1] RATE LIMITED 10.1038/187493a0"));
+        assert!(!message.contains("Not found"));
+    }
+
     #[test]
     fn test_endpoint_url_construction() {
         let u = endpoints::LOOKUP_DOI.url("https://example.com", &[]);
@@ -2540,6 +2584,26 @@ mod tests {
         Server::new_with_base(base.to_string())
     }
 
+    fn assert_structured_rate_limit(result: ToolResponse, retry_after: &str) -> String {
+        let result = result
+            .into_call_tool_result()
+            .expect("tool response should convert to a call result");
+        assert_eq!(result.is_error, Some(true));
+
+        let structured = result
+            .structured_content
+            .expect("rate limits should include structured error data");
+        assert_eq!(structured.as_object().map(serde_json::Map::len), Some(4));
+        assert_eq!(structured["kind"], "rate_limited");
+        assert_eq!(structured["http_status"], 429);
+        assert_eq!(structured["retry_after"], retry_after);
+
+        structured["message"]
+            .as_str()
+            .expect("structured error message should be text")
+            .to_string()
+    }
+
     #[tokio::test]
     async fn test_validate_doi_success() {
         let mock = MockServer::start().await;
@@ -2594,8 +2658,10 @@ mod tests {
             .and(path("/api/v1/lookup/doi"))
             .respond_with(
                 ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "13500")
                     .set_body_string("Daily limit reached (50/day). Resets in 3h 45m."),
             )
+            .expect(1)
             .mount(&mock)
             .await;
 
@@ -2605,9 +2671,10 @@ mod tests {
                 doi: "10.1038/187493a0".into(),
             }))
             .await;
-        assert!(result.starts_with("RATE LIMITED"));
-        assert!(result.contains("Daily limit"));
-        assert!(!result.contains("not found"));
+        let message = assert_structured_rate_limit(result, "13500");
+        assert!(message.starts_with("RATE LIMITED"));
+        assert!(message.contains("Daily limit"));
+        assert!(!message.contains("not found"));
     }
 
     #[tokio::test]
@@ -3905,11 +3972,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_format_citation_preserves_format_rate_limit() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/187493a0",
+                "title": "Stimulated Optical Radiation in Ruby"
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/format"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "90")
+                    .set_body_string("Formatting quota exhausted"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .format_citation(Parameters(FormatArgs {
+                doi: "10.1038/187493a0".into(),
+                style: "apa".into(),
+            }))
+            .await;
+
+        let message = assert_structured_rate_limit(result, "90");
+        assert!(message.starts_with("RATE LIMITED"));
+        assert!(message.contains("Formatting quota exhausted"));
+        assert!(!message.contains("Format failed"));
+    }
+
+    #[tokio::test]
     async fn test_reverse_lookup_rate_limited() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/reverse"))
-            .respond_with(ResponseTemplate::new(429).set_body_string("Daily limit reached"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "45")
+                    .set_body_string("Daily limit reached"),
+            )
+            .expect(1)
             .mount(&mock)
             .await;
 
@@ -3924,7 +4032,8 @@ mod tests {
                 use_live_queries: false,
             }))
             .await;
-        assert!(result.starts_with("RATE LIMITED"));
+        let message = assert_structured_rate_limit(result, "45");
+        assert!(message.starts_with("RATE LIMITED"));
     }
 
     #[tokio::test]
