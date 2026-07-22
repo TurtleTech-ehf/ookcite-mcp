@@ -1257,11 +1257,9 @@ impl Server {
                 .send()
                 .await;
             match r {
-                Ok(r) if r.status().is_success() => {
-                    Ok(Some(
-                        r.json::<serde_json::Value>().await.unwrap_or_default(),
-                    ))
-                }
+                Ok(r) if r.status().is_success() => Ok(Some(
+                    r.json::<serde_json::Value>().await.unwrap_or_default(),
+                )),
                 Ok(resp) => Err(HttpFailure::from_response(resp, Some(q)).await),
                 Err(error) => Err(HttpFailure::transport(format!("ERROR {q} : {error}"))),
             }
@@ -1280,9 +1278,7 @@ impl Server {
                 }
                 Ok(resp) => return Err(HttpFailure::from_response(resp, None).await),
                 Err(error) => {
-                    return Err(HttpFailure::transport(format!(
-                        "Resolve failed: {error}"
-                    )))
+                    return Err(HttpFailure::transport(format!("Resolve failed: {error}")))
                 }
             }
 
