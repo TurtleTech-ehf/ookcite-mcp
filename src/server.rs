@@ -2432,6 +2432,56 @@ mod tests {
         assert!(!message.contains("Not found"));
     }
 
+    #[tokio::test]
+    async fn batch_format_preserves_text_resolve_rate_limit_without_fallback() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan": "academic",
+                "lookups_remaining": 100,
+                "lookups_limit": 1000
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "75")
+                    .set_body_string("Resolve quota exhausted"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_batch_text_rate_limit");
+        let s = test_server(&mock.uri());
+        let result = s
+            .batch_format(Parameters(crate::tool_args::BatchArgs {
+                citations: vec!["Maiman 1960 stimulated optical radiation".into()],
+                style: default_style(),
+                use_live_queries: true,
+            }))
+            .await;
+
+        let message = assert_structured_rate_limit(result, "75");
+        assert!(message.contains("[1] RATE LIMITED"));
+        assert!(message.contains("Resolve quota exhausted"));
+        assert!(!message.contains("Not found"));
+    }
+
     #[test]
     fn test_endpoint_url_construction() {
         let u = endpoints::LOOKUP_DOI.url("https://example.com", &[]);
