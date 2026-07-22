@@ -12,8 +12,7 @@ use crate::constants::{
     MUTATE_BATCH_CONCURRENCY,
 };
 use crate::http_error::{
-    classify_collection_create_failure, error_detail, lookup_doi_failure, HttpFailure,
-    ToolResponse,
+    classify_collection_create_failure, error_detail, lookup_doi_failure, HttpFailure, ToolResponse,
 };
 use crate::policy::{self, block_mutate};
 use crate::resolve_helpers::{
@@ -307,9 +306,7 @@ impl Server {
                 }
             }
             Ok(resp) => HttpFailure::from_response(resp, None).await.into(),
-            Err(error) => {
-                HttpFailure::transport(format!("Style search failed: {error}")).into()
-            }
+            Err(error) => HttpFailure::transport(format!("Style search failed: {error}")).into(),
         }
     }
 
@@ -391,7 +388,9 @@ impl Server {
                     .with_message(format!("ISBN {} not found", args.isbn))
                     .into()
             }
-            Ok(resp) => HttpFailure::from_response(resp, Some(&subject)).await.into(),
+            Ok(resp) => HttpFailure::from_response(resp, Some(&subject))
+                .await
+                .into(),
             Err(error) => HttpFailure::transport(format!("ISBN lookup failed: {error}")).into(),
         }
     }
@@ -535,9 +534,7 @@ impl Server {
                 }
             }
             Ok(resp) => HttpFailure::from_response(resp, None).await.into(),
-            Err(error) => {
-                HttpFailure::transport(format!("Parse citations failed: {error}")).into()
-            }
+            Err(error) => HttpFailure::transport(format!("Parse citations failed: {error}")).into(),
         }
     }
 
@@ -690,9 +687,7 @@ impl Server {
                 format!("Grouped Citation: {plain}").into()
             }
             Ok(resp) => HttpFailure::from_response(resp, None).await.into(),
-            Err(error) => {
-                HttpFailure::transport(format!("Group citation failed: {error}")).into()
-            }
+            Err(error) => HttpFailure::transport(format!("Group citation failed: {error}")).into(),
         }
     }
 
@@ -865,18 +860,12 @@ impl Server {
                 }
                 if !errors.is_empty() {
                     out.push("\n*** Unresolved ***".into());
-                    out.extend(
-                        errors
-                            .iter()
-                            .map(|failure| failure.message().to_string()),
-                    );
+                    out.extend(errors.iter().map(|failure| failure.message().to_string()));
                 }
                 out.join("\n").into()
             }
             Ok(resp) => HttpFailure::from_response(resp, None).await.into(),
-            Err(error) => {
-                HttpFailure::transport(format!("Batch format failed: {error}")).into()
-            }
+            Err(error) => HttpFailure::transport(format!("Batch format failed: {error}")).into(),
         }
     }
 
@@ -925,18 +914,14 @@ impl Server {
                     .join("\n")
                     .into()
             }
-            Ok(resp) if resp.status().as_u16() == 401 => {
-                HttpFailure::from_response(resp, None)
-                    .await
-                    .with_message("Authentication required. Set OOKCITE_API_KEY.")
-                    .into()
-            }
-            Ok(resp) if resp.status().as_u16() == 503 => {
-                HttpFailure::from_response(resp, None)
-                    .await
-                    .with_message("Collections not available (S3 not configured).")
-                    .into()
-            }
+            Ok(resp) if resp.status().as_u16() == 401 => HttpFailure::from_response(resp, None)
+                .await
+                .with_message("Authentication required. Set OOKCITE_API_KEY.")
+                .into(),
+            Ok(resp) if resp.status().as_u16() == 503 => HttpFailure::from_response(resp, None)
+                .await
+                .with_message("Collections not available (S3 not configured).")
+                .into(),
             Ok(resp) => HttpFailure::from_response(resp, None).await.into(),
             Err(error) => {
                 HttpFailure::transport(format!("Failed to list collections: {error}")).into()
