@@ -3017,6 +3017,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reverse_lookup_preserves_rate_limit_when_empty_local_requires_live_fallback() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "31")
+                    .set_body_string("Live lookup quota exhausted"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "missing local citation".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: false,
+            }))
+            .await;
+
+        let message = assert_structured_rate_limit(result, "31");
+        assert!(message.contains("Live lookup quota exhausted"));
+    }
+
+    #[tokio::test]
+    async fn reverse_lookup_preserves_rate_limit_when_weak_local_requires_live_fallback() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "metadata": {
+                        "title": "Weak local match",
+                        "doi": "10.1000/weak"
+                    },
+                    "score": 2.0
+                }
+            ])))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "32")
+                    .set_body_string("Live lookup quota exhausted"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "citation requiring a confident match".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: false,
+            }))
+            .await;
+
+        let message = assert_structured_rate_limit(result, "32");
+        assert!(message.contains("Live lookup quota exhausted"));
+        assert!(!message.contains("Weak local match"));
+    }
+
+    #[tokio::test]
+    async fn reverse_lookup_preserves_rate_limit_when_caller_forces_live_fallback() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "metadata": {
+                        "title": "Weak local match",
+                        "doi": "10.1000/weak"
+                    },
+                    "score": 2.0
+                }
+            ])))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "33")
+                    .set_body_string("Forced live lookup quota exhausted"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "citation requiring live providers".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: true,
+            }))
+            .await;
+
+        let message = assert_structured_rate_limit(result, "33");
+        assert!(message.contains("Forced live lookup quota exhausted"));
+        assert!(!message.contains("Weak local match"));
+    }
+
+    #[tokio::test]
     async fn test_reverse_lookup_rejects_unconfident_local_and_live_matches() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
