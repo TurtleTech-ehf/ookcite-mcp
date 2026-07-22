@@ -801,17 +801,22 @@ impl Server {
                             }
                         };
                     }
-                    if let Some(metadata) = server
-                        .resolve_query_to_metadata(&text, use_live_queries)
+                    match server
+                        .resolve_query_to_metadata_checked(&text, use_live_queries)
                         .await
                     {
-                        Ok(metadata)
-                    } else {
-                        let excerpt: String = text.chars().take(60).collect();
-                        Err(HttpFailure::tool(
-                            "not_found",
-                            format!("[{}] Not found: {excerpt}", i + 1),
-                        ))
+                        Ok(Some(metadata)) => Ok(metadata),
+                        Ok(None) => {
+                            let excerpt: String = text.chars().take(60).collect();
+                            Err(HttpFailure::tool(
+                                "not_found",
+                                format!("[{}] Not found: {excerpt}", i + 1),
+                            ))
+                        }
+                        Err(failure) => {
+                            let message = format!("[{}] {}", i + 1, failure.message());
+                            Err(failure.with_message(message))
+                        }
                     }
                 }
             })
@@ -1233,6 +1238,17 @@ impl Server {
         query: &str,
         use_live_queries: bool,
     ) -> Option<serde_json::Value> {
+        self.resolve_query_to_metadata_checked(query, use_live_queries)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn resolve_query_to_metadata_checked(
+        &self,
+        query: &str,
+        use_live_queries: bool,
+    ) -> Result<Option<serde_json::Value>, HttpFailure> {
         let q = query.trim();
         if q.starts_with("10.") {
             let r = self
@@ -1242,9 +1258,12 @@ impl Server {
                 .await;
             match r {
                 Ok(r) if r.status().is_success() => {
-                    Some(r.json::<serde_json::Value>().await.unwrap_or_default())
+                    Ok(Some(
+                        r.json::<serde_json::Value>().await.unwrap_or_default(),
+                    ))
                 }
-                _ => None,
+                Ok(resp) => Err(HttpFailure::from_response(resp, Some(q)).await),
+                Err(error) => Err(HttpFailure::transport(format!("ERROR {q} : {error}"))),
             }
         } else {
             let resolve = self
@@ -1256,14 +1275,19 @@ impl Server {
                 Ok(r) if r.status().is_success() => {
                     let payload: serde_json::Value = r.json().await.unwrap_or_default();
                     if let Some(metadata) = resolve_payload_metadata(&payload) {
-                        return Some(metadata);
+                        return Ok(Some(metadata));
                     }
                 }
-                _ => {}
+                Ok(resp) => return Err(HttpFailure::from_response(resp, None).await),
+                Err(error) => {
+                    return Err(HttpFailure::transport(format!(
+                        "Resolve failed: {error}"
+                    )))
+                }
             }
 
             if !use_live_queries {
-                return None;
+                return Ok(None);
             }
 
             let reverse = self
@@ -1274,9 +1298,12 @@ impl Server {
             match reverse {
                 Ok(r) if r.status().is_success() => {
                     let results: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
-                    results.first().and_then(|r| r.get("metadata")).cloned()
+                    Ok(results.first().and_then(|r| r.get("metadata")).cloned())
                 }
-                _ => None,
+                Ok(resp) => Err(HttpFailure::from_response(resp, None).await),
+                Err(error) => Err(HttpFailure::transport(format!(
+                    "Reverse lookup failed: {error}"
+                ))),
             }
         }
     }

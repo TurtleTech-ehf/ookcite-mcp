@@ -89,13 +89,8 @@ pub async fn classify_reverse_lookup_response(
             let payload: serde_json::Value = resp.json().await.unwrap_or_default();
             Ok(format_reverse_lookup_payload(&payload))
         }
-        Ok(r) if r.status().as_u16() == 429 => Err(HttpFailure::from_response(r, None).await),
-        Ok(r) if r.status().as_u16() == 403 => Err(HttpFailure::from_response(r, None).await),
-        Ok(r) if r.status().as_u16() == 504 || r.status().as_u16() == 408 => {
-            Err(HttpFailure::from_response(r, None).await)
-        }
-        Ok(r) if r.status().is_server_error() => Err(HttpFailure::from_response(r, None).await),
-        Ok(_) => Ok(None),
+        Ok(r) if r.status().as_u16() == 404 => Ok(None),
+        Ok(r) => Err(HttpFailure::from_response(r, None).await),
         Err(e) => Err(HttpFailure::transport(format!(
             "Reverse lookup failed: {e}"
         ))),
