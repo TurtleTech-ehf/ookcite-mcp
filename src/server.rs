@@ -539,7 +539,7 @@ impl Server {
         let r = self
             .request(endpoints::RESOLVE_DEBUG, &[])
             .json(&serde_json::json!({
-                "input": {"text": args.text}
+                "input": {"kind": "text", "text": args.text}
             }))
             .send()
             .await;
