@@ -8,9 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::collection_entries::{entry_doi, looks_like_doi_token, normalize_doi_token};
-use crate::constants::{
-    ANON_BATCH_SOFT_CAP, DOI_CACHE_TTL_SECS, READ_ONLY_BATCH_CONCURRENCY,
-};
+use crate::constants::{ANON_BATCH_SOFT_CAP, DOI_CACHE_TTL_SECS, READ_ONLY_BATCH_CONCURRENCY};
 
 /// Snapshot from `GET /api/v1/me` (subset used for preflight).
 #[derive(Debug, Clone, Default)]
@@ -220,7 +218,10 @@ pub fn collect_dois_from_collection_body(
         if let Some(doi) = entry_doi(&entry) {
             let key = normalize_doi_token(&doi);
             dois.insert(key.clone());
-            if let Some(t) = entry["metadata"]["title"].as_str().filter(|s| !s.is_empty()) {
+            if let Some(t) = entry["metadata"]["title"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+            {
                 titles.insert(key, t.to_string());
             }
         }
@@ -268,10 +269,7 @@ mod tests {
 
     #[test]
     fn membership_reduces_metered_count() {
-        let items = vec![
-            "10.1038/187493a0".into(),
-            "10.1/need-lookup".into(),
-        ];
+        let items = vec!["10.1038/187493a0".into(), "10.1/need-lookup".into()];
         let mut members = HashSet::new();
         members.insert(normalize_doi_token("10.1038/187493a0"));
         let mut titles = HashMap::new();
@@ -331,6 +329,9 @@ mod tests {
     #[test]
     fn read_only_concurrency_band() {
         let n = READ_ONLY_BATCH_CONCURRENCY;
-        assert!((16..=20).contains(&n), "default concurrency {n} not in 16..=20");
+        assert!(
+            (16..=20).contains(&n),
+            "default concurrency {n} not in 16..=20"
+        );
     }
 }

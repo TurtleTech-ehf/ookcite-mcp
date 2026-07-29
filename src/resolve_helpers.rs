@@ -2,9 +2,9 @@
 
 use tokio::time::{sleep, Duration};
 
-use ookcite_mcp::endpoints;
 use crate::http_error::error_detail;
 use crate::tool_args::ReverseArgs;
+use ookcite_mcp::endpoints;
 
 pub struct ReverseLookupMatch {
     pub output: String,
@@ -96,10 +96,7 @@ pub async fn classify_reverse_lookup_response(
             Err(format!("ACCESS DENIED: {}", error_detail(r).await))
         }
         Ok(r) if r.status().as_u16() == 504 || r.status().as_u16() == 408 => {
-            Err(format!(
-                "TIMEOUT: {}",
-                error_detail(r).await
-            ))
+            Err(format!("TIMEOUT: {}", error_detail(r).await))
         }
         Ok(r) if r.status().is_server_error() => {
             Err(format!("TEMPORARY ERROR: {}", error_detail(r).await))
@@ -139,7 +136,10 @@ pub fn reverse_lookup_body(args: &ReverseArgs) -> serde_json::Value {
 }
 
 /// Body for `/api/v1/resolve` when structured filters + live queries are needed.
-pub fn reverse_lookup_resolve_body(args: &ReverseArgs, use_live_queries: bool) -> serde_json::Value {
+pub fn reverse_lookup_resolve_body(
+    args: &ReverseArgs,
+    use_live_queries: bool,
+) -> serde_json::Value {
     let mut body = resolve_text_body(&args.text, use_live_queries);
     let mut filters = serde_json::Map::new();
     if let Some(author) = &args.author {

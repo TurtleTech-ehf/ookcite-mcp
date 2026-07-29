@@ -56,10 +56,9 @@ pub fn format_collection_entry_line(entry: &serde_json::Value) -> String {
         .map(|d| format!("; aliases: doi:{}", normalize_doi_token(&d)))
         .unwrap_or_default();
     // Only add alias hint when the canonical id is not already the doi: form.
-    let doi_hint = if entry_id
-        .strip_prefix("doi:")
-        .is_some_and(|rest| Some(rest.to_string()) == entry_doi(entry).map(|d| normalize_doi_token(&d)))
-    {
+    let doi_hint = if entry_id.strip_prefix("doi:").is_some_and(|rest| {
+        Some(rest.to_string()) == entry_doi(entry).map(|d| normalize_doi_token(&d))
+    }) {
         String::new()
     } else {
         doi_hint
