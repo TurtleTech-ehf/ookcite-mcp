@@ -2438,6 +2438,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn debug_resolve_sends_tagged_text_input() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve/debug"))
+            .and(body_string_contains(r#""kind":"text""#))
+            .and(body_string_contains(r#""text":"Amrita Goswami""#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "cleaned_query": "Amrita Goswami",
+                "search_query": "Amrita Goswami",
+                "weight_source": "built_in",
+                "final_response": {
+                    "paper": {
+                        "title": "Universal Nucleation Behavior of Sheared Systems",
+                        "doi": "10.1103/physrevlett.126.195702"
+                    }
+                },
+                "backends": []
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .debug_resolve(Parameters(DebugResolveArgs {
+                text: "Amrita Goswami".into(),
+            }))
+            .await;
+
+        assert!(
+            result.contains("DOI: 10.1103/physrevlett.126.195702"),
+            "unexpected debug response: {result}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_validate_doi_success() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
