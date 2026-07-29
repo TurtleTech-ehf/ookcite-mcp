@@ -578,10 +578,41 @@ impl Server {
                     .as_array()
                     .filter(|candidates| !candidates.is_empty())
                 {
-                    out.push(format!(
-                        "\n{}",
-                        format_resolve_candidates(cleaned, candidates)
-                    ));
+                    let final_response = &body["final_response"];
+                    let match_type = final_response["match_type"]
+                        .as_str()
+                        .unwrap_or("candidate_list");
+                    out.push(format!("\nFinal result: {match_type}"));
+
+                    if let Some(status) = final_response["verification"]["status"].as_str() {
+                        if let Some(confidence) =
+                            final_response["verification"]["confidence"].as_f64()
+                        {
+                            out.push(format!(
+                                "Verification: {status} (confidence: {confidence:.3})"
+                            ));
+                        } else {
+                            out.push(format!("Verification: {status}"));
+                        }
+                    }
+
+                    out.push(format!("Candidates for '{cleaned}':"));
+                    for (index, candidate) in candidates.iter().take(5).enumerate() {
+                        let metadata = candidate.get("metadata").unwrap_or(candidate);
+                        let title = metadata["title"].as_str().unwrap_or("?");
+                        let doi = metadata["doi"].as_str().unwrap_or("?");
+                        let score = candidate["score"]
+                            .as_f64()
+                            .map(|value| format!("{value:.2}"))
+                            .unwrap_or_else(|| "?".into());
+                        out.push(format!(
+                            "  {}. [score:{score}] {title} | doi:{doi}",
+                            index + 1
+                        ));
+                    }
+                    if candidates.len() > 5 {
+                        out.push(format!("  ... and {} more", candidates.len() - 5));
+                    }
                 } else {
                     out.push("\nNo match found".into());
                 }
