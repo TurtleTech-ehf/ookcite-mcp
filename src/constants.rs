@@ -50,7 +50,6 @@ pub fn setup_help_block() -> String {
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

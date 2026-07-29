@@ -257,4 +257,3 @@ pub struct ExpandJournalArgs {
     /// Journal abbreviation to expand (e.g. "JACS", "J. Am. Chem. Soc.")
     pub abbreviation: String,
 }
-
