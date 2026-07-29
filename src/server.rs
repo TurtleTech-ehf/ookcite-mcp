@@ -2593,6 +2593,11 @@ mod tests {
                 "search_query": "Amrita Goswami",
                 "weight_source": "file:/data/resolver-weights.json",
                 "final_response": {
+                    "match_type": "candidate_list",
+                    "verification": {
+                        "status": "ambiguous",
+                        "confidence": 0.7025
+                    },
                     "candidates": [{
                         "metadata": {
                             "title": "Universal Nucleation Behavior of Sheared Systems",
@@ -2621,6 +2626,14 @@ mod tests {
         );
         assert!(
             result.contains("doi:10.1103/physrevlett.126.195702"),
+            "unexpected debug response: {result}"
+        );
+        assert!(
+            result.contains("score:55.18"),
+            "unexpected debug response: {result}"
+        );
+        assert!(
+            result.contains("Verification: ambiguous"),
             "unexpected debug response: {result}"
         );
         assert!(
