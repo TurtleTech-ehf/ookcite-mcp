@@ -32,10 +32,7 @@ pub fn mutate_allowed() -> bool {
     if read_only_locked() {
         return false;
     }
-    match mutate_explicitly_allowed() {
-        Some(v) => v,
-        None => true,
-    }
+    mutate_explicitly_allowed().unwrap_or(true)
 }
 
 /// Message returned from mutating tools when blocked; `None` if allowed.
