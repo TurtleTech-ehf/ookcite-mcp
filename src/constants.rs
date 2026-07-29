@@ -50,6 +50,22 @@ pub fn setup_help_block() -> String {
     )
 }
 
+/// Shared reqwest settings for API traffic: bounded timeouts, connection reuse.
+pub fn build_api_client(
+    timeout_secs: u64,
+    default_headers: reqwest::header::HeaderMap,
+) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(10.min(timeout_secs)))
+        .pool_max_idle_per_host(8)
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .default_headers(default_headers)
+        .build()
+        .expect("ookcite-mcp: failed to build HTTP client")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,20 +84,4 @@ mod tests {
         // Client is cloneable/reusable; construction is the perf-critical path.
         let _ = client.clone();
     }
-}
-
-/// Shared reqwest settings for API traffic: bounded timeouts, connection reuse.
-pub fn build_api_client(
-    timeout_secs: u64,
-    default_headers: reqwest::header::HeaderMap,
-) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .connect_timeout(std::time::Duration::from_secs(10.min(timeout_secs)))
-        .pool_max_idle_per_host(8)
-        .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .tcp_keepalive(std::time::Duration::from_secs(30))
-        .default_headers(default_headers)
-        .build()
-        .expect("ookcite-mcp: failed to build HTTP client")
 }
