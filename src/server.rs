@@ -574,6 +574,14 @@ impl Server {
                     let doi = paper.get("doi").and_then(|d| d.as_str()).unwrap_or("?");
                     out.push(format!("\nMatched: {title}"));
                     out.push(format!("DOI: {doi}"));
+                } else if let Some(candidates) = body["final_response"]["candidates"]
+                    .as_array()
+                    .filter(|candidates| !candidates.is_empty())
+                {
+                    out.push(format!(
+                        "\n{}",
+                        format_resolve_candidates(cleaned, candidates)
+                    ));
                 } else {
                     out.push("\nNo match found".into());
                 }
