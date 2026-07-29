@@ -2576,6 +2576,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn debug_resolve_formats_final_candidate_list() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve/debug"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "cleaned_query": "Amrita Goswami",
+                "search_query": "Amrita Goswami",
+                "weight_source": "file:/data/resolver-weights.json",
+                "final_response": {
+                    "candidates": [{
+                        "metadata": {
+                            "title": "Universal Nucleation Behavior of Sheared Systems",
+                            "doi": "10.1103/physrevlett.126.195702",
+                            "date": {"year": 2021},
+                            "journal": "Physical Review Letters"
+                        },
+                        "score": 55.18
+                    }]
+                },
+                "backends": []
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .debug_resolve(Parameters(DebugResolveArgs {
+                text: "Amrita Goswami".into(),
+            }))
+            .await;
+
+        assert!(
+            result.contains("Universal Nucleation Behavior of Sheared Systems"),
+            "unexpected debug response: {result}"
+        );
+        assert!(
+            result.contains("doi:10.1103/physrevlett.126.195702"),
+            "unexpected debug response: {result}"
+        );
+        assert!(
+            !result.contains("No match found"),
+            "unexpected debug response: {result}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_validate_doi_success() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
