@@ -23,7 +23,7 @@ pub const MUTATE_BATCH_CONCURRENCY: usize = 10;
 /// Process-local exact-DOI metadata TTL (seconds). Identity-gated on store/load.
 pub const DOI_CACHE_TTL_SECS: u64 = 600;
 
-/// Anonymous / no-key: refuse metered batches larger than this (IP daily limit ~10).
+/// Anonymous / no-key: refuse metered batches larger than this (IP daily limit ~20).
 pub const ANON_BATCH_SOFT_CAP: u32 = 8;
 
 /// When set to `1`/`true`/`yes`, MCP stdio startup runs blocking auth + npm
@@ -43,10 +43,10 @@ pub fn version_output() -> String {
     format!("ookcite-mcp {VERSION}")
 }
 
-/// Install / auth guidance appended to agent-facing errors (nimvault doctor style).
+/// Install and authentication guidance appended to client-facing errors.
 pub fn setup_help_block() -> String {
     format!(
-        "--- setup help ---\nookcite-mcp {VERSION}\nAPI (default): {API}\nOptional override: OOKCITE_API=https://host\nAuth: set OOKCITE_API_KEY (Bearer ookc_…) for higher limits + collections\n  Mint key: https://ookcite.turtletech.us (dashboard) or ttech-dashboard\nInstall / reconfigure:\n  ookcite-mcp setup --key YOUR_KEY\n  npx -y @turtletech/ookcite-mcp  (or cargo install --path .)\nAgent policy:\n  OOKCITE_MCP_READ_ONLY=1     — hard-disable collection mutations\n  OOKCITE_MCP_ALLOW_MUTATE=0  — deny mutations (default allow if unset)\n  OOKCITE_STARTUP_PROBES=1    — stderr auth/update checks at MCP launch\nDiagnostics: use doctor or health_check tools; never paste full API keys into chat."
+        "--- setup help ---\nookcite-mcp {VERSION}\nAPI (default): {API}\nOptional override: OOKCITE_API=https://host\nAuth: set OOKCITE_API_KEY (Bearer ookc_…) for higher limits + collections\n  Mint key: https://ookcite.turtletech.us (dashboard) or ttech-dashboard\nInstall / reconfigure:\n  ookcite-mcp setup --key YOUR_KEY\n  npx -y @turtletech/ookcite-mcp  (or cargo install --path .)\nClient policy:\n  OOKCITE_MCP_READ_ONLY=1     — hard-disable collection mutations\n  OOKCITE_MCP_ALLOW_MUTATE=0  — deny mutations (default allow if unset)\n  OOKCITE_STARTUP_PROBES=1    — stderr auth/update checks at MCP launch\nDiagnostics: use doctor or health_check tools; never paste full API keys into chat."
     )
 }
 
