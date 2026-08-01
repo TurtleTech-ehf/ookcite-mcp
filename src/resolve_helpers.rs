@@ -239,3 +239,25 @@ pub async fn lookup_doi_with_retry(
         return Ok(response);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_retryable_lookup_status;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn lookup_retry_policy_stops_on_rate_limit() {
+        assert!(!is_retryable_lookup_status(StatusCode::TOO_MANY_REQUESTS));
+    }
+
+    #[test]
+    fn lookup_retry_policy_keeps_transient_gateway_retries() {
+        for status in [
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert!(is_retryable_lookup_status(status), "status {status}");
+        }
+    }
+}
