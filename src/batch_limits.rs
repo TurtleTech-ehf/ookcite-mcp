@@ -91,7 +91,7 @@ pub fn plan_metered_batch(
                     "REFUSED: anonymous / no OOKCITE_API_KEY session — refusing batch of {metered} \
                      metered lookups (soft cap {ANON_BATCH_SOFT_CAP}). Set OOKCITE_API_KEY for \
                      higher limits, shrink the batch, or import into a collection and re-verify \
-                     members for free. IP daily limits still apply (~10/day anonymous)."
+                     members for free. IP daily limits still apply (~20/day anonymous)."
                 )),
             };
         }

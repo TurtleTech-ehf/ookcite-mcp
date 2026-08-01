@@ -11,7 +11,7 @@ pub async fn validate_auth() {
         Ok(k) if !k.is_empty() => k,
         _ => {
             eprintln!(
-                "ookcite-mcp: anonymous mode (10 lookups/day). \
+                "ookcite-mcp: anonymous mode (20 lookups/day). \
                  Set OOKCITE_API_KEY for more."
             );
             return;
