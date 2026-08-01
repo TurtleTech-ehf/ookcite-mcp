@@ -4,10 +4,10 @@
 [![Crates.io](https://img.shields.io/crates/v/ookcite-mcp.svg)](https://crates.io/crates/ookcite-mcp)
 [![npm](https://img.shields.io/npm/v/@turtletech/ookcite-mcp.svg)](https://www.npmjs.com/package/@turtletech/ookcite-mcp)
 
-Give any LLM the ability to validate DOIs, format citations, manage
-bibliography collections, and catch hallucinated references. Returns citation
-metadata only -- not PDFs or full-text articles. Works with any MCP client:
-Grok Build, Claude, Codex, Cursor, Windsurf, OpenCode, Qwen agents, and more.
+Give MCP-capable tools the ability to validate DOIs, format citations, manage
+bibliography collections, and catch fabricated references. Returns citation
+metadata only -- not PDFs or full-text articles. Works with clients that support
+MCP servers over standard input and output.
 
 ## Quick Start
 
@@ -17,16 +17,14 @@ One command to install and configure:
 npx @turtletech/ookcite-mcp setup
 ```
 
-This auto-detects supported MCP clients (Claude Desktop, Claude Code, Cursor,
-Codex) and writes the config for you. Grok Build is not covered by `setup` —
-install via the plugin marketplace or the Grok config below. Add an API key
-for higher rate limits and collection tools:
+This auto-detects supported MCP clients and writes the configuration for you.
+Add an API key for higher rate limits and collection tools:
 
 ```bash
 npx @turtletech/ookcite-mcp setup --key YOUR_API_KEY
 ```
 
-No API key required for basic usage (10 lookups/day).
+No API key required for basic usage (20 lookups/day).
 [Sign up](https://my.turtletech.us/signup) for more.
 
 After changing MCP config, restart the client or reload its MCP servers.
@@ -91,55 +89,9 @@ With an API key:
 If you installed globally (`npm install -g` or `cargo install`), you can use
 `"command": "ookcite-mcp"` directly instead of npx.
 
-Common config file locations:
-
-| Client                 | Config file                                                       |
-| ---------------------- | ----------------------------------------------------------------- |
-| Grok Build             | Plugin install (below) or `~/.grok/config.toml` / project `.mcp.json` |
-| Claude Desktop (Linux) | `~/.config/Claude/claude_desktop_config.json`                     |
-| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Claude Code            | `.mcp.json` (project) or `~/.claude/settings.json` (global)       |
-| Cursor                 | Settings > MCP Servers                                            |
-| Codex                  | `~/.codex/config.toml`                                            |
-
-### Grok Build
-
-**Recommended:** install from the [xAI plugin marketplace](https://github.com/xai-org/plugin-marketplace)
-once published (`/marketplace` in Grok Build, search for `ookcite`). The
-marketplace entry clones this repo at a pinned commit and loads the bundled
-`.mcp.json` + `plugin.json`.
-
-**From this repo (local / PR testing):**
-
-```bash
-grok plugin install /path/to/ookcite-mcp
-# or from git once plugin files are on the branch you pin:
-# grok plugin install https://github.com/TurtleTech-ehf/ookcite-mcp.git
-```
-
-Set `OOKCITE_API_KEY` in your shell or Grok env for collection tools (optional
-for basic lookup/format tools). Trust the plugin when prompted so its MCP
-server is allowed to start.
-
-**Manual MCP config** (same payload as other clients; Grok also loads project
-`.mcp.json` at the repo root):
-
-```json
-{
-  "mcpServers": {
-    "ookcite": {
-      "command": "npx",
-      "args": ["-y", "@turtletech/ookcite-mcp"],
-      "env": {
-        "OOKCITE_API_KEY": "your_key_here"
-      }
-    }
-  }
-}
-```
-
-This repository ships that config as `.mcp.json` plus `plugin.json` for Grok
-plugin discovery. After changing MCP config, restart Grok or reload MCP servers.
+Consult your client's MCP documentation for its configuration-file location.
+Use the `mcpServers.ookcite` JSON above when automatic setup is unavailable,
+then restart the client or reload its MCP servers.
 
 Optional env (stdio MCP, all clients):
 
@@ -147,37 +99,12 @@ Optional env (stdio MCP, all clients):
 | -------- | ------- |
 | `OOKCITE_API_KEY` | Higher rate limits + collection tools (optional for basic lookup/format) |
 | `OOKCITE_API` | Override API base URL (default `https://ookcite-api.turtletech.us`) |
-| `OOKCITE_MCP_READ_ONLY` | `1` hard-disables collection mutations (review / CI agents) |
+| `OOKCITE_MCP_READ_ONLY` | `1` hard-disables collection mutations (review / CI automation) |
 | `OOKCITE_MCP_ALLOW_MUTATE` | `0` denies mutations; unset or `1` allows (API key still required server-side) |
 | `OOKCITE_STARTUP_PROBES` | `1` runs auth/update checks on stderr at MCP launch |
 | `OOKCITE_STARTUP_PROBES=1` | Run auth + npm update checks on **stderr** before accepting MCP connections (default off for faster connect) |
 
-### Claude Desktop / Claude Code
-
-`ookcite-mcp setup` uses `add-mcp` for most Claude installs. Manual fallback
-uses the same `mcpServers.ookcite` JSON as above:
-
-| Client | Config location |
-| ------ | --------------- |
-| Claude Desktop (Linux) | `~/.config/Claude/claude_desktop_config.json` |
-| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Claude Code (project) | `.mcp.json` in the project root |
-| Claude Code (user) | `~/.claude/settings.json` → `mcpServers` |
-
-Restart the app or reload MCP servers after edits.
-
-### Codex
-
-For Codex, the equivalent global registration also works from the CLI:
-
-```bash
-codex mcp add ookcite --env OOKCITE_API_KEY=your_key_here -- npx -y @turtletech/ookcite-mcp
-```
-
-Then restart Codex so the new stdio server starts with the updated environment.
-You can also declare `[mcp_servers.ookcite]` in `~/.codex/config.toml`.
-
-### MCP / agent usage tips
+### MCP usage tips
 
 - Prefer **batch** tools (`verify_references`, `batch_format`, `batch_add_to_collection`,
   `import_bibliography`) over many single-citation calls.
@@ -251,12 +178,12 @@ bare DOI / `doi:10.x/y` — the server resolves aliases locally before the API c
 
 ## Plans & Pricing
 
-| Tier      | Price   | Lookups/day | Collections | Entries/collection |
-| --------- | ------- | ----------- | ----------- | ------------------ |
-| Anonymous | Free    | 10          | 0           | --                 |
-| Free      | Free    | 30          | 1           | 100                |
-| Academic  | $4/mo   | 10,000      | 5           | 500                |
-| Business  | $12/mo  | 10,000      | 10           | 2,000              |
+| Tier      | Price     | Lookups/day | Collections | Entries/collection |
+| --------- | --------- | ----------- | ----------- | ------------------ |
+| Anonymous | Free      | 20          | 0           | --                 |
+| Free      | Free      | 60          | 4           | 200                |
+| Academic  | EUR 4/mo  | 20,000      | 10          | 1,000              |
+| Business  | EUR 10/mo | 20,000      | 20          | 4,000              |
 
 Papers in your collections are **free and unlimited** to re-lookup.
 Only new lookups count against your daily quota. Papers stay free
@@ -283,8 +210,8 @@ The MCP server connects to the public [OokCite](https://ookcite.turtletech.us)
 API to look up and format citations. It's a thin MCP wrapper around the OokCite
 REST API with no local database, and no heavy dependencies.
 
-[Sign up](https://my.turtletech.us/signup) for a free account (30 lookups/day),
-or upgrade to academic ($4/mo) or business ($12/mo) for batch operations
+[Sign up](https://my.turtletech.us/signup) for a free account (60 lookups/day),
+or upgrade to Academic (EUR 4/mo) or Business (EUR 10/mo) for batch operations
 and larger collections.
 
 
@@ -301,7 +228,7 @@ There is no local citation database; all state lives on the API.
 | `src/server.rs` | `Server` + `#[tool_router]` MCP tool handlers (plus unit tests at bottom) |
 | `src/tool_args.rs` | Tool argument structs (`serde` + `schemars`) |
 | `src/constants.rs` | API base URL, package version, reverse-lookup confidence threshold |
-| `src/http_error.rs` | `error_detail` and HTTP status classification for agent-facing strings |
+| `src/http_error.rs` | `error_detail` and HTTP status classification for client-facing strings |
 | `src/collection_entries.rs` | Collection entry ids, bare DOI / `doi:` alias resolution, search lines |
 | `src/resolve_helpers.rs` | Reverse-lookup and free-text resolve payload helpers |
 | `src/endpoints.rs` | Endpoint registry (`lib` crate surface); contract-tested |
