@@ -844,9 +844,10 @@ impl Server {
                 let text = text.clone();
                 async move {
                     if looks_like_doi_token(&text) {
-                        if let Ok(meta) = server.lookup_doi_json_cached(&text).await {
-                            return Ok(meta);
-                        }
+                        return server
+                            .lookup_doi_json_cached(&text)
+                            .await
+                            .map_err(|error| format!("[{}] {error}", i + 1));
                     }
                     if let Some(meta) = server
                         .resolve_query_to_metadata(&text, use_live_queries)
