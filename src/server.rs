@@ -3504,6 +3504,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_format_stops_after_exact_doi_rate_limit() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan": "academic",
+                "lookups_remaining": 100,
+                "lookups_limit": 1000
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains("10.9999/mcp-rate-limit-contract"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("Daily limit reached"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_batch_rate_limit_contract");
+        let s = test_server(&mock.uri());
+        let result = s
+            .batch_format(Parameters(crate::tool_args::BatchArgs {
+                citations: vec!["10.9999/mcp-rate-limit-contract".into()],
+                style: default_style(),
+                use_live_queries: true,
+            }))
+            .await;
+
+        assert!(result.contains("RATE LIMITED 10.9999/mcp-rate-limit-contract"));
+        assert!(!result.contains("Not found"));
+    }
+
+    #[tokio::test]
     async fn test_verify_references_preserves_mixed_statuses() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
