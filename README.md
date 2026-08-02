@@ -166,7 +166,7 @@ see each hit as `entry_id: …` (and optionally `aliases: doi:…` when the stor
 is opaque). Pass that `entry_id` to `remove_from_collection`, or pass the paper's
 bare DOI / `doi:10.x/y` — the server resolves aliases locally before the API call.
 
-### Sharing & Bulk Operations (requires academic/business plan)
+### Sharing & Collection Operations
 
 | Tool                  | Purpose                                    |
 | --------------------- | ------------------------------------------ |
@@ -176,21 +176,24 @@ bare DOI / `doi:10.x/y` — the server resolves aliases locally before the API c
 | `merge_collections`   | Merge multiple collections                 |
 | `batch_move_entries`  | Move entries between collections           |
 
+Sharing is available to signed-in accounts with collections.
+Free accounts can import and batch-add within their daily quota.
+Merge and batch-move require an Academic or Business plan.
+
 ## Plans & Pricing
 
-| Tier      | Price     | Lookups/day | Collections | Entries/collection |
-| --------- | --------- | ----------- | ----------- | ------------------ |
-| Anonymous | Free      | 20          | 0           | --                 |
-| Free      | Free      | 60          | 4           | 200                |
-| Academic  | EUR 4/mo  | 20,000      | 10          | 1,000              |
-| Business  | EUR 10/mo | 20,000      | 20          | 4,000              |
+| Tier      | Price     | Lookups/day | API calls/month | Collections | Entries/collection |
+| --------- | --------- | ----------- | --------------- | ----------- | ------------------ |
+| Anonymous | Free      | 20          | --              | 0           | --                 |
+| Free      | Free      | 60          | --              | 4           | 200                |
+| Academic  | EUR 4/mo  | 20,000      | 10,000          | 10          | 1,000              |
+| Business  | EUR 10/mo | 20,000      | 40,000          | 20          | 4,000              |
 
-Papers in your collections are **free and unlimited** to re-lookup.
-Only new lookups count against your daily quota. Papers stay free
-as long as they remain in a collection.
-
-Batch operations require an academic or business plan. Academic pricing
-is for students, researchers, and educators at accredited institutions.
+Re-lookups can be served without quota use when collection metadata is already
+available to the API. A retrieval that has to resolve the paper again can count
+against the current plan's quota. Paid Academic checkout is intended for
+students, researchers, and educators at accredited institutions; a verified
+ORCID can also qualify a signed-in account for Academic limits.
 
 ## Anti-Hallucination
 
@@ -211,8 +214,8 @@ API to look up and format citations. It's a thin MCP wrapper around the OokCite
 REST API with no local database, and no heavy dependencies.
 
 [Sign up](https://my.turtletech.us/signup) for a free account (60 lookups/day),
-or upgrade to Academic (EUR 4/mo) or Business (EUR 10/mo) for batch operations
-and larger collections.
+or upgrade to Academic (EUR 4/mo) or Business (EUR 10/mo) for higher monthly
+API limits, larger collections, paid utilities, merge, and batch-move.
 
 
 ## Source layout
