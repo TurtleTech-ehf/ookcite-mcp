@@ -52,10 +52,7 @@ fn public_quota_claims_match_the_runtime_contract() {
         plan_row("Anonymous"),
         ["Anonymous", "Free", "20", "--", "0", "--"]
     );
-    assert_eq!(
-        plan_row("Free"),
-        ["Free", "Free", "60", "--", "4", "200"]
-    );
+    assert_eq!(plan_row("Free"), ["Free", "Free", "60", "--", "4", "200"]);
     assert_eq!(
         plan_row("Academic"),
         ["Academic", "EUR 4/mo", "20,000", "10,000", "10", "1,000"]
