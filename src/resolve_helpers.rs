@@ -219,7 +219,7 @@ pub fn resolve_text_body(query: &str, use_live_queries: bool) -> serde_json::Val
 }
 
 fn is_retryable_lookup_status(status: reqwest::StatusCode) -> bool {
-    matches!(status.as_u16(), 502 | 503 | 504)
+    matches!(status.as_u16(), 502..=504)
 }
 
 pub async fn lookup_doi_with_retry(
