@@ -246,7 +246,7 @@ mod tests {
         let q = MeQuota {
             plan: "free".into(),
             lookups_remaining: Some(2),
-            lookups_limit: Some(30),
+            lookups_limit: Some(60),
         };
         let pf = plan_metered_batch(&items, &HashSet::new(), &HashMap::new(), Some(&q), true);
         assert!(pf.refuse_message.is_some());
@@ -260,7 +260,7 @@ mod tests {
         let q = MeQuota {
             plan: "academic".into(),
             lookups_remaining: Some(100),
-            lookups_limit: Some(10_000),
+            lookups_limit: Some(20_000),
         };
         let pf = plan_metered_batch(&items, &HashSet::new(), &HashMap::new(), Some(&q), true);
         assert!(pf.refuse_message.is_none());
@@ -280,7 +280,7 @@ mod tests {
         let q = MeQuota {
             plan: "free".into(),
             lookups_remaining: Some(1),
-            lookups_limit: Some(30),
+            lookups_limit: Some(60),
         };
         // 1 member + 1 need_lookup; remaining 1 → proceed
         let pf = plan_metered_batch(&items, &members, &titles, Some(&q), true);
@@ -291,7 +291,7 @@ mod tests {
         let q0 = MeQuota {
             plan: "free".into(),
             lookups_remaining: Some(0),
-            lookups_limit: Some(30),
+            lookups_limit: Some(60),
         };
         let pf0 = plan_metered_batch(&items, &members, &titles, Some(&q0), true);
         assert!(pf0.refuse_message.is_some());

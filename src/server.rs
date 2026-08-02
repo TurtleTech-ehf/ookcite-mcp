@@ -2728,7 +2728,7 @@ mod tests {
             .and(path("/api/v1/lookup/doi"))
             .respond_with(
                 ResponseTemplate::new(429)
-                    .set_body_string("Daily limit reached (50/day). Resets in 3h 45m."),
+                    .set_body_string("Daily limit reached (60/day). Resets in 3h 45m."),
             )
             .mount(&mock)
             .await;
@@ -2751,7 +2751,7 @@ mod tests {
             .and(path("/api/v1/lookup/doi"))
             .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
                 "error": "plan_required",
-                "message": "This feature requires an academic ($4/mo) or business ($12/mo) plan.",
+                "message": "This feature requires an Academic (EUR 4/mo) or Business (EUR 10/mo) plan.",
                 "upgrade_url": "https://my.turtletech.us"
             })))
             .mount(&mock)
@@ -3489,7 +3489,7 @@ mod tests {
             .and(path("/api/v1/lookup/doi"))
             .respond_with(
                 ResponseTemplate::new(429)
-                    .set_body_string("Daily limit reached (30/day). Resets in 5h."),
+                    .set_body_string("Daily limit reached (60/day). Resets in 5h."),
             )
             .mount(&mock)
             .await;
@@ -4036,7 +4036,7 @@ mod tests {
             .and(path("/api/v1/collections/col-123/entries"))
             .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
                 "error": "plan_required",
-                "message": "This feature requires an academic ($4/mo) or business ($12/mo) plan."
+                "message": "This feature requires an Academic (EUR 4/mo) or Business (EUR 10/mo) plan."
             })))
             .mount(&mock)
             .await;
@@ -4050,8 +4050,8 @@ mod tests {
             .await
             .unwrap();
         let detail = error_detail(resp).await;
-        assert!(detail.contains("academic"));
-        assert!(detail.contains("$4/mo"));
+        assert!(detail.contains("Academic"));
+        assert!(detail.contains("EUR 4/mo"));
     }
 
     #[tokio::test]
@@ -4061,7 +4061,7 @@ mod tests {
             .and(path("/api/v1/lookup/doi"))
             .respond_with(
                 ResponseTemplate::new(429)
-                    .set_body_string("Daily limit reached (30/day). Resets in 5h."),
+                    .set_body_string("Daily limit reached (60/day). Resets in 5h."),
             )
             .mount(&mock)
             .await;
