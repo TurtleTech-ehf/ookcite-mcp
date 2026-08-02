@@ -2764,7 +2764,8 @@ mod tests {
             }))
             .await;
         assert!(result.starts_with("ACCESS DENIED"));
-        assert!(result.contains("academic"));
+        assert!(result.contains("Academic (EUR 4/mo)"));
+        assert!(result.contains("Business (EUR 10/mo)"));
     }
 
     #[tokio::test]
