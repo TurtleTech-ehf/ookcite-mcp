@@ -1765,7 +1765,7 @@ impl Server {
 
     #[tool(
         name = "share_collection",
-        description = "Create a shareable link for a collection. Anyone with the link can view it. Requires academic/business plan.",
+        description = "Create a shareable link for a collection. Anyone with the link can view it.",
         annotations(
             title = "Share collection",
             read_only_hint = false,
@@ -2117,11 +2117,11 @@ impl ServerHandler for Server {
              use remove_from_collection to remove a specific entry by entry_id, bare DOI, or doi:10.x/y (destructive). \
              use update_tags to set tags on a collection. \
              use reorder_collection to change the order of entries. \
-             SHARING (academic/business plan): \
+             SHARING (signed-in accounts with collections): \
              use share_collection to create a shareable link. \
              use unshare_collection to revoke sharing (destructive to the link). \
              use view_shared to view a shared collection by token. \
-             BULK OPERATIONS (academic/business plan): \
+             PAID COLLECTION OPERATIONS (academic/business plan): \
              use merge_collections to combine multiple collections. \
              use batch_move_entries to move entries between collections. \
              UTILITIES (requires academic/business plan): \

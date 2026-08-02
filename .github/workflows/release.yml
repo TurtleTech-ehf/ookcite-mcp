@@ -116,6 +116,9 @@ jobs:
       - name: Install npm with trusted publishing support
         run: npm install -g npm@11.15.0
 
+      - name: Verify npm public documentation
+        run: cmp README.md npm/README.md
+
       - name: Set version from tag and publish
         working-directory: npm
         run: |
