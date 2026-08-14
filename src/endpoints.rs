@@ -60,11 +60,15 @@ pub const PARSE_CITATIONS: Endpoint = Endpoint::new("POST", "/api/v1/parse-citat
 pub const RESOLVE_DEBUG: Endpoint = Endpoint::new("POST", "/api/v1/resolve/debug");
 pub const HEALTH: Endpoint = Endpoint::new("GET", "/api/health");
 pub const ME: Endpoint = Endpoint::new("GET", "/api/v1/me");
+pub const ME_USAGE: Endpoint = Endpoint::new("GET", "/api/v1/me/usage");
+pub const RESOLVE_BATCH: Endpoint = Endpoint::new("POST", "/api/v1/resolve/batch");
+pub const SEARCH_ENHANCED: Endpoint = Endpoint::new("GET", "/api/v1/search/enhanced");
 
 // --- Formatting ---
 pub const FORMAT: Endpoint = Endpoint::new("POST", "/api/v1/format");
 pub const FORMAT_GROUP_CITE: Endpoint = Endpoint::new("POST", "/api/v1/format/group-cite");
 pub const STYLES_SEARCH: Endpoint = Endpoint::new("GET", "/api/v1/styles/search");
+pub const STYLES_LIST: Endpoint = Endpoint::new("GET", "/api/v1/styles");
 
 // --- Collections ---
 pub const COLLECTIONS_LIST: Endpoint = Endpoint::new("GET", "/api/v1/collections");
@@ -78,6 +82,10 @@ pub const COLLECTION_ENTRIES_BATCH: Endpoint =
     Endpoint::new("POST", "/api/v1/collections/{id}/entries/batch");
 pub const COLLECTION_ENTRY_REMOVE: Endpoint =
     Endpoint::new("DELETE", "/api/v1/collections/{id}/entries/{eid}");
+pub const COLLECTION_ENTRY_METADATA: Endpoint =
+    Endpoint::new("PUT", "/api/v1/collections/{id}/entries/{eid}/metadata");
+pub const COLLECTION_ENTRY_MERGE: Endpoint =
+    Endpoint::new("POST", "/api/v1/collections/{id}/entries/{eid}/merge");
 pub const COLLECTION_EXPORT_BIB: Endpoint =
     Endpoint::new("GET", "/api/v1/collections/{id}/export.bib");
 pub const COLLECTION_IMPORT: Endpoint = Endpoint::new("POST", "/api/v1/collections/{id}/import");
@@ -95,6 +103,13 @@ pub const SHARED_GET: Endpoint = Endpoint::new("GET", "/api/v1/shared/{token}");
 // --- Utilities ---
 pub const CITATION_KEYS: Endpoint = Endpoint::new("POST", "/api/v1/citation-keys");
 pub const JOURNAL_EXPAND: Endpoint = Endpoint::new("POST", "/api/v1/journal/expand");
+pub const BIBLIOGRAPHY_NORMALIZE: Endpoint =
+    Endpoint::new("POST", "/api/v1/bibliography/normalize");
+
+// --- ORCID ---
+pub const ORCID_SEARCH: Endpoint = Endpoint::new("GET", "/api/v1/orcid/search");
+pub const ORCID_PROFILE: Endpoint = Endpoint::new("GET", "/api/v1/orcid/{orcid_id}");
+pub const INGEST_ORCID: Endpoint = Endpoint::new("POST", "/api/v1/ingest/orcid");
 
 /// Every endpoint this crate calls. The contract test iterates over this
 /// to verify each one exists in the OpenAPI spec.
@@ -107,9 +122,13 @@ pub const ALL: &[Endpoint] = &[
     RESOLVE_DEBUG,
     HEALTH,
     ME,
+    ME_USAGE,
+    RESOLVE_BATCH,
+    SEARCH_ENHANCED,
     FORMAT,
     FORMAT_GROUP_CITE,
     STYLES_SEARCH,
+    STYLES_LIST,
     COLLECTIONS_LIST,
     COLLECTIONS_CREATE,
     COLLECTION_GET,
@@ -118,6 +137,8 @@ pub const ALL: &[Endpoint] = &[
     COLLECTION_ENTRIES_ADD,
     COLLECTION_ENTRIES_BATCH,
     COLLECTION_ENTRY_REMOVE,
+    COLLECTION_ENTRY_METADATA,
+    COLLECTION_ENTRY_MERGE,
     COLLECTION_EXPORT_BIB,
     COLLECTION_IMPORT,
     COLLECTION_TAGS,
@@ -130,6 +151,10 @@ pub const ALL: &[Endpoint] = &[
     SHARED_GET,
     CITATION_KEYS,
     JOURNAL_EXPAND,
+    BIBLIOGRAPHY_NORMALIZE,
+    ORCID_SEARCH,
+    ORCID_PROFILE,
+    INGEST_ORCID,
 ];
 
 #[cfg(test)]
