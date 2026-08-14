@@ -269,7 +269,7 @@ impl Server {
 
     #[tool(
         name = "search_styles",
-        description = "Search for available CSL citation styles by name. Returns a list of matching style IDs to use in formatting tools.",
+        description = "Search for available CSL citation styles by name. Returns a list of matching style IDs to use in formatting tools. Call this when the user names a style (\"IEEE\", \"Chicago\", a journal's house style) and you need its exact ID before calling format_citation or batch_format.",
         annotations(
             title = "Search CSL styles",
             read_only_hint = true,
@@ -337,7 +337,7 @@ impl Server {
 
     #[tool(
         name = "lookup_isbn",
-        description = "Look up a book by ISBN. Returns title, authors, publisher, year, and pages.",
+        description = "Look up a book by ISBN. Returns title, authors, publisher, year, and pages. Call this for book references; use validate_doi instead for journal articles and anything else with a DOI.",
         annotations(title = "Lookup ISBN", read_only_hint = true, idempotent_hint = true)
     )]
     async fn lookup_isbn(&self, Parameters(args): Parameters<IsbnArgs>) -> String {
@@ -705,7 +705,7 @@ impl Server {
 
     #[tool(
         name = "group_cite",
-        description = "Generate a grouped in-text citation marker (e.g., '[1-3]') for multiple DOIs.",
+        description = "Generate a grouped in-text citation marker (e.g., '[1-3]') for multiple DOIs. Call this when writing prose that cites several works at one point and you want them collapsed into a single marker rather than listed separately.",
         annotations(
             title = "Group in-text cites",
             read_only_hint = true,
@@ -907,7 +907,7 @@ impl Server {
 
     #[tool(
         name = "list_collections",
-        description = "List all citation collections for the authenticated user. Requires OOKCITE_API_KEY.",
+        description = "List all citation collections for the authenticated user. Requires OOKCITE_API_KEY. Call this first when the user refers to a collection by name, to resolve it before any other collection tool, and to check whether a collection already exists before creating one.",
         annotations(
             title = "List collections",
             read_only_hint = true,
@@ -1050,7 +1050,7 @@ impl Server {
 
     #[tool(
         name = "export_collection",
-        description = "Export a collection as BibTeX. Returns the full .bib file content with Better BibTeX keys.",
+        description = "Export a collection as BibTeX. Returns the full .bib file content with Better BibTeX keys. Call this when the user wants the collection as a file, or to hand its entries to a LaTeX or reference manager workflow.",
         annotations(
             title = "Export collection BibTeX",
             read_only_hint = true,
@@ -1080,7 +1080,7 @@ impl Server {
 
     #[tool(
         name = "search_collection",
-        description = "Search within a collection by author name, title keywords, or journal. Returns matching entries with entry_id values for remove_from_collection (opaque id, or pass a bare DOI / doi:10.x/y alias).",
+        description = "Search within a collection by author name, title keywords, or journal. Returns matching entries with entry_id values for remove_from_collection (opaque id, or pass a bare DOI / doi:10.x/y alias). Call this to find an entry the user described in words rather than by DOI, and to obtain an entry_id before removing or reordering.",
         annotations(
             title = "Search collection",
             read_only_hint = true,
@@ -1322,7 +1322,7 @@ impl Server {
 
     #[tool(
         name = "health_check",
-        description = "Check if the OokCite API is reachable and healthy. Returns service status and cache statistics.",
+        description = "Check if the OokCite API is reachable and healthy. Returns service status and cache statistics. Call this when another tool fails with a network or server error, to tell an outage apart from a bad request; use doctor instead when authentication or configuration is what looks wrong.",
         annotations(
             title = "API health check",
             read_only_hint = true,
@@ -1374,7 +1374,7 @@ impl Server {
 
     #[tool(
         name = "import_bibliography",
-        description = "Import a BibTeX (.bib) or RIS file into a collection. Pass the file content as a string. Creates the collection if it doesn't exist, but collection import may require a paid plan or additional collection capacity.",
+        description = "Import a BibTeX (.bib) or RIS file into a collection. Pass the file content as a string. Creates the collection if it doesn't exist, but collection import may require a paid plan or additional collection capacity. Call this when the user has an existing bibliography file, in preference to adding its entries one at a time.",
         annotations(
             title = "Import bibliography file",
             read_only_hint = false,
@@ -1433,7 +1433,7 @@ impl Server {
 
     #[tool(
         name = "check_duplicates",
-        description = "Check if a citation already exists in a collection. Resolves the query first, then checks for duplicates. Returns entry_id for matches.",
+        description = "Check if a citation already exists in a collection. Resolves the query first, then checks for duplicates. Returns entry_id for matches. Call this before add_to_collection when the user may have saved the work already, and to obtain an entry_id for an entry you only know by citation text.",
         annotations(
             title = "Check collection duplicates",
             read_only_hint = true,
@@ -1568,7 +1568,7 @@ impl Server {
 
     #[tool(
         name = "delete_collection",
-        description = "Delete a citation collection. This is irreversible.",
+        description = "Delete a citation collection and every entry in it. This is irreversible and there is no undo. Call this only on an explicit request to delete a collection, and confirm which collection is meant first; to remove a single entry use remove_from_collection instead.",
         annotations(
             title = "Delete collection",
             read_only_hint = false,
@@ -1602,7 +1602,7 @@ impl Server {
 
     #[tool(
         name = "update_collection",
-        description = "Update a collection's name, description, or default citation style.",
+        description = "Update a collection's name, description, or default citation style. Call this to rename a collection or change the style its entries format in by default; it does not add, remove, or reorder entries.",
         annotations(
             title = "Update collection metadata",
             read_only_hint = false,
@@ -1649,7 +1649,7 @@ impl Server {
 
     #[tool(
         name = "remove_from_collection",
-        description = "Remove a specific entry from a collection. Pass entry_id from search_collection, or a bare DOI / doi:10.x/y alias (resolved locally before the API call).",
+        description = "Remove a specific entry from a collection. Pass entry_id from search_collection, or a bare DOI / doi:10.x/y alias (resolved locally before the API call). Call this to drop one entry while keeping the collection; this changes the collection permanently, so confirm which entry is meant.",
         annotations(
             title = "Remove collection entry",
             read_only_hint = false,
@@ -1706,7 +1706,7 @@ impl Server {
 
     #[tool(
         name = "update_tags",
-        description = "Set tags on a collection. Replaces all existing tags.",
+        description = "Set tags on a collection. Replaces all existing tags rather than adding to them, so include every tag the collection should keep. Call this when the user wants to label or re-label a collection.",
         annotations(
             title = "Update collection tags",
             read_only_hint = false,
@@ -1737,7 +1737,7 @@ impl Server {
 
     #[tool(
         name = "reorder_collection",
-        description = "Reorder entries in a collection. Provide the entry IDs in the desired order.",
+        description = "Reorder entries in a collection. Provide the entry IDs in the desired order. Call this when the user wants a specific bibliography order; get the current entry IDs from search_collection first.",
         annotations(
             title = "Reorder collection entries",
             read_only_hint = false,
@@ -1773,7 +1773,7 @@ impl Server {
 
     #[tool(
         name = "share_collection",
-        description = "Create a shareable link for a collection. Anyone with the link can view it.",
+        description = "Create a shareable link for a collection. Anyone with the link can view it, so treat it as public. Call this when the user asks to share a collection or send it to someone.",
         annotations(
             title = "Share collection",
             read_only_hint = false,
@@ -1805,7 +1805,7 @@ impl Server {
 
     #[tool(
         name = "unshare_collection",
-        description = "Revoke the shareable link for a collection.",
+        description = "Revoke the shareable link for a collection. Existing links stop working immediately and cannot be restored -- a new share creates a different link. Call this when the user wants to stop sharing.",
         annotations(
             title = "Unshare collection",
             read_only_hint = false,
@@ -1838,7 +1838,7 @@ impl Server {
 
     #[tool(
         name = "merge_collections",
-        description = "Merge multiple collections into one. All entries are combined, duplicates are skipped.",
+        description = "Merge multiple collections into one. All entries are combined and duplicates are skipped. Requires an academic or business plan. Call this to consolidate collections; the source collections are not deleted for you.",
         annotations(
             title = "Merge collections",
             read_only_hint = false,
@@ -1903,7 +1903,7 @@ impl Server {
 
     #[tool(
         name = "batch_move_entries",
-        description = "Move entries from one collection to another.",
+        description = "Move entries from one collection to another. Requires an academic or business plan. Call this to reorganize entries between existing collections in a single call rather than removing and re-adding them.",
         annotations(
             title = "Batch move entries",
             read_only_hint = false,
@@ -1948,7 +1948,7 @@ impl Server {
 
     #[tool(
         name = "view_shared",
-        description = "View a shared collection using its share token.",
+        description = "View a shared collection using its share token. Call this when the user supplies a share link or token for a collection they do not own; it needs no API key and does not add anything to the user's own collections.",
         annotations(
             title = "View shared collection",
             read_only_hint = true,
@@ -2002,7 +2002,7 @@ impl Server {
 
     #[tool(
         name = "generate_citation_keys",
-        description = "Generate Better BibTeX-style citation keys (e.g. 'goswami2026') for a list of DOIs. Requires academic/business plan.",
+        description = "Generate Better BibTeX-style citation keys (e.g. 'goswami2026') for a list of DOIs. Requires an academic or business plan. Call this when the user needs stable \\cite keys for a LaTeX document and wants them to match the Better BibTeX convention.",
         annotations(
             title = "Generate citation keys",
             read_only_hint = true,
@@ -2052,7 +2052,7 @@ impl Server {
 
     #[tool(
         name = "expand_journal",
-        description = "Expand a journal abbreviation to its full name (e.g. 'JACS' -> 'Journal of the American Chemical Society'). 16,000+ journals supported. Requires academic/business plan.",
+        description = "Expand a journal abbreviation to its full name (e.g. 'JACS' -> 'Journal of the American Chemical Society'). 16,000+ journals supported. Requires an academic or business plan. Call this when a citation carries an abbreviated journal title and the target style requires the full name.",
         annotations(
             title = "Expand journal abbreviation",
             read_only_hint = true,
@@ -2090,52 +2090,25 @@ impl ServerHandler for Server {
         let mut info = ServerInfo::new(caps);
         info.server_info.name = "ookcite-mcp".into();
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
+        // Scope, and the two things a client cannot infer from the tool list:
+        // what this server does not do, and how to choose between the tools it
+        // offers. Per-tool trigger conditions live in each tool's own
+        // description, which is what a client reads when choosing one; listing
+        // them here as well duplicated the whole tool list into every request.
         info.instructions = Some(
-            "OokCite provides citation METADATA validation and formatting -- it does NOT fetch PDFs, \
-             full-text articles, or paper content. It returns structured metadata (title, authors, \
-             year, journal, DOI) and formatted bibliography entries. \
-             ALWAYS use these tools instead of searching the web for DOI or citation metadata. \
-             PERFORMANCE: prefer batch tools over repeated single calls -- verify_references for many DOIs, \
-             batch_format for many messy citations, batch_add_to_collection for many collection inserts, \
-             import_bibliography for whole .bib/.ris files. Destructive tools (delete_collection, \
-             remove_from_collection, unshare_collection) permanently change or revoke data; confirm intent first. \
-             When the user mentions a DOI, ISBN, paper title, citation, or reference: \
-             use validate_doi to verify DOIs exist before citing them. \
-             use lookup_isbn for book references. \
-             use reverse_lookup when given a messy or partial citation string. \
-             use parse_citations to split raw bibliography text into individual citation units before resolving. \
-             use debug_resolve to diagnose why a citation resolves to the wrong paper (requires API key). \
-             use format_citation to format a DOI in any CSL style (APA, IEEE, Chicago, Nature, etc.). \
-             use verify_references to batch-check multiple DOIs. \
-             use batch_format to resolve and format multiple citations at once. \
-             use search_styles to find CSL style IDs by name. \
-             use group_cite to generate grouped in-text markers like [1-3]. \
-             use health_check to verify the API is reachable (use when lookups fail). \
-             use doctor for MCP version, mutate policy, redacted key status, and API /me (use when setup is unclear). \
-             COLLECTION MANAGEMENT (requires OOKCITE_API_KEY): \
-             use list_collections to see saved citation collections. \
-             use add_to_collection to save a citation to a named collection (creates if needed). \
-             use batch_add_to_collection to add multiple citations at once. \
-             use import_bibliography to import BibTeX or RIS files into a collection. \
-             use export_collection to get BibTeX for a collection. \
-             use search_collection to find entries within a collection (returns entry_id for each match). \
-             use check_duplicates to check if a citation already exists in a collection (returns entry_id). \
-             use delete_collection to remove a collection (destructive/irreversible). \
-             use update_collection to rename or change a collection's default style. \
-             use remove_from_collection to remove a specific entry by entry_id, bare DOI, or doi:10.x/y (destructive). \
-             use update_tags to set tags on a collection. \
-             use reorder_collection to change the order of entries. \
-             SHARING (signed-in accounts with collections): \
-             use share_collection to create a shareable link. \
-             use unshare_collection to revoke sharing (destructive to the link). \
-             use view_shared to view a shared collection by token. \
-             PAID COLLECTION OPERATIONS (academic/business plan): \
-             use merge_collections to combine multiple collections. \
-             use batch_move_entries to move entries between collections. \
-             UTILITIES (requires academic/business plan): \
-             use generate_citation_keys to create Better BibTeX-style keys for DOIs. \
-             use expand_journal to expand a journal abbreviation to its full name. \
-             NEVER fabricate citation metadata -- always validate through these tools first.".into()
+            "OokCite resolves and formats citation METADATA: it returns structured fields (title, \
+             authors, year, journal, DOI) and formatted bibliography entries. It does NOT fetch PDFs, \
+             full-text articles, or paper content, so do not reach for it to read a paper. \
+             Resolve citation metadata through these tools rather than from memory or a web search: a \
+             DOI that looks plausible is not evidence the work exists, and validate_doi is what \
+             separates the two. \
+             Prefer the batch tools over repeated single calls -- verify_references, batch_format, \
+             batch_add_to_collection, and import_bibliography each take a whole set in one request. \
+             Collection tools need OOKCITE_API_KEY; merge_collections, batch_move_entries, \
+             generate_citation_keys, and expand_journal additionally need an academic or business plan. \
+             Tools annotated as destructive change or revoke data permanently -- confirm which \
+             collection or entry is meant before calling one."
+                .into(),
         );
         info
     }
@@ -2449,11 +2422,49 @@ mod tests {
     fn get_info_instructions_cover_batch_and_destructive_guidance() {
         let info = Server::new().get_info();
         let instr = info.instructions.expect("server instructions set");
-        assert!(instr.contains("PERFORMANCE: prefer batch tools"));
-        assert!(instr.contains("delete_collection"));
-        assert!(instr.contains("destructive"));
-        assert!(instr.contains("METADATA"));
+        assert!(instr.contains("METADATA"), "scope must be stated");
+        assert!(
+            instr.contains("does NOT fetch PDFs"),
+            "the boundary a client cannot infer from the tool list must be stated"
+        );
+        assert!(
+            instr.contains("batch") && instr.contains("verify_references"),
+            "batch preference must survive, named concretely"
+        );
+        assert!(
+            instr.contains("destructive"),
+            "destructive-tool caution must survive"
+        );
         assert_eq!(info.server_info.name, "ookcite-mcp");
+    }
+
+    /// The instructions field rides in every request. Enumerating each tool's
+    /// trigger there duplicates the tool list the client already has, so the
+    /// triggers live in the tools' own descriptions instead; this guards the
+    /// enumeration from creeping back one line at a time.
+    #[test]
+    fn get_info_instructions_do_not_reenumerate_the_tool_list() {
+        let info = Server::new().get_info();
+        let instr = info.instructions.expect("server instructions set");
+        for phrase in [
+            "use validate_doi",
+            "use lookup_isbn",
+            "use reverse_lookup",
+            "use delete_collection",
+            "use share_collection",
+            "use expand_journal",
+        ] {
+            assert!(
+                !instr.contains(phrase),
+                "instructions re-enumerate the tool list ({phrase}); \
+                 put the trigger in that tool's own description instead"
+            );
+        }
+        assert!(
+            instr.len() < 1500,
+            "instructions grew to {} chars; it is paid on every request",
+            instr.len()
+        );
     }
 
     #[test]
