@@ -2,6 +2,16 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.6.0 - 2026-08-14
+#### Features
+- (**endpoints**) register the ten unwired API operations - (6d895fd) - Rohit Goswami
+- (**helpers**) format usage, batch resolve, and entry metadata edits - (e4d4210) - Rohit Goswami
+- (**mcp**) add ten tools for the previously unreachable operations - (dd6d813) - Rohit Goswami
+#### Continuous Integration
+- (**registry**) publish the MCP registry listing on every tag - (5469ecb) - Rohit Goswami
+
+- - -
+
 ## v0.5.1 - 2026-08-14
 #### Bugfixes
 - (**contract**) restore the npm README mirror and re-anchor the plan gate - (2973ac9) - Rohit Goswami
