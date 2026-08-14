@@ -83,6 +83,7 @@ fn public_quota_claims_match_the_runtime_contract() {
         "batch_move_entries",
         "generate_citation_keys",
         "expand_journal",
+        "normalize_bibliography",
     ] {
         let desc = tool_description(&flat, paid)
             .unwrap_or_else(|| panic!("no description found for {paid}"));
@@ -93,7 +94,20 @@ fn public_quota_claims_match_the_runtime_contract() {
     }
     // Sharing is open to any signed-in account with collections, so those tools
     // must not claim a paid plan.
-    for free in ["share_collection", "unshare_collection", "view_shared"] {
+    for free in [
+        "share_collection",
+        "unshare_collection",
+        "view_shared",
+        "usage",
+        "list_styles",
+        "batch_resolve",
+        "enhanced_search",
+        "orcid_search",
+        "orcid_profile",
+        "ingest_orcid",
+        "update_entry_metadata",
+        "merge_entries",
+    ] {
         let desc = tool_description(&flat, free)
             .unwrap_or_else(|| panic!("no description found for {free}"));
         assert!(
