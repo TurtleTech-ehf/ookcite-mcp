@@ -260,6 +260,71 @@ pub fn resolve_text_body(query: &str, use_live_queries: bool) -> serde_json::Val
     })
 }
 
+/// Body for `POST /api/v1/resolve/batch` in synchronous mode.
+///
+/// Each citation becomes one `ResolveRequest` with the same options
+/// `resolve_text_body` uses for the single-citation path, so a batch and a
+/// sequence of single calls rank identically. The `async` flag is left off:
+/// async mode answers with a job id, and this server exposes no job-polling
+/// tool to collect one.
+pub fn batch_resolve_request_body(
+    citations: &[String],
+    use_live_queries: bool,
+) -> serde_json::Value {
+    let inputs: Vec<serde_json::Value> = citations
+        .iter()
+        .map(|c| resolve_text_body(c, use_live_queries))
+        .collect();
+    serde_json::json!({ "inputs": inputs })
+}
+
+/// One agent-facing line per input, in the order the caller supplied them.
+///
+/// The API returns each result tagged with its `index` in the request array and
+/// failures do not abort the batch, so an item missing from `results` is
+/// reported rather than silently dropped.
+pub fn format_batch_resolve_results(
+    citations: &[String],
+    payload: &serde_json::Value,
+) -> Vec<String> {
+    let results = payload["results"].as_array().cloned().unwrap_or_default();
+    let mut by_index: std::collections::HashMap<usize, &serde_json::Value> =
+        std::collections::HashMap::new();
+    for r in &results {
+        if let Some(idx) = r["index"].as_u64() {
+            by_index.insert(idx as usize, r);
+        }
+    }
+    citations
+        .iter()
+        .enumerate()
+        .map(|(i, citation)| {
+            let n = i + 1;
+            let Some(result) = by_index.get(&i) else {
+                return format!("{n}. NO RESULT | {citation}");
+            };
+            if result["status"].as_str() == Some("error") {
+                let msg = result["message"].as_str().unwrap_or("resolve failed");
+                return format!("{n}. ERROR | {citation} | {msg}");
+            }
+            match resolve_payload_metadata(result) {
+                Some(meta) => {
+                    let title = meta["title"].as_str().unwrap_or("?");
+                    let doi = meta["doi"].as_str().unwrap_or("?");
+                    let journal = meta["journal"].as_str().unwrap_or("N/A");
+                    let year = meta["date"]["year"]
+                        .as_i64()
+                        .map(|y| format!(" ({y})"))
+                        .unwrap_or_default();
+                    let authors = format_author_list(&meta);
+                    format!("{n}. RESOLVED | {title}{year} | {authors} | {journal} | doi:{doi}")
+                }
+                None => format!("{n}. NO CONFIDENT MATCH | {citation}"),
+            }
+        })
+        .collect()
+}
+
 fn is_retryable_lookup_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 502..=504)
 }

@@ -34,6 +34,51 @@ impl MeQuota {
     }
 }
 
+/// Agent-facing lines for `GET /api/v1/me/usage`.
+///
+/// `daily` is always present; `monthly` is null on plans without a monthly
+/// allowance, so its block is emitted only when the server sends one.
+pub fn format_usage_report(v: &serde_json::Value) -> String {
+    let plan = v["plan"].as_str().unwrap_or("?");
+    let authenticated = v["authenticated"].as_bool().unwrap_or(false);
+    let mut lines = vec![
+        format!("Plan: {plan}"),
+        format!(
+            "Authenticated: {}",
+            if authenticated {
+                "yes"
+            } else {
+                "no (anonymous IP limits apply)"
+            }
+        ),
+    ];
+    match (
+        v["daily"]["remaining"].as_i64(),
+        v["daily"]["limit"].as_i64(),
+    ) {
+        (Some(remaining), Some(limit)) => {
+            lines.push(format!("Daily lookups: {remaining} remaining of {limit}"))
+        }
+        _ => lines.push("Daily lookups: not reported".into()),
+    }
+    if let Some(monthly) = v["monthly"].as_object() {
+        let used = monthly["used"].as_i64().unwrap_or(0);
+        let limit = monthly["limit"].as_i64().unwrap_or(0);
+        let remaining = monthly["remaining"].as_i64().unwrap_or(0);
+        lines.push(format!(
+            "Monthly lookups: {remaining} remaining of {limit} ({used} used)"
+        ));
+        if monthly["allows_overage"].as_bool().unwrap_or(false) {
+            lines.push("Monthly overage: billed past the included allowance".into());
+        } else {
+            lines.push(
+                "Monthly overage: not allowed; calls fail once the allowance runs out".into(),
+            );
+        }
+    }
+    lines.join("\n")
+}
+
 /// Result of planning a multi-item metered batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchPreflight {

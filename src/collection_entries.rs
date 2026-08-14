@@ -1,5 +1,7 @@
 //! Collection entry identity helpers (canonical ids, DOI aliases, search lines).
 
+use crate::tool_args::UpdateEntryMetadataArgs;
+
 pub fn normalize_doi_token(raw: &str) -> String {
     let trimmed = raw.trim();
     let without_prefix = trimmed
@@ -64,6 +66,102 @@ pub fn format_collection_entry_line(entry: &serde_json::Value) -> String {
         doi_hint
     };
     format!("- entry_id: {entry_id}{doi_hint}; {authors}{year}: {title}")
+}
+
+/// Split one author string into the API's `Person` shape (`family` is required,
+/// `given` is optional). Accepts both `"Family, Given"` and `"Given Family"`;
+/// a single token becomes a bare family name.
+pub fn person_from_name(raw: &str) -> serde_json::Value {
+    let trimmed = raw.trim();
+    if let Some((family, given)) = trimmed.split_once(',') {
+        let family = family.trim();
+        let given = given.trim();
+        if given.is_empty() {
+            return serde_json::json!({ "family": family });
+        }
+        return serde_json::json!({ "family": family, "given": given });
+    }
+    match trimmed.rsplit_once(char::is_whitespace) {
+        Some((given, family)) => {
+            serde_json::json!({ "family": family.trim(), "given": given.trim() })
+        }
+        None => serde_json::json!({ "family": trimmed }),
+    }
+}
+
+/// Overlay the fields a caller supplied onto an entry's existing metadata.
+///
+/// The API replaces the whole `CitationMetadata` object, and that object has
+/// required fields (`id`, `entry_type`, `title`, `authors`) a partial edit does
+/// not carry. Starting from the stored metadata keeps those intact so a caller
+/// correcting one wrong year does not blank the rest of the record.
+pub fn apply_entry_metadata_overrides(
+    current: &serde_json::Value,
+    args: &UpdateEntryMetadataArgs,
+) -> serde_json::Value {
+    let mut meta = current.as_object().cloned().unwrap_or_default();
+
+    let mut set_str = |key: &str, value: &Option<String>| {
+        if let Some(v) = value {
+            meta.insert(key.into(), serde_json::json!(v));
+        }
+    };
+    set_str("title", &args.title);
+    set_str("journal", &args.journal);
+    set_str("volume", &args.volume);
+    set_str("issue", &args.issue);
+    set_str("pages", &args.pages);
+    set_str("publisher", &args.publisher);
+    set_str("doi", &args.doi);
+    set_str("url", &args.url);
+
+    if let Some(names) = &args.authors {
+        let people: Vec<serde_json::Value> = names
+            .iter()
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| person_from_name(n))
+            .collect();
+        meta.insert("authors".into(), serde_json::Value::Array(people));
+    }
+    if let Some(year) = args.year {
+        // `date` is a DateValue object; keep any month/day already recorded.
+        let mut date = meta
+            .get("date")
+            .and_then(|d| d.as_object().cloned())
+            .unwrap_or_default();
+        date.insert("year".into(), serde_json::json!(year));
+        meta.insert("date".into(), serde_json::Value::Object(date));
+    }
+
+    serde_json::Value::Object(meta)
+}
+
+/// Whether any editable metadata field was supplied.
+pub fn entry_metadata_overrides_present(args: &UpdateEntryMetadataArgs) -> bool {
+    args.title.is_some()
+        || args.authors.is_some()
+        || args.journal.is_some()
+        || args.year.is_some()
+        || args.volume.is_some()
+        || args.issue.is_some()
+        || args.pages.is_some()
+        || args.publisher.is_some()
+        || args.doi.is_some()
+        || args.url.is_some()
+}
+
+/// The stored metadata object for one entry of a collection body. Matches on the
+/// same canonical id `resolve_entry_id_in_collection` returns, so entries that
+/// carry only a DOI alias resolve here too.
+pub fn entry_metadata_by_id<'a>(
+    entries: &'a [serde_json::Value],
+    entry_id: &str,
+) -> Option<&'a serde_json::Value> {
+    entries
+        .iter()
+        .find(|e| entry_canonical_id(e).as_deref() == Some(entry_id))
+        .map(|e| &e["metadata"])
+        .filter(|m| m.is_object())
 }
 
 /// Resolve a user-supplied entry reference (opaque id, `doi:…`, or bare DOI) to the
