@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.TurtleTech-ehf/ookcite-mcp",
   "title": "OokCite",
-  "description": "Validate DOIs and ISBNs against the real record, format citations in 2900+ CSL styles, and catch fabricated references before they ship. Returns citation metadata, not paper content.",
+  "description": "Catch fabricated citations: verify DOIs/ISBNs and format them in 2900+ CSL styles.",
   "repository": {
     "url": "https://github.com/TurtleTech-ehf/ookcite-mcp",
     "source": "github"
