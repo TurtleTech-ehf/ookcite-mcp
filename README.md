@@ -89,6 +89,39 @@ With an API key:
 If you installed globally (`npm install -g` or `cargo install`), you can use
 `"command": "ookcite-mcp"` directly instead of npx.
 
+### Keeping the key out of the config file
+
+`npm/scripts/ookcite-mcp-credential-helper` fetches the key at launch and execs the
+server, so the config names a command instead of holding a secret:
+
+```json
+{
+  "mcpServers": {
+    "ookcite": {
+      "command": "/path/to/ookcite-mcp-credential-helper",
+      "env": {
+        "OOKCITE_API_KEY_COMMAND": "pass show services/ookcite-api-key"
+      }
+    }
+  }
+}
+```
+
+It also takes `OOKCITE_API_KEY_FILE` for a plain file, and `OOKCITE_API_KEY`
+still wins if it is already set. With none of them the server starts anonymous.
+
+Write your own wrapper instead and two things will bite, both of which present
+as the server hanging rather than as a credential error:
+
+- **Anything run before `exec` inherits stdin, which belongs to the client.**
+  A helper that reads stdin consumes the `initialize` request; the server then
+  waits for a message that is already gone until the client gives up. Redirect
+  every command from `/dev/null`.
+- **A secret store can block indefinitely.** gpg asks for a passphrase over its
+  own agent socket, which `</dev/null` does not reach, so a locked key parks the
+  launch on a prompt the client never shows. Bound the lookup well inside the
+  client's connect timeout; `OOKCITE_API_KEY_TIMEOUT` defaults to 10 seconds.
+
 Consult your client's MCP documentation for its configuration-file location.
 Use the `mcpServers.ookcite` JSON above when automatic setup is unavailable,
 then restart the client or reload its MCP servers.
@@ -101,8 +134,10 @@ Optional env (stdio MCP, all clients):
 | `OOKCITE_API` | Override API base URL (default `https://ookcite-api.turtletech.us`) |
 | `OOKCITE_MCP_READ_ONLY` | `1` hard-disables collection mutations (review / CI automation) |
 | `OOKCITE_MCP_ALLOW_MUTATE` | `0` denies mutations; unset or `1` allows (API key still required server-side) |
-| `OOKCITE_STARTUP_PROBES` | `1` runs auth/update checks on stderr at MCP launch |
-| `OOKCITE_STARTUP_PROBES=1` | Run auth + npm update checks on **stderr** before accepting MCP connections (default off for faster connect) |
+| `OOKCITE_STARTUP_PROBES` | `1` runs auth + npm update checks on **stderr** before accepting MCP connections (default off for faster connect) |
+| `OOKCITE_API_KEY_COMMAND` | Credential helper only: command printing the key on stdout |
+| `OOKCITE_API_KEY_FILE` | Credential helper only: file whose first line is the key |
+| `OOKCITE_API_KEY_TIMEOUT` | Credential helper only: seconds to allow the lookup (default 10) |
 
 ### MCP usage tips
 

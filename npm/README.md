@@ -89,6 +89,18 @@ With an API key:
 If you installed globally (`npm install -g` or `cargo install`), you can use
 `"command": "ookcite-mcp"` directly instead of npx.
 
+To keep the key out of the config file, point `command` at the credential
+helper shipped in this package
+(`node_modules/@turtletech/ookcite-mcp/scripts/ookcite-mcp-credential-helper`)
+and set
+`OOKCITE_API_KEY_COMMAND` (for example `pass show services/ookcite-api-key`) or
+`OOKCITE_API_KEY_FILE` in `env`. If you write your own wrapper instead, run
+every command in it with `</dev/null` and a timeout: a helper that reads stdin
+eats the client's `initialize` request, and a secret store waiting on a
+passphrase prompt parks the launch past the client's connect timeout. Both
+present as the server hanging rather than as a credential problem. The main
+README has the detail.
+
 Consult your client's MCP documentation for its configuration-file location.
 Use the `mcpServers.ookcite` JSON above when automatic setup is unavailable,
 then restart the client or reload its MCP servers.
@@ -101,8 +113,10 @@ Optional env (stdio MCP, all clients):
 | `OOKCITE_API` | Override API base URL (default `https://ookcite-api.turtletech.us`) |
 | `OOKCITE_MCP_READ_ONLY` | `1` hard-disables collection mutations (review / CI automation) |
 | `OOKCITE_MCP_ALLOW_MUTATE` | `0` denies mutations; unset or `1` allows (API key still required server-side) |
-| `OOKCITE_STARTUP_PROBES` | `1` runs auth/update checks on stderr at MCP launch |
-| `OOKCITE_STARTUP_PROBES=1` | Run auth + npm update checks on **stderr** before accepting MCP connections (default off for faster connect) |
+| `OOKCITE_STARTUP_PROBES` | `1` runs auth + npm update checks on **stderr** before accepting MCP connections (default off for faster connect) |
+| `OOKCITE_API_KEY_COMMAND` | Credential helper only: command printing the key on stdout |
+| `OOKCITE_API_KEY_FILE` | Credential helper only: file whose first line is the key |
+| `OOKCITE_API_KEY_TIMEOUT` | Credential helper only: seconds to allow the lookup (default 10) |
 
 ### MCP usage tips
 
