@@ -26,6 +26,10 @@ pub const DOI_CACHE_TTL_SECS: u64 = 600;
 /// Anonymous / no-key: refuse metered batches larger than this (IP daily limit ~20).
 pub const ANON_BATCH_SOFT_CAP: u32 = 8;
 
+/// Inputs the synchronous `/api/v1/resolve/batch` path accepts. The async mode
+/// takes 1000 but answers with a job id, and no tool here polls jobs.
+pub const SYNC_BATCH_RESOLVE_LIMIT: usize = 50;
+
 /// When set to `1`/`true`/`yes`, MCP stdio startup runs blocking auth + npm
 /// update probes on stderr before accepting connections. Default is off so
 /// clients reach the server faster; probes are diagnostics only.
