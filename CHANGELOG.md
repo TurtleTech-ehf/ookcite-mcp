@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.5.1 - 2026-08-14
+#### Bugfixes
+- (**contract**) restore the npm README mirror and re-anchor the plan gate - (2973ac9) - Rohit Goswami
+
+- - -
+
 ## v0.5.0 - 2026-08-14
 #### Features
 - (**mcp**) ship a credential helper that keeps the key out of client config - (7448748) - Rohit Goswami
