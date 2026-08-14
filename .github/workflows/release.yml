@@ -135,3 +135,42 @@ jobs:
               exit 1
             fi
           }
+
+  registry-publish:
+    name: Publish to the MCP registry
+    needs: [publish, npm-publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # OIDC proves this workflow runs in TurtleTech-ehf/ookcite-mcp, which is
+      # what authorises the io.github.TurtleTech-ehf/* namespace. No stored
+      # credential, and the listing cannot drift from the tag that produced it.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install mcp-publisher
+        run: |
+          VERSION=1.8.1
+          curl -fsSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v${VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          tar -xzf mcp-publisher.tar.gz mcp-publisher
+          chmod +x mcp-publisher
+
+      - name: Check the manifest matches the tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          MANIFEST_VERSION="$(jq -r .version server.json)"
+          PACKAGE_VERSION="$(jq -r '.packages[0].version' server.json)"
+          for got in "$MANIFEST_VERSION" "$PACKAGE_VERSION"; do
+            if [ "$got" != "$TAG_VERSION" ]; then
+              echo "server.json says $got but the tag is $TAG_VERSION;" \
+                   "scripts/set-version.sh should have moved both" >&2
+              exit 1
+            fi
+          done
+
+      - name: Publish
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
