@@ -1,5 +1,7 @@
 //! HTTP error formatting and classification for tool responses.
 
+use crate::constants::rate_limit_hint;
+
 /// Extract a useful error message from a failed HTTP response.
 pub async fn error_detail(resp: reqwest::Response) -> String {
     let status = resp.status();
@@ -21,7 +23,11 @@ pub async fn error_detail(resp: reqwest::Response) -> String {
 
 pub async fn classify_lookup_doi_failure(resp: reqwest::Response, doi: &str) -> String {
     if resp.status().as_u16() == 429 {
-        format!("RATE LIMITED {doi} : {}", error_detail(resp).await)
+        format!(
+            "RATE LIMITED {doi} : {}\n{}",
+            error_detail(resp).await,
+            rate_limit_hint()
+        )
     } else if matches!(resp.status().as_u16(), 401 | 403) {
         format!("ACCESS DENIED {doi} : {}", error_detail(resp).await)
     } else if resp.status().is_server_error() {

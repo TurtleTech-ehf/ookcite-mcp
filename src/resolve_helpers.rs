@@ -2,6 +2,7 @@
 
 use tokio::time::{sleep, Duration};
 
+use crate::constants::rate_limit_hint;
 use crate::http_error::error_detail;
 use crate::tool_args::ReverseArgs;
 use ookcite_mcp::endpoints;
@@ -89,9 +90,11 @@ pub async fn classify_reverse_lookup_response(
             let payload: serde_json::Value = resp.json().await.unwrap_or_default();
             Ok(format_reverse_lookup_payload(&payload))
         }
-        Ok(r) if r.status().as_u16() == 429 => {
-            Err(format!("RATE LIMITED: {}", error_detail(r).await))
-        }
+        Ok(r) if r.status().as_u16() == 429 => Err(format!(
+            "RATE LIMITED: {}\n{}",
+            error_detail(r).await,
+            rate_limit_hint()
+        )),
         Ok(r) if r.status().as_u16() == 403 => {
             Err(format!("ACCESS DENIED: {}", error_detail(r).await))
         }
