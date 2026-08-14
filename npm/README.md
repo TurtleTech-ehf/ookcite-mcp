@@ -89,17 +89,38 @@ With an API key:
 If you installed globally (`npm install -g` or `cargo install`), you can use
 `"command": "ookcite-mcp"` directly instead of npx.
 
-To keep the key out of the config file, point `command` at the credential
-helper shipped in this package
-(`node_modules/@turtletech/ookcite-mcp/scripts/ookcite-mcp-credential-helper`)
-and set
-`OOKCITE_API_KEY_COMMAND` (for example `pass show services/ookcite-api-key`) or
-`OOKCITE_API_KEY_FILE` in `env`. If you write your own wrapper instead, run
-every command in it with `</dev/null` and a timeout: a helper that reads stdin
-eats the client's `initialize` request, and a secret store waiting on a
-passphrase prompt parks the launch past the client's connect timeout. Both
-present as the server hanging rather than as a credential problem. The main
-README has the detail.
+### Keeping the key out of the config file
+
+`npm/scripts/ookcite-mcp-credential-helper` fetches the key at launch and execs the
+server, so the config names a command instead of holding a secret:
+
+```json
+{
+  "mcpServers": {
+    "ookcite": {
+      "command": "/path/to/ookcite-mcp-credential-helper",
+      "env": {
+        "OOKCITE_API_KEY_COMMAND": "pass show services/ookcite-api-key"
+      }
+    }
+  }
+}
+```
+
+It also takes `OOKCITE_API_KEY_FILE` for a plain file, and `OOKCITE_API_KEY`
+still wins if it is already set. With none of them the server starts anonymous.
+
+Write your own wrapper instead and two things will bite, both of which present
+as the server hanging rather than as a credential error:
+
+- **Anything run before `exec` inherits stdin, which belongs to the client.**
+  A helper that reads stdin consumes the `initialize` request; the server then
+  waits for a message that is already gone until the client gives up. Redirect
+  every command from `/dev/null`.
+- **A secret store can block indefinitely.** gpg asks for a passphrase over its
+  own agent socket, which `</dev/null` does not reach, so a locked key parks the
+  launch on a prompt the client never shows. Bound the lookup well inside the
+  client's connect timeout; `OOKCITE_API_KEY_TIMEOUT` defaults to 10 seconds.
 
 Consult your client's MCP documentation for its configuration-file location.
 Use the `mcpServers.ookcite` JSON above when automatic setup is unavailable,
