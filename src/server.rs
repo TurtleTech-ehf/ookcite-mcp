@@ -17,7 +17,8 @@ use crate::http_error::{
 use crate::policy::{self, block_mutate};
 use crate::resolve_helpers::{
     classify_reverse_lookup_response, format_resolve_candidates, lookup_doi_with_retry,
-    resolve_payload_metadata, resolve_text_body, reverse_lookup_resolve_body,
+    resolve_payload_metadata, resolve_text_body, resolver_answer_agrees_with_ranking,
+    reverse_lookup_resolve_body,
 };
 use crate::tool_args::*;
 use futures::{stream, StreamExt};
@@ -1281,32 +1282,39 @@ impl Server {
                 .json(&resolve_text_body(q, use_live_queries))
                 .send()
                 .await;
-            match resolve {
+            let resolved = match resolve {
                 Ok(r) if r.status().is_success() => {
                     let payload: serde_json::Value = r.json().await.unwrap_or_default();
-                    if let Some(metadata) = resolve_payload_metadata(&payload) {
-                        return Some(metadata);
-                    }
+                    resolve_payload_metadata(&payload)
                 }
-                _ => {}
-            }
+                _ => None,
+            };
 
-            if !use_live_queries {
-                return None;
-            }
-
-            let reverse = self
+            // /api/v1/reverse ranks the local corpus; it is not a live
+            // upstream provider, so it runs whatever use_live_queries
+            // says. Gating it behind that flag made the default path skip
+            // the one ranker that had the paper, and citations came back
+            // "Not found" for papers the corpus ranks well.
+            let ranked: Vec<serde_json::Value> = match self
                 .request(endpoints::REVERSE, &[])
                 .json(&serde_json::json!({"text": q}))
                 .send()
-                .await;
-            match reverse {
-                Ok(r) if r.status().is_success() => {
-                    let results: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
-                    results.first().and_then(|r| r.get("metadata")).cloned()
+                .await
+            {
+                Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+                _ => Vec::new(),
+            };
+
+            if let Some(metadata) = resolved {
+                if resolver_answer_agrees_with_ranking(&metadata, &ranked) {
+                    return Some(metadata);
                 }
-                _ => None,
+                eprintln!(
+                    "ookcite-mcp: resolver answer for {q:?} is absent from the ranked candidates; taking the ranking"
+                );
             }
+
+            ranked.first().and_then(|r| r.get("metadata")).cloned()
         }
     }
 
@@ -3634,7 +3642,11 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/v1/reverse"))
             .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
-            .expect(0)
+            // The ranker is consulted on every free-text resolve now, so the
+            // resolver's answer can be checked against a ranked candidate
+            // set instead of being taken on its own word. An empty ranking
+            // cannot overrule it, so the outcome below is unchanged.
+            .expect(1)
             .mount(&mock)
             .await;
 
@@ -3783,7 +3795,11 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/v1/reverse"))
             .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
-            .expect(0)
+            // The ranker is consulted on every free-text resolve now, so the
+            // resolver's answer can be checked against a ranked candidate
+            // set instead of being taken on its own word. An empty ranking
+            // cannot overrule it, so the outcome below is unchanged.
+            .expect(1)
             .mount(&mock)
             .await;
         Mock::given(method("POST"))

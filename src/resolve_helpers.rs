@@ -206,6 +206,48 @@ pub fn resolve_payload_metadata(payload: &serde_json::Value) -> Option<serde_jso
         .cloned()
 }
 
+/// The DOI a metadata object names, lowercased and bare.
+pub fn metadata_doi(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("doi")
+        .and_then(|value| value.as_str())
+        .map(|doi| {
+            doi.trim()
+                .to_ascii_lowercase()
+                .trim_start_matches("doi:")
+                .to_string()
+        })
+        .filter(|doi| !doi.is_empty())
+}
+
+/// Whether the resolver's answer survives comparison with the ranked
+/// candidates from `/api/v1/reverse`.
+///
+/// The two paths used to answer independently: whatever `/resolve`
+/// returned was taken, and `/reverse` was consulted only when it
+/// returned nothing. So a citation could format as a paper the ranker
+/// placed third while its own top hit scored more than twice as high.
+///
+/// A resolver answer is kept when the ranker did not run, returned
+/// nothing, or lists that DOI anywhere in its candidates. It loses only
+/// when the ranker produced a set that does not contain it at all: an
+/// answer absent from the ranked set was never ranked.
+pub fn resolver_answer_agrees_with_ranking(
+    resolved: &serde_json::Value,
+    ranked: &[serde_json::Value],
+) -> bool {
+    if ranked.is_empty() {
+        return true;
+    }
+    let Some(resolved_doi) = metadata_doi(resolved) else {
+        return true;
+    };
+    ranked
+        .iter()
+        .filter_map(|item| item.get("metadata").and_then(metadata_doi))
+        .any(|doi| doi == resolved_doi)
+}
+
 pub fn resolve_text_body(query: &str, use_live_queries: bool) -> serde_json::Value {
     serde_json::json!({
         "input": { "kind": "text", "text": query },
@@ -263,5 +305,65 @@ mod tests {
         ] {
             assert!(is_retryable_lookup_status(status), "status {status}");
         }
+    }
+}
+
+#[cfg(test)]
+mod pooled_candidate_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ranked(dois: &[&str]) -> Vec<serde_json::Value> {
+        dois.iter()
+            .map(|doi| json!({"metadata": {"doi": doi}}))
+            .collect()
+    }
+
+    #[test]
+    fn a_resolver_answer_the_ranker_also_lists_is_kept() {
+        let resolved = json!({"doi": "10.1145/2009916.2010048"});
+        assert!(resolver_answer_agrees_with_ranking(
+            &resolved,
+            &ranked(&["10.1145/3626772.3657906", "10.1145/2009916.2010048"]),
+        ));
+    }
+
+    /// The shape that formatted a citation as the wrong paper: the
+    /// resolver returned a record the ranker placed nowhere, while the
+    /// ranker's own top hit was the paper asked for.
+    #[test]
+    fn a_resolver_answer_absent_from_the_ranking_loses() {
+        let resolved = json!({"doi": "10.18653/v1/d19-1261"});
+        assert!(!resolver_answer_agrees_with_ranking(
+            &resolved,
+            &ranked(&["10.1007/978-3-030-15712-8_23", "10.18653/v1/d19-1612"]),
+        ));
+    }
+
+    #[test]
+    fn an_empty_ranking_cannot_overrule_the_resolver() {
+        let resolved = json!({"doi": "10.1145/2009916.2010048"});
+        assert!(resolver_answer_agrees_with_ranking(&resolved, &[]));
+    }
+
+    #[test]
+    fn an_answer_without_a_doi_is_left_alone() {
+        assert!(resolver_answer_agrees_with_ranking(
+            &json!({"title": "A paper with no DOI"}),
+            &ranked(&["10.1145/2009916.2010048"]),
+        ));
+    }
+
+    #[test]
+    fn doi_comparison_ignores_case_and_the_doi_prefix() {
+        let resolved = json!({"doi": "DOI:10.1145/2009916.2010048"});
+        assert!(resolver_answer_agrees_with_ranking(
+            &resolved,
+            &ranked(&["10.1145/2009916.2010048"]),
+        ));
+        assert_eq!(
+            metadata_doi(&json!({"doi": " doi:10.1/AB "})).as_deref(),
+            Some("10.1/ab")
+        );
     }
 }
