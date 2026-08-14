@@ -1,24 +1,26 @@
 //! MCP server: tool router, HTTP client, and handlers.
 
 use crate::batch_limits::{
-    collect_dois_from_collection_body, format_member_valid_lines, plan_metered_batch,
-    read_only_concurrency, DoiResponseCache, MeQuota,
+    collect_dois_from_collection_body, format_member_valid_lines, format_usage_report,
+    plan_metered_batch, read_only_concurrency, DoiResponseCache, MeQuota,
 };
 use crate::collection_entries::{
-    entry_doi, format_collection_entry_line, looks_like_doi_token, resolve_entry_id_in_collection,
+    apply_entry_metadata_overrides, entry_doi, entry_metadata_by_id,
+    entry_metadata_overrides_present, format_collection_entry_line, looks_like_doi_token,
+    resolve_entry_id_in_collection,
 };
 use crate::constants::{
     api_base_url, build_api_client, setup_help_block, MIN_CONFIDENT_REVERSE_LOOKUP_SCORE,
-    MUTATE_BATCH_CONCURRENCY,
+    MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail,
 };
 use crate::policy::{self, block_mutate};
 use crate::resolve_helpers::{
-    classify_reverse_lookup_response, format_resolve_candidates, lookup_doi_with_retry,
-    resolve_payload_metadata, resolve_text_body, resolver_answer_agrees_with_ranking,
-    reverse_lookup_resolve_body,
+    batch_resolve_request_body, classify_reverse_lookup_response, format_batch_resolve_results,
+    format_resolve_candidates, lookup_doi_with_retry, resolve_payload_metadata, resolve_text_body,
+    resolver_answer_agrees_with_ranking, reverse_lookup_resolve_body,
 };
 use crate::tool_args::*;
 use futures::{stream, StreamExt};
@@ -258,6 +260,7 @@ impl Server {
         match ep.method {
             "GET" => self.http.get(url),
             "POST" => self.http.post(url),
+            "PUT" => self.http.put(url),
             "PATCH" => self.http.patch(url),
             "DELETE" => self.http.delete(url),
             other => panic!(
@@ -1155,11 +1158,11 @@ impl Server {
     }
 
     /// Load collection entries and resolve `needle` to the canonical entry id for DELETE.
-    async fn resolve_collection_entry_id(
+    /// Entry objects of one collection, as the API stores them.
+    async fn fetch_collection_entries(
         &self,
         col_id: &str,
-        needle: &str,
-    ) -> Result<String, String> {
+    ) -> Result<Vec<serde_json::Value>, String> {
         let r = self
             .request(endpoints::COLLECTION_GET, &[("id", col_id)])
             .send()
@@ -1174,10 +1177,18 @@ impl Server {
             }
             Err(e) => return Err(format!("Failed to load collection for entry lookup: {e}")),
         };
-        let entries = collection["entries"]
+        Ok(collection["entries"]
             .as_array()
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default())
+    }
+
+    async fn resolve_collection_entry_id(
+        &self,
+        col_id: &str,
+        needle: &str,
+    ) -> Result<String, String> {
+        let entries = self.fetch_collection_entries(col_id).await?;
         if let Some(id) = resolve_entry_id_in_collection(&entries, needle) {
             return Ok(id);
         }
@@ -2080,6 +2091,595 @@ impl Server {
             Err(e) => format!("Journal expansion failed: {e}"),
         }
     }
+
+    // --- Quota, styles, and batch resolve ---
+
+    #[tool(
+        name = "usage",
+        description = "Report the plan in effect and how much of the lookup quota is left. Call this when the user asks how many lookups they have remaining, or before a large batch to check whether it will fit under the daily cap. Returns the plan name, whether the request authenticated, and daily remaining/limit, plus the monthly allowance on plans that carry one.",
+        annotations(
+            title = "Show plan and quota usage",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    async fn usage(&self, Parameters(_args): Parameters<UsageArgs>) -> String {
+        match self.request(endpoints::ME_USAGE, &[]).send().await {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                format_usage_report(&data)
+            }
+            Ok(r) => format!("Failed to read usage: {}", error_detail(r).await),
+            Err(e) => format!("Failed to read usage: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "list_styles",
+        description = "List the CSL citation styles this server carries, one page at a time. Call this when the user wants to browse or enumerate what is available rather than find a style they can already name -- search_styles answers a named style faster. Returns style ID, title, and category per entry; page through the full list with offset and limit.",
+        annotations(
+            title = "List CSL styles",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    async fn list_styles(&self, Parameters(args): Parameters<ListStylesArgs>) -> String {
+        let offset = args.offset.to_string();
+        let limit = args.limit.to_string();
+        let r = self
+            .request(endpoints::STYLES_LIST, &[])
+            .query(&[("offset", offset.as_str()), ("limit", limit.as_str())])
+            .send()
+            .await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let styles: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
+                if styles.is_empty() {
+                    return format!("No styles at offset {offset}.");
+                }
+                let mut out = Vec::with_capacity(styles.len() + 1);
+                for s in &styles {
+                    let id = s["id"].as_str().unwrap_or("?");
+                    let title = s["title"].as_str().unwrap_or("?");
+                    let category = s["category"].as_str().unwrap_or("Unknown");
+                    out.push(format!("ID: {id} | Title: {title} | Category: {category}"));
+                }
+                out.push(format!(
+                    "({} styles from offset {offset}; next page: offset={})",
+                    styles.len(),
+                    args.offset as u64 + styles.len() as u64
+                ));
+                out.join("\n")
+            }
+            Ok(r) => format!("Failed to list styles: {}", error_detail(r).await),
+            Err(e) => format!("Failed to list styles: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "batch_resolve",
+        description = "Resolve many free-text citation strings in one request and report what each one matched. Call this when the user hands over a block of references and wants to know which are real papers without formatting them -- batch_format resolves and then renders each in a CSL style. Every input resolves independently so one failure does not abort the rest; the synchronous endpoint accepts at most 50 inputs per call.",
+        annotations(
+            title = "Batch resolve citations",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    async fn batch_resolve(&self, Parameters(args): Parameters<BatchResolveArgs>) -> String {
+        if args.citations.is_empty() {
+            return "No citations supplied.".into();
+        }
+        if args.citations.len() > SYNC_BATCH_RESOLVE_LIMIT {
+            return format!(
+                "REFUSED: {} citations exceeds the {SYNC_BATCH_RESOLVE_LIMIT}-input limit for a synchronous batch. Split the list and call again.",
+                args.citations.len()
+            );
+        }
+        let body = batch_resolve_request_body(&args.citations, args.use_live_queries);
+        let r = self
+            .request(endpoints::RESOLVE_BATCH, &[])
+            .json(&body)
+            .send()
+            .await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let payload: serde_json::Value = r.json().await.unwrap_or_default();
+                format_batch_resolve_results(&args.citations, &payload).join("\n")
+            }
+            Ok(r) if r.status().as_u16() == 429 => {
+                format!("RATE LIMITED: {}", error_detail(r).await)
+            }
+            Ok(r) => format!("Batch resolve failed: {}", error_detail(r).await),
+            Err(e) => format!("Batch resolve failed: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "normalize_bibliography",
+        description = "Re-render a BibTeX or RIS bibliography as canonical BibTeX with consistent keys and field order. Requires an academic or business plan. Call this when the user has a messy .bib or .ris file they want cleaned up as text, without saving anything -- import_bibliography is the tool that puts the entries into a collection. Returns the parsed entry count and the rewritten content; nothing is stored server-side.",
+        annotations(
+            title = "Normalize bibliography",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    async fn normalize_bibliography(
+        &self,
+        Parameters(args): Parameters<NormalizeBibliographyArgs>,
+    ) -> String {
+        let r = self
+            .request(endpoints::BIBLIOGRAPHY_NORMALIZE, &[])
+            .json(&serde_json::json!({
+                "content": args.content,
+                "format": args.format,
+            }))
+            .send()
+            .await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                let count = data["count"].as_u64().unwrap_or(0);
+                let content = data["content"].as_str().unwrap_or("");
+                format!("Normalized {count} entries.\n\n{content}")
+            }
+            Ok(r) => format!("Normalization failed: {}", error_detail(r).await),
+            Err(e) => format!("Normalization failed: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "enhanced_search",
+        description = "Search the citation corpus and optionally aggregate the hits by author, category, or citation statistics. Call this when the user wants an overview of a topic or a researcher's output -- who publishes on it, how it splits by topic, how heavily it is cited -- rather than the metadata of one known paper. Returns scored matches plus whichever facets were requested; the facets summarize the whole result set, not just the page returned.",
+        annotations(
+            title = "Enhanced corpus search",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    async fn enhanced_search(&self, Parameters(args): Parameters<EnhancedSearchArgs>) -> String {
+        if args.q.trim().is_empty() {
+            return "No query supplied.".into();
+        }
+        let limit = args.limit.to_string();
+        let offset = args.offset.to_string();
+        let mut query: Vec<(&str, &str)> = vec![
+            ("q", args.q.as_str()),
+            ("limit", limit.as_str()),
+            ("offset", offset.as_str()),
+        ];
+        for (name, on) in [
+            ("include_authors", args.include_authors),
+            ("include_categories", args.include_categories),
+            ("include_citation_stats", args.include_citation_stats),
+        ] {
+            if on {
+                query.push((name, "true"));
+            }
+        }
+        let r = self
+            .request(endpoints::SEARCH_ENHANCED, &[])
+            .query(&query)
+            .send()
+            .await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                format_enhanced_search(&data)
+            }
+            Ok(r) if r.status().as_u16() == 429 => {
+                format!("RATE LIMITED: {}", error_detail(r).await)
+            }
+            Ok(r) => format!("Enhanced search failed: {}", error_detail(r).await),
+            Err(e) => format!("Enhanced search failed: {e}"),
+        }
+    }
+
+    // --- ORCID ---
+
+    #[tool(
+        name = "orcid_search",
+        description = "Find ORCID author profiles by name, affiliation, or ORCID ID. Call this when the user names a researcher and you need their ORCID ID before filtering reverse_lookup by orcid, or when two authors share a surname and you need to tell them apart. Returns ranked profiles with ORCID ID, name, affiliations, work count, and a few of their DOIs; the server answers 503 when the ORCID index is not configured.",
+        annotations(
+            title = "Search ORCID authors",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    async fn orcid_search(&self, Parameters(args): Parameters<OrcidSearchArgs>) -> String {
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if let Some(author) = args
+            .author
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            query.push(("author", author.to_string()));
+        }
+        if let Some(aff) = args
+            .affiliation
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            query.push(("affiliation", aff.to_string()));
+        }
+        if let Some(orcid) = args
+            .orcid
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            query.push(("orcid", orcid.to_string()));
+        }
+        if query.is_empty() {
+            return "Provide at least one of author, affiliation, or orcid.".into();
+        }
+        if let Some(limit) = args.limit {
+            query.push(("limit", limit.to_string()));
+        }
+        let r = self
+            .request(endpoints::ORCID_SEARCH, &[])
+            .query(&query)
+            .send()
+            .await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                let hits = data["hits"].as_array().cloned().unwrap_or_default();
+                if hits.is_empty() {
+                    return "No ORCID profiles matched.".into();
+                }
+                hits.iter()
+                    .map(format_orcid_hit)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            Ok(r) if r.status().as_u16() == 503 => {
+                "ORCID author index is not configured on this server.".into()
+            }
+            Ok(r) => format!("ORCID search failed: {}", error_detail(r).await),
+            Err(e) => format!("ORCID search failed: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "orcid_profile",
+        description = "Fetch one ORCID author profile by its ORCID ID. Call this when the user supplies an ORCID ID directly and wants to know whose it is or what that person has published. Returns the name, affiliations, work count, and a sample of DOIs for that ID, or reports that no profile exists for it.",
+        annotations(
+            title = "Get ORCID profile",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    async fn orcid_profile(&self, Parameters(args): Parameters<OrcidProfileArgs>) -> String {
+        let orcid_id = args.orcid_id.trim();
+        if orcid_id.is_empty() {
+            return "No ORCID ID supplied.".into();
+        }
+        let r = self
+            .request(endpoints::ORCID_PROFILE, &[("orcid_id", orcid_id)])
+            .send()
+            .await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let hit: serde_json::Value = r.json().await.unwrap_or_default();
+                format_orcid_hit(&hit)
+            }
+            Ok(r) if r.status().as_u16() == 404 => {
+                format!("No ORCID profile found for {orcid_id}.")
+            }
+            Ok(r) if r.status().as_u16() == 503 => {
+                "ORCID author index is not configured on this server.".into()
+            }
+            Ok(r) => format!("ORCID profile lookup failed: {}", error_detail(r).await),
+            Err(e) => format!("ORCID profile lookup failed: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "ingest_orcid",
+        description = "Pull an ORCID profile's publication list into the server's local search index. Call this when a researcher's papers are missing from reverse_lookup or enhanced_search and the user wants them findable there. Returns counts of works fetched, ingested, enriched, and skipped, plus any per-work errors; works already indexed are skipped rather than duplicated, and nothing is added to the user's collections.",
+        annotations(
+            title = "Ingest ORCID publications",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn ingest_orcid(&self, Parameters(args): Parameters<IngestOrcidArgs>) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
+        let orcid = args.orcid.trim();
+        if orcid.is_empty() {
+            return "No ORCID ID supplied.".into();
+        }
+        let r = self
+            .request(endpoints::INGEST_ORCID, &[])
+            .json(&serde_json::json!({
+                "orcid": orcid,
+                "enrich_via_crossref": args.enrich_via_crossref,
+            }))
+            .send()
+            .await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                let count = |key: &str| data[key].as_u64().unwrap_or(0);
+                let mut out = vec![format!(
+                    "Ingested {orcid}: {} fetched, {} indexed, {} enriched, {} skipped.",
+                    count("works_fetched"),
+                    count("works_ingested"),
+                    count("works_enriched"),
+                    count("works_skipped")
+                )];
+                if let Some(errors) = data["errors"].as_array().filter(|e| !e.is_empty()) {
+                    out.push(format!("{} errors:", errors.len()));
+                    for e in errors.iter().take(10) {
+                        out.push(format!("- {}", e.as_str().unwrap_or("?")));
+                    }
+                }
+                out.join("\n")
+            }
+            Ok(r) if r.status().as_u16() == 503 => {
+                "The index that receives ingested works is not available on this server.".into()
+            }
+            Ok(r) => format!("ORCID ingest failed: {}", error_detail(r).await),
+            Err(e) => format!("ORCID ingest failed: {e}"),
+        }
+    }
+
+    // --- Entry-level collection edits ---
+
+    #[tool(
+        name = "update_entry_metadata",
+        description = "Correct the stored metadata of one collection entry: title, authors, journal, year, volume, issue, pages, publisher, DOI, or URL. Call this when a DOI resolved to the wrong record, or came back with fields missing, and the user wants the saved entry fixed rather than removed and re-added. Fields left unset keep their current values, and the entry's tags, note, and position in the collection are preserved.",
+        annotations(
+            title = "Edit collection entry metadata",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn update_entry_metadata(
+        &self,
+        Parameters(args): Parameters<UpdateEntryMetadataArgs>,
+    ) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
+        if !entry_metadata_overrides_present(&args) {
+            return "Nothing to update. Provide at least one of title, authors, journal, year, volume, issue, pages, publisher, doi, or url.".into();
+        }
+        let col_id = match self.resolve_collection_id(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let entries = match self.fetch_collection_entries(&col_id).await {
+            Ok(e) => e,
+            Err(e) => return e,
+        };
+        let Some(eid) = resolve_entry_id_in_collection(&entries, &args.entry_id) else {
+            return format!(
+                "Entry not found in collection for reference '{}'. Use search_collection to list entry_id values (or pass a bare DOI / doi:10.x/y).",
+                args.entry_id.trim()
+            );
+        };
+        let Some(current) = entry_metadata_by_id(&entries, &eid) else {
+            return format!("Entry {eid} has no stored metadata to edit.");
+        };
+        let metadata = apply_entry_metadata_overrides(current, &args);
+        let r = self
+            .request(
+                endpoints::COLLECTION_ENTRY_METADATA,
+                &[("id", &col_id), ("eid", &eid)],
+            )
+            .json(&serde_json::json!({ "metadata": metadata }))
+            .send()
+            .await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let entry: serde_json::Value = r.json().await.unwrap_or_default();
+                let title = entry["metadata"]["title"]
+                    .as_str()
+                    .or_else(|| metadata["title"].as_str())
+                    .unwrap_or("");
+                if title.is_empty() {
+                    format!("Updated entry {eid} in '{}'.", args.collection)
+                } else {
+                    format!("Updated entry {eid} in '{}': {title}", args.collection)
+                }
+            }
+            Ok(r) => format!("Failed to update entry metadata: {}", error_detail(r).await),
+            Err(e) => format!("Failed to update entry metadata: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "merge_entries",
+        description = "Merge two entries of the same collection into one, keeping the entry named by keep_entry_id. Call this when check_duplicates or search_collection shows the same paper saved twice and the user wants a single record. The absorbed entry is deleted permanently -- its non-empty fields fill gaps in the keeper, tags are unioned and notes concatenated -- so confirm which entry should survive before calling.",
+        annotations(
+            title = "Merge collection entries",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    async fn merge_entries(&self, Parameters(args): Parameters<MergeEntriesArgs>) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
+        let col_id = match self.resolve_collection_id(&args.collection).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let keep = match self
+            .resolve_collection_entry_id(&col_id, &args.keep_entry_id)
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let absorb = match self
+            .resolve_collection_entry_id(&col_id, &args.absorb_entry_id)
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        if keep == absorb {
+            return format!(
+                "keep_entry_id and absorb_entry_id both resolve to {keep}; nothing to merge."
+            );
+        }
+        let r = self
+            .request(
+                endpoints::COLLECTION_ENTRY_MERGE,
+                &[("id", &col_id), ("eid", &keep)],
+            )
+            .json(&serde_json::json!({ "absorb_id": absorb }))
+            .send()
+            .await;
+        match r {
+            Ok(r) if r.status().is_success() => {
+                let entry: serde_json::Value = r.json().await.unwrap_or_default();
+                let title = entry["metadata"]["title"].as_str().unwrap_or("");
+                if title.is_empty() {
+                    format!("Merged {absorb} into {keep} in '{}'.", args.collection)
+                } else {
+                    format!(
+                        "Merged {absorb} into {keep} in '{}': {title}",
+                        args.collection
+                    )
+                }
+            }
+            Ok(r) => format!("Failed to merge entries: {}", error_detail(r).await),
+            Err(e) => format!("Failed to merge entries: {e}"),
+        }
+    }
+}
+
+/// One agent-facing line for an ORCID author hit.
+fn format_orcid_hit(hit: &serde_json::Value) -> String {
+    let orcid_id = hit["orcid_id"].as_str().unwrap_or("?");
+    let name = hit["credit_name"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let given = hit["given"].as_str().unwrap_or("");
+            let family = hit["family"].as_str().unwrap_or("");
+            format!("{given} {family}").trim().to_string()
+        });
+    let name = if name.is_empty() { "?".into() } else { name };
+    let affiliations = hit["affiliations"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str())
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .unwrap_or_default();
+    let affiliations = if affiliations.is_empty() {
+        "N/A".into()
+    } else {
+        affiliations
+    };
+    let works = hit["work_count"].as_u64().unwrap_or(0);
+    let dois = hit["dois"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str())
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let doi_hint = if dois.is_empty() {
+        String::new()
+    } else {
+        format!(" | sample DOIs: {dois}")
+    };
+    format!("ORCID: {orcid_id} | {name} | {affiliations} | {works} works{doi_hint}")
+}
+
+/// Matches first, then whichever facets the caller asked the API to compute.
+fn format_enhanced_search(data: &serde_json::Value) -> String {
+    let total = data["total"].as_u64().unwrap_or(0);
+    let offset = data["offset"].as_u64().unwrap_or(0);
+    let matches = data["matches"].as_array().cloned().unwrap_or_default();
+    if matches.is_empty() {
+        return format!("No matches (total {total}).");
+    }
+    let mut out = vec![format!(
+        "{} of {total} matches (offset {offset}):",
+        matches.len()
+    )];
+    for (i, m) in matches.iter().enumerate() {
+        let meta = &m["metadata"];
+        let title = meta["title"].as_str().unwrap_or("?");
+        let doi = meta["doi"].as_str().unwrap_or("?");
+        let journal = meta["journal"].as_str().unwrap_or("N/A");
+        let year = meta["date"]["year"]
+            .as_i64()
+            .map(|y| format!(" ({y})"))
+            .unwrap_or_default();
+        let score = m["score"].as_f64().unwrap_or(0.0);
+        out.push(format!(
+            "{}. [score:{score:.0}] {title}{year} | {journal} | doi:{doi}",
+            offset + i as u64 + 1
+        ));
+    }
+    if let Some(authors) = data["authors"].as_array().filter(|a| !a.is_empty()) {
+        out.push("Authors:".into());
+        for a in authors.iter().take(15) {
+            let name = a["name"].as_str().unwrap_or("?");
+            let count = a["count"].as_u64().unwrap_or(0);
+            let first = a["first_publication_year"].as_i64();
+            let last = a["last_publication_year"].as_i64();
+            let span = match (first, last) {
+                (Some(f), Some(l)) => format!(" | {f}-{l}"),
+                _ => String::new(),
+            };
+            out.push(format!("- {name} | {count} papers{span}"));
+        }
+    }
+    if let Some(categories) = data["categories"].as_array().filter(|c| !c.is_empty()) {
+        out.push("Categories:".into());
+        for c in categories.iter().take(15) {
+            let name = c["name"].as_str().unwrap_or("?");
+            let count = c["count"].as_u64().unwrap_or(0);
+            out.push(format!("- {name} | {count}"));
+        }
+    }
+    if let Some(stats) = data["citation_stats"].as_object() {
+        let total_citations = stats["total_citations"].as_u64().unwrap_or(0);
+        let per_year = stats["avg_citations_per_year"].as_f64().unwrap_or(0.0);
+        out.push(format!(
+            "Citations: {total_citations} total, {per_year:.1} per year on average"
+        ));
+        if let Some(top) = stats["top_authors"].as_array().filter(|a| !a.is_empty()) {
+            let names = top
+                .iter()
+                .filter_map(|s| s.as_str())
+                .take(5)
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(format!("Top authors: {names}"));
+        }
+        if let Some(top) = stats["top_journals"].as_array().filter(|j| !j.is_empty()) {
+            let names = top
+                .iter()
+                .filter_map(|s| s.as_str())
+                .take(5)
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(format!("Top journals: {names}"));
+        }
+    }
+    out.join("\n")
 }
 
 #[tool_handler]
@@ -2129,11 +2729,15 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collection_entries::{format_collection_entry_line, resolve_entry_id_in_collection};
+    use crate::collection_entries::{
+        format_collection_entry_line, person_from_name, resolve_entry_id_in_collection,
+    };
     use crate::constants::version_output;
     use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{
-        default_style, BatchMoveArgs, DoiArgs, FormatArgs, ReverseArgs, VerifyArgs,
+        default_style, BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs,
+        OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs,
+        VerifyArgs,
     };
 
     /// Serializes OOKCITE_API_KEY mutations across parallel tokio tests.
@@ -4196,5 +4800,381 @@ mod tests {
             !result.to_lowercase().contains("openlibrary"),
             "Error leaked 'OpenLibrary': {result}"
         );
+    }
+
+    // --- usage / batch_resolve / entry-edit helpers ---
+
+    #[test]
+    fn usage_report_shows_daily_and_monthly_allowances() {
+        let out = format_usage_report(&serde_json::json!({
+            "plan": "academic",
+            "authenticated": true,
+            "daily": { "limit": 20000, "remaining": 19993 },
+            "monthly": {
+                "limit": 10000,
+                "used": 12,
+                "remaining": 9988,
+                "allows_overage": false
+            }
+        }));
+        assert!(out.contains("Plan: academic"), "{out}");
+        assert!(
+            out.contains("Daily lookups: 19993 remaining of 20000"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Monthly lookups: 9988 remaining of 10000 (12 used)"),
+            "{out}"
+        );
+        assert!(out.contains("Monthly overage: not allowed"), "{out}");
+    }
+
+    #[test]
+    fn usage_report_omits_monthly_block_when_plan_has_none() {
+        let out = format_usage_report(&serde_json::json!({
+            "plan": "free",
+            "authenticated": false,
+            "daily": { "limit": 20, "remaining": 3 },
+            "monthly": serde_json::Value::Null
+        }));
+        assert!(out.contains("Daily lookups: 3 remaining of 20"), "{out}");
+        assert!(!out.contains("Monthly"), "{out}");
+        assert!(out.contains("anonymous IP limits apply"), "{out}");
+    }
+
+    #[test]
+    fn person_from_name_reads_both_author_orders() {
+        assert_eq!(
+            person_from_name("Goswami, Rohit"),
+            serde_json::json!({"family": "Goswami", "given": "Rohit"})
+        );
+        assert_eq!(
+            person_from_name("Rohit Goswami"),
+            serde_json::json!({"family": "Goswami", "given": "Rohit"})
+        );
+        assert_eq!(
+            person_from_name("  Jonsson  "),
+            serde_json::json!({"family": "Jonsson"})
+        );
+        assert_eq!(
+            person_from_name("Goswami,"),
+            serde_json::json!({"family": "Goswami"})
+        );
+    }
+
+    #[test]
+    fn entry_metadata_overrides_keep_untouched_fields() {
+        let current = serde_json::json!({
+            "id": "goswami2026",
+            "entry_type": "Article",
+            "title": "Wrong Title",
+            "authors": [{"family": "Goswami", "given": "Rohit"}],
+            "journal": "MethodsX",
+            "date": {"year": 2020, "month": 4},
+            "issue": "3"
+        });
+        let args = UpdateEntryMetadataArgs {
+            collection: "Refs".into(),
+            entry_id: "e1".into(),
+            title: Some("Right Title".into()),
+            authors: None,
+            journal: None,
+            year: Some(2026),
+            volume: None,
+            issue: None,
+            pages: None,
+            publisher: None,
+            doi: None,
+            url: None,
+        };
+        let merged = apply_entry_metadata_overrides(&current, &args);
+        assert_eq!(merged["title"], serde_json::json!("Right Title"));
+        assert_eq!(merged["date"]["year"], serde_json::json!(2026));
+        // Required fields the caller never mentioned survive the replace.
+        assert_eq!(merged["id"], serde_json::json!("goswami2026"));
+        assert_eq!(merged["entry_type"], serde_json::json!("Article"));
+        assert_eq!(merged["journal"], serde_json::json!("MethodsX"));
+        assert_eq!(merged["issue"], serde_json::json!("3"));
+        // Month is part of the same DateValue and must not be dropped by a year edit.
+        assert_eq!(merged["date"]["month"], serde_json::json!(4));
+        assert_eq!(merged["authors"][0]["family"], serde_json::json!("Goswami"));
+    }
+
+    #[test]
+    fn batch_resolve_body_tags_every_input_as_text() {
+        let body = batch_resolve_request_body(&["Einstein 1905".into(), "10.1/x".into()], true);
+        let inputs = body["inputs"].as_array().expect("inputs array");
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0]["input"]["kind"], serde_json::json!("text"));
+        assert_eq!(
+            inputs[0]["input"]["text"],
+            serde_json::json!("Einstein 1905")
+        );
+        assert_eq!(
+            inputs[1]["options"]["use_live_queries"],
+            serde_json::json!(true)
+        );
+        assert!(
+            body.get("async").is_none(),
+            "sync batch must not request a job: {body}"
+        );
+    }
+
+    #[test]
+    fn batch_resolve_results_follow_input_order() {
+        let citations = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+        // Server returns them out of order, tagged by index; one errored and one
+        // never came back at all.
+        let payload = serde_json::json!({
+            "results": [
+                {
+                    "index": 2,
+                    "status": "error",
+                    "message": "no candidates"
+                },
+                {
+                    "index": 0,
+                    "status": "ok",
+                    "paper": {
+                        "title": "Universal Nucleation Behavior of Sheared Systems",
+                        "doi": "10.1103/physrevlett.126.195702",
+                        "journal": "PRL",
+                        "date": {"year": 2021},
+                        "authors": [{"family": "Goswami"}]
+                    }
+                }
+            ]
+        });
+        let lines = format_batch_resolve_results(&citations, &payload);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("1. RESOLVED"), "{}", lines[0]);
+        assert!(lines[0].contains("doi:10.1103/physrevlett.126.195702"));
+        assert!(
+            lines[1].starts_with("2. NO RESULT | second"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].starts_with("3. ERROR | third | no candidates"),
+            "{}",
+            lines[2]
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_resolve_refuses_over_the_sync_limit_without_calling_the_api() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve/batch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": []
+            })))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let citations: Vec<String> = (0..SYNC_BATCH_RESOLVE_LIMIT + 1)
+            .map(|i| format!("citation {i}"))
+            .collect();
+        let out = test_server(&mock.uri())
+            .batch_resolve(Parameters(BatchResolveArgs {
+                citations,
+                use_live_queries: false,
+            }))
+            .await;
+        assert!(out.starts_with("REFUSED"), "{out}");
+        assert!(out.contains("50-input limit"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn usage_reports_the_plan_from_me_usage() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/usage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan": "business",
+                "authenticated": true,
+                "daily": {"limit": 20000, "remaining": 42}
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let out = test_server(&mock.uri())
+            .usage(Parameters(UsageArgs {}))
+            .await;
+        assert!(out.contains("Plan: business"), "{out}");
+        assert!(out.contains("42 remaining of 20000"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn update_entry_metadata_sends_the_merged_record() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "c1", "name": "Refs"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/c1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "c1",
+                "name": "Refs",
+                "entries": [{
+                    "id": "e1",
+                    "metadata": {
+                        "id": "goswami2026",
+                        "entry_type": "Article",
+                        "title": "Wrong Title",
+                        "authors": [{"family": "Goswami"}],
+                        "journal": "MethodsX"
+                    }
+                }]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/collections/c1/entries/e1/metadata"))
+            .and(body_string_contains(r#""title":"Right Title""#))
+            .and(body_string_contains(r#""entry_type":"Article""#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "e1",
+                "added_at": "2026-08-14T00:00:00Z",
+                "metadata": {"title": "Right Title"}
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let out = test_server(&mock.uri())
+            .update_entry_metadata(Parameters(UpdateEntryMetadataArgs {
+                collection: "Refs".into(),
+                entry_id: "e1".into(),
+                title: Some("Right Title".into()),
+                authors: None,
+                journal: None,
+                year: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                publisher: None,
+                doi: None,
+                url: None,
+            }))
+            .await;
+        assert!(out.contains("Updated entry e1"), "{out}");
+        assert!(out.contains("Right Title"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn update_entry_metadata_refuses_an_empty_edit() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let out = test_server(&mock.uri())
+            .update_entry_metadata(Parameters(UpdateEntryMetadataArgs {
+                collection: "Refs".into(),
+                entry_id: "e1".into(),
+                title: None,
+                authors: None,
+                journal: None,
+                year: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                publisher: None,
+                doi: None,
+                url: None,
+            }))
+            .await;
+        assert!(out.starts_with("Nothing to update."), "{out}");
+    }
+
+    #[tokio::test]
+    async fn merge_entries_refuses_when_both_references_are_the_same_entry() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "c1", "name": "Refs"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/c1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "c1",
+                "entries": [{
+                    "id": "e1",
+                    "metadata": {"title": "A paper", "doi": "10.1/x"}
+                }]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/c1/entries/e1/merge"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        // Same entry reached by its opaque id and by its DOI alias.
+        let out = test_server(&mock.uri())
+            .merge_entries(Parameters(MergeEntriesArgs {
+                collection: "Refs".into(),
+                keep_entry_id: "e1".into(),
+                absorb_entry_id: "10.1/x".into(),
+            }))
+            .await;
+        assert!(out.contains("nothing to merge"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn orcid_search_needs_at_least_one_filter() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orcid/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"hits": []})))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let out = test_server(&mock.uri())
+            .orcid_search(Parameters(OrcidSearchArgs {
+                author: Some("   ".into()),
+                affiliation: None,
+                orcid: None,
+                limit: None,
+            }))
+            .await;
+        assert!(out.contains("Provide at least one of"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn orcid_profile_reports_a_missing_id_plainly() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orcid/0000-0002-2393-8056"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        let out = test_server(&mock.uri())
+            .orcid_profile(Parameters(OrcidProfileArgs {
+                orcid_id: "0000-0002-2393-8056".into(),
+            }))
+            .await;
+        assert_eq!(out, "No ORCID profile found for 0000-0002-2393-8056.");
     }
 }

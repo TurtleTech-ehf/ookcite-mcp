@@ -158,6 +158,8 @@ Optional env (stdio MCP, all clients):
 | `validate_doi`      | Check if a DOI exists (anti-hallucination)    |
 | `lookup_isbn`       | Look up a book by ISBN                        |
 | `reverse_lookup`    | Find a paper from messy citation text         |
+| `batch_resolve`     | Resolve many citation strings in one request (max 50) |
+| `enhanced_search`   | Corpus search with author / category / citation facets |
 | `health_check`      | Check API availability and health             |
 
 ### Formatting
@@ -168,7 +170,22 @@ Optional env (stdio MCP, all clients):
 | `verify_references` | Batch-check a list of DOIs                    |
 | `batch_format`      | Format multiple citations at once             |
 | `search_styles`     | Find CSL style IDs by name                    |
+| `list_styles`       | Page through the full CSL style list          |
 | `group_cite`        | Generate grouped in-text markers (e.g. [1-3]) |
+
+### Account
+
+| Tool     | Purpose                                                  |
+| -------- | -------------------------------------------------------- |
+| `usage`  | Plan in effect plus daily (and monthly) lookups remaining |
+
+### ORCID
+
+| Tool             | Purpose                                                |
+| ---------------- | ------------------------------------------------------ |
+| `orcid_search`   | Find ORCID profiles by name, affiliation, or ORCID ID  |
+| `orcid_profile`  | Fetch one ORCID profile by ID                          |
+| `ingest_orcid`   | Index an ORCID profile's publications so they are searchable |
 
 ### Collections (requires sign-in)
 
@@ -186,6 +203,8 @@ Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
 | `delete_collection`        | Delete a collection                     |
 | `update_collection`        | Update name, description, or style      |
 | `remove_from_collection`   | Remove an entry by `entry_id`, bare DOI, or `doi:10.x/y` |
+| `update_entry_metadata`    | Correct a saved entry's title, authors, year, DOI, … |
+| `merge_entries`            | Merge two entries of one collection into one |
 | `update_tags`              | Set tags on a collection                |
 | `reorder_collection`       | Reorder entries                         |
 
@@ -214,6 +233,16 @@ bare DOI / `doi:10.x/y` — the server resolves aliases locally before the API c
 Sharing is available to signed-in accounts with collections.
 Free accounts can import and batch-add within their daily quota.
 Merge and batch-move require an Academic or Business plan.
+
+### Utilities
+
+| Tool                      | Purpose                                       |
+| ------------------------- | --------------------------------------------- |
+| `generate_citation_keys`  | Better BibTeX-style keys for a list of DOIs   |
+| `expand_journal`          | Expand a journal abbreviation to its full name |
+| `normalize_bibliography`  | Re-render BibTeX or RIS as canonical BibTeX   |
+
+These three require an Academic or Business plan.
 
 ## Plans & Pricing
 
