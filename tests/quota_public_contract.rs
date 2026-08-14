@@ -69,11 +69,63 @@ fn public_quota_claims_match_the_runtime_contract() {
     assert!(!server.contains("SHARING (academic/business plan)"));
     assert!(!server.contains("BULK OPERATIONS (academic/business plan)"));
     assert!(!server.contains("Anyone with the link can view it. Requires academic/business plan."));
-    assert!(server.contains("SHARING (signed-in accounts with collections)"));
-    assert!(server.contains("PAID COLLECTION OPERATIONS (academic/business plan)"));
+    // The plan gate used to be section headers inside the server instructions,
+    // which enumerated every tool. That enumeration moved onto the tools
+    // themselves, so assert the gate where a client now reads it: once in the
+    // instructions, and again on each tool that is actually gated.
+    let flat = server.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("additionally need an academic or business plan"),
+        "server instructions must still state the paid-plan gate"
+    );
+    for paid in [
+        "merge_collections",
+        "batch_move_entries",
+        "generate_citation_keys",
+        "expand_journal",
+    ] {
+        let desc = tool_description(&flat, paid)
+            .unwrap_or_else(|| panic!("no description found for {paid}"));
+        assert!(
+            desc.contains("academic or business plan"),
+            "{paid} is plan-gated but its own description does not say so"
+        );
+    }
+    // Sharing is open to any signed-in account with collections, so those tools
+    // must not claim a paid plan.
+    for free in ["share_collection", "unshare_collection", "view_shared"] {
+        let desc = tool_description(&flat, free)
+            .unwrap_or_else(|| panic!("no description found for {free}"));
+        assert!(
+            !desc.contains("academic or business plan"),
+            "{free} is not plan-gated but its description claims a plan"
+        );
+    }
     assert!(readme.contains("free account (60 lookups/day)"));
     assert!(cli.contains("anonymous mode (20 lookups/day)"));
     assert!(setup.contains("anonymous mode: 20 lookups/day"));
     assert!(constants.contains("IP daily limit ~20"));
     assert!(batch_limits.contains("~20/day anonymous"));
+}
+
+/// Pull one tool's `description = "..."` out of a whitespace-flattened
+/// `server.rs`, so the plan-gate assertions read the same text a client does.
+fn tool_description(flat: &str, tool: &str) -> Option<String> {
+    let anchor = format!("name = \"{tool}\", description = \"");
+    let start = flat.find(&anchor)? + anchor.len();
+    let rest = &flat[start..];
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(esc) = chars.next() {
+                    out.push(esc);
+                }
+            }
+            '"' => return Some(out),
+            _ => out.push(c),
+        }
+    }
+    None
 }
