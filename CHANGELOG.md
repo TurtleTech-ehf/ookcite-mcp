@@ -2,6 +2,53 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.5.0 - 2026-08-14
+#### Features
+- (**mcp**) ship a credential helper that keeps the key out of client config - (7448748) - Rohit Goswami
+- (**mcp**) upfront quota and collection membership for batches - (fc912ee) - Rohit Goswami
+- (**mcp**) doctor tool, mutate policy, setup-help errors - (9a1fea5) - Rohit Goswami
+- (**mcp**) tool annotations, faster startup, multi-client setup docs - (540fc5d) - Rohit Goswami
+- (**registry**) publish an MCP registry manifest - (86402fb) - Rohit Goswami
+#### Bugfixes
+- (**batch**) preserve DOI rate limits - (69c66e7) - Rohit Goswami
+- (**ci**) satisfy retry status lint - (6e5a883) - Rohit Goswami
+- (**ci**) satisfy Rust 1.97 option lint - (99eaf1c) - Rohit Goswami
+- (**ci**) place tests after module items - (b00ecbe) - Rohit Goswami
+- (**contract**) align published OokCite capabilities - (58393d2) - Rohit Goswami
+- (**debug**) include candidate diagnostics - (e2f32a1) - Rohit Goswami
+- (**debug**) render final candidate lists - (476ee90) - Rohit Goswami
+- (**debug**) tag text resolve requests - (67ea984) - Rohit Goswami
+- (**diagnostics**) align anonymous quota guidance - (137cc3f) - Rohit Goswami
+- (**http**) stop retrying rate limits - (330f8d8) - Rohit Goswami
+- (**mcp**) membership-only meta for batches; preflight group_cite/keys - (611758a) - Rohit Goswami
+- (**quota**) align anonymous client guidance - (2d9cd0b) - Rohit Goswami
+- (**resolve**) check the resolver answer against the ranked candidates - (6889a7f) - Rohit Goswami
+- (**reverse**) use /api/v1/reverse and show authors - (5eb5628) - Rohit Goswami
+#### Documentation
+- (**grok**) add plugin surface and Grok Build setup - (5eec877) - Rohit Goswami
+- (**setup**) publish portable MCP configuration - (c36fd94) - Rohit Goswami
+- source layout, lib crate map, and Unreleased changelog - (8350b1f) - Rohit Goswami
+#### Tests
+- (**batch**) stop DOI fallback after rate limit - (24b458e) - Rohit Goswami
+- (**contract**) assert current plan guidance - (d0a3939) - Rohit Goswami
+- (**contract**) use current OokCite plan fixtures - (8cb2be0) - Rohit Goswami
+- (**contract**) cover npm and feature gates - (050778c) - Rohit Goswami
+- (**debug**) require candidate diagnostics - (5c2a656) - Rohit Goswami
+- (**debug**) cover candidate-list responses - (1ec643d) - Rohit Goswami
+- (**debug**) require tagged resolve input - (43bd415) - Rohit Goswami
+- (**http**) reject retries after rate limits - (65a2a7a) - Rohit Goswami
+- (**quota**) cover paid plan limits and prices - (78ae753) - Rohit Goswami
+- (**quota**) pin public OokCite limits - (c4d7b45) - Rohit Goswami
+#### Refactors
+- (**mcp**) move each tool's trigger into its own description - (f1b62bb) - Rohit Goswami
+- (**test**) parse OokCite plan rows structurally - (9e5cb9b) - Rohit Goswami
+- split main.rs into focused modules - (d50538d) - Rohit Goswami
+#### Style
+- (**contract**) apply Rust formatting - (ea7f3c5) - Rohit Goswami
+- apply rustfmt - (c1352b8) - Rohit Goswami
+
+- - -
+
 ## Unreleased
 #### Features
 - (**mcp**) tool annotations (read-only / destructive / idempotent hints) on shipped tools for protocol-aware clients
