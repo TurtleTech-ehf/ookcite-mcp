@@ -47,6 +47,21 @@ pub fn version_output() -> String {
     format!("ookcite-mcp {VERSION}")
 }
 
+/// Compact nudge appended to 429 (rate-limited) tool responses. Kept to one
+/// line, unlike `setup_help_block`, which documents every env var and is
+/// reserved for auth-failure / blocked-mutation diagnostics.
+pub fn rate_limit_hint() -> String {
+    if std::env::var("OOKCITE_API_KEY").is_ok() {
+        "Check remaining quota with the usage tool, or raise it: https://my.turtletech.us/signup"
+            .to_string()
+    } else {
+        "Anonymous cap is 20 lookups/day. A free account raises that to 60/day: \
+         sign up at https://my.turtletech.us/signup, then set OOKCITE_API_KEY \
+         (or run `ookcite-mcp setup --key YOUR_KEY`)."
+            .to_string()
+    }
+}
+
 /// Install and authentication guidance appended to client-facing errors.
 pub fn setup_help_block() -> String {
     format!(

@@ -134,9 +134,10 @@ pub fn plan_metered_batch(
                 members,
                 refuse_message: Some(format!(
                     "REFUSED: anonymous / no OOKCITE_API_KEY session — refusing batch of {metered} \
-                     metered lookups (soft cap {ANON_BATCH_SOFT_CAP}). Set OOKCITE_API_KEY for \
-                     higher limits, shrink the batch, or import into a collection and re-verify \
-                     members for free. IP daily limits still apply (~20/day anonymous)."
+                     metered lookups (soft cap {ANON_BATCH_SOFT_CAP}). Free accounts raise the \
+                     limit to 60/day: sign up at https://my.turtletech.us/signup, then set \
+                     OOKCITE_API_KEY. Or shrink the batch, or import into a collection and \
+                     re-verify members for free. IP daily limits still apply (~20/day anonymous)."
                 )),
             };
         }
