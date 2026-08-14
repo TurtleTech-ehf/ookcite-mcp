@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.TurtleTech-ehf/ookcite-mcp",
+  "title": "OokCite",
+  "description": "Validate DOIs and ISBNs against the real record, format citations in 2900+ CSL styles, and catch fabricated references before they ship. Returns citation metadata, not paper content.",
+  "repository": {
+    "url": "https://github.com/TurtleTech-ehf/ookcite-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://ookcite.turtletech.us",
+  "version": "0.5.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@turtletech/ookcite-mcp",
+      "version": "0.5.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "OOKCITE_API_KEY",
+          "description": "Optional. Raises the anonymous rate limit and enables the collection tools. Sign up at https://my.turtletech.us/signup",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
