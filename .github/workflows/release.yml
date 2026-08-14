@@ -169,6 +169,17 @@ jobs:
               exit 1
             fi
           done
+          # The registry proves package ownership by requiring the published npm
+          # package to name the registry entry back. It reads that from the
+          # package on the npm registry, not from this checkout, so a mismatch
+          # here means the publish that just ran shipped the wrong value.
+          SERVER_NAME="$(jq -r .name server.json)"
+          MCP_NAME="$(jq -r '.mcpName // ""' npm/package.json)"
+          if [ "$MCP_NAME" != "$SERVER_NAME" ]; then
+            echo "npm/package.json mcpName is '${MCP_NAME:-unset}' but server.json" \
+                 "name is '$SERVER_NAME'; the registry will reject the publish" >&2
+            exit 1
+          fi
 
       - name: Publish
         run: |
