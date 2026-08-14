@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.6.1 - 2026-08-14
+#### Bugfixes
+- (**registry**) declare mcpName so the registry can verify package ownership - (d655ae7) - Rohit Goswami
+
+- - -
+
 ## v0.6.0 - 2026-08-14
 #### Features
 - (**endpoints**) register the ten unwired API operations - (6d895fd) - Rohit Goswami
