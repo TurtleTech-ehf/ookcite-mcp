@@ -4,13 +4,17 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::sync::Mutex;
 
 use ookcite_mcp::connect::{
-    ConnectSecrets, LoopbackListener, Pkce, callback_state_matches, redact_diagnostic,
+    ConnectError, ConnectSecrets, DashboardClient, DevicePoll, LoopbackListener, Pkce,
+    StartBrowserRequest, StartDeviceRequest, callback_state_matches, generate_pkce,
+    random_journey_id, random_token, redact_diagnostic, verify_readiness,
 };
 use ookcite_mcp::credentials::{
     CredentialReference, CredentialSink, CredentialSource, ProtectedFileSink, StoreCommandSink,
     choose_source,
 };
 use secrecy::{ExposeSecret as _, SecretString};
+use wiremock::matchers::{body_json, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
@@ -180,4 +184,198 @@ fn configuration_references_never_contain_the_secret() {
         let rendered = format!("{reference:?} {:?}", reference.config_env());
         assert!(!rendered.contains(KEY));
     }
+}
+
+#[tokio::test]
+async fn browser_start_uses_random_pkce_state_journey_and_loopback_port() {
+    let dashboard = MockServer::start().await;
+    let listener = LoopbackListener::bind(0).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let pkce = generate_pkce();
+    let state = random_token();
+    let journey = random_journey_id();
+    assert_eq!(pkce.verifier.len(), 43);
+    assert_eq!(pkce.challenge.len(), 43);
+    assert_eq!(state.len(), 43);
+    assert!(uuid::Uuid::parse_str(&journey).is_ok());
+
+    Mock::given(method("POST"))
+        .and(path("/mcp/ookcite/authorize"))
+        .and(body_json(serde_json::json!({
+            "journey_id": journey,
+            "code_challenge": pkce.challenge,
+            "code_challenge_method": "S256",
+            "state": state,
+            "callback_port": port
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "authorization_id": "authorization-1",
+            "authorization_url": "https://my.turtletech.us/connect/ookcite-mcp?authorization_id=authorization-1",
+            "expires_in": 300
+        })))
+        .mount(&dashboard)
+        .await;
+
+    let response = DashboardClient::new(dashboard.uri())
+        .start_browser(StartBrowserRequest {
+            journey_id: &journey,
+            code_challenge: &pkce.challenge,
+            code_challenge_method: "S256",
+            state: &state,
+            callback_port: port,
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.expires_in, 300);
+    assert!(response.authorization_url.starts_with("https://my.turtletech.us/"));
+}
+
+#[tokio::test]
+async fn loopback_callback_validates_state_and_returns_only_the_code() {
+    let listener = LoopbackListener::bind(0).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let state = "random-state-value";
+    let sender = tokio::spawn(async move {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        use tokio::io::AsyncWriteExt as _;
+        stream
+            .write_all(
+                b"GET /callback?code=authorization-code&state=random-state-value HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            )
+            .await
+            .unwrap();
+    });
+    let code = listener
+        .wait_for_callback(state, std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    sender.await.unwrap();
+    assert_eq!(code, "authorization-code");
+
+    let wrong = LoopbackListener::bind(0).await.unwrap();
+    let wrong_address = wrong.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut stream = tokio::net::TcpStream::connect(wrong_address).await.unwrap();
+        use tokio::io::AsyncWriteExt as _;
+        stream
+            .write_all(
+                b"GET /callback?code=authorization-code&state=wrong HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            )
+            .await
+            .unwrap();
+    });
+    assert_eq!(
+        wrong
+            .wait_for_callback(state, std::time::Duration::from_secs(2))
+            .await
+            .unwrap_err(),
+        ConnectError::InvalidState
+    );
+}
+
+#[tokio::test]
+async fn device_start_poll_and_denial_preserve_server_status() {
+    let dashboard = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp/ookcite/device"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "device_code": "device-code",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://my.turtletech.us/connect/ookcite-mcp?user_code=ABCD-EFGH",
+            "expires_in": 600,
+            "interval": 5
+        })))
+        .mount(&dashboard)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/mcp/ookcite/device/poll"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+            "status": "pending"
+        })))
+        .mount(&dashboard)
+        .await;
+    let client = DashboardClient::new(dashboard.uri());
+    let started = client
+        .start_device(StartDeviceRequest {
+            journey_id: "018f47e2-19c3-7b8a-8f62-62fe39151ec4",
+            code_challenge: CHALLENGE,
+            code_challenge_method: "S256",
+            state: "state-value-123456",
+        })
+        .await
+        .unwrap();
+    assert_eq!(started.expires_in, 600);
+    assert_eq!(
+        client
+            .poll_device(&started.device_code, "state-value-123456")
+            .await
+            .unwrap(),
+        DevicePoll::Pending
+    );
+
+    let denied = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp/ookcite/device/poll"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "error": "access_denied"
+        })))
+        .mount(&denied)
+        .await;
+    assert_eq!(
+        DashboardClient::new(denied.uri())
+            .poll_device("device-code", "state-value-123456")
+            .await
+            .unwrap_err(),
+        ConnectError::Denied
+    );
+}
+
+#[tokio::test]
+async fn exchange_readiness_and_receipt_complete_without_diagnostic_leakage() {
+    let dashboard = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp/ookcite/exchange"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "api_key": KEY,
+            "installation_receipt": "receipt-secret-value",
+            "plan": "Free"
+        })))
+        .mount(&dashboard)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/mcp/ookcite/receipt"))
+        .and(body_json(serde_json::json!({"receipt": "receipt-secret-value"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "credential_installed": true
+        })))
+        .mount(&dashboard)
+        .await;
+    let client = DashboardClient::new(dashboard.uri());
+    let exchanged = client
+        .exchange("authorization-code", VERIFIER, "state-value-123456")
+        .await
+        .unwrap();
+    assert_eq!(exchanged.credential.expose_secret(), KEY);
+    assert!(!format!("{exchanged:?}").contains(KEY));
+
+    let api = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "authenticated": true,
+            "plan": "Free",
+            "lookups_remaining": 60,
+            "lookups_limit": 60
+        })))
+        .mount(&api)
+        .await;
+    let readiness = verify_readiness(&api.uri(), &exchanged.credential)
+        .await
+        .unwrap();
+    assert!(readiness.authenticated);
+    assert_eq!(readiness.lookups_remaining, 60);
+    client
+        .redeem_receipt(&exchanged.installation_receipt)
+        .await
+        .unwrap();
 }
