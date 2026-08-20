@@ -165,10 +165,10 @@ impl<B: KeyringBackend> CredentialSink for PlatformCredentialSink<'_, B> {
 
     fn cleanup(&self, reference: &CredentialReference) -> anyhow::Result<()> {
         if reference
-            != &CredentialReference::Platform {
+            != &(CredentialReference::Platform {
                 service: self.service.clone(),
                 account: self.account.clone(),
-            }
+            })
         {
             anyhow::bail!("credential reference does not belong to this sink")
         }
@@ -292,9 +292,9 @@ impl CredentialSink for ProtectedFileSink {
 
     fn cleanup(&self, reference: &CredentialReference) -> anyhow::Result<()> {
         if reference
-            != &CredentialReference::File {
+            != &(CredentialReference::File {
                 path: self.path.clone(),
-            }
+            })
         {
             anyhow::bail!("credential reference does not belong to this sink")
         }
