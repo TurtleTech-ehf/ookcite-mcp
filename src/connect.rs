@@ -54,7 +54,9 @@ pub fn callback_state_matches(expected: &str, received: &str) -> bool {
     expected
         .bytes()
         .zip(received.bytes())
-        .fold(0_u8, |difference, (left, right)| difference | (left ^ right))
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
         == 0
 }
 
@@ -105,7 +107,10 @@ impl LoopbackListener {
             }
         }
         let request = std::str::from_utf8(&request).map_err(|_| ConnectError::InvalidResponse)?;
-        let first_line = request.lines().next().ok_or(ConnectError::InvalidResponse)?;
+        let first_line = request
+            .lines()
+            .next()
+            .ok_or(ConnectError::InvalidResponse)?;
         let mut parts = first_line.split_whitespace();
         if parts.next() != Some("GET") {
             return Err(ConnectError::InvalidResponse);
@@ -399,11 +404,7 @@ impl DashboardClient {
         }
     }
 
-    pub async fn cancel(
-        &self,
-        authorization_id: &str,
-        state: &str,
-    ) -> Result<(), ConnectError> {
+    pub async fn cancel(&self, authorization_id: &str, state: &str) -> Result<(), ConnectError> {
         let response = self
             .client
             .post(self.endpoint(&format!(
@@ -431,10 +432,7 @@ pub async fn verify_readiness(
 ) -> Result<Readiness, ConnectError> {
     decode_response(
         reqwest::Client::new()
-            .get(format!(
-                "{}/api/v1/me",
-                api_base.trim_end_matches('/')
-            ))
+            .get(format!("{}/api/v1/me", api_base.trim_end_matches('/')))
             .header("origin", "https://ookcite.turtletech.us")
             .bearer_auth(credential.expose_secret())
             .send()

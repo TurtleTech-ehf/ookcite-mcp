@@ -22,10 +22,9 @@ impl CredentialReference {
                 ("OOKCITE_CREDENTIAL_SERVICE".into(), service.clone()),
                 ("OOKCITE_CREDENTIAL_ACCOUNT".into(), account.clone()),
             ],
-            Self::Command { retrieve_command } => vec![(
-                "OOKCITE_API_KEY_COMMAND".into(),
-                retrieve_command.clone(),
-            )],
+            Self::Command { retrieve_command } => {
+                vec![("OOKCITE_API_KEY_COMMAND".into(), retrieve_command.clone())]
+            }
             Self::File { path } => vec![(
                 "OOKCITE_API_KEY_FILE".into(),
                 path.to_string_lossy().into_owned(),
@@ -118,11 +117,7 @@ pub struct PlatformCredentialSink<'a, B: KeyringBackend> {
 }
 
 impl<'a, B: KeyringBackend> PlatformCredentialSink<'a, B> {
-    pub fn new(
-        backend: &'a B,
-        service: impl Into<String>,
-        account: impl Into<String>,
-    ) -> Self {
+    pub fn new(backend: &'a B, service: impl Into<String>, account: impl Into<String>) -> Self {
         Self {
             backend,
             service: service.into(),
@@ -177,9 +172,9 @@ impl<B: KeyringBackend> CredentialSink for PlatformCredentialSink<'_, B> {
             .lock()
             .map_err(|_| anyhow::anyhow!("platform credential transaction is unavailable"))?;
         match rollback.as_ref() {
-            Some(PlatformRollback::Delete) => self
-                .backend
-                .delete_password(&self.service, &self.account)?,
+            Some(PlatformRollback::Delete) => {
+                self.backend.delete_password(&self.service, &self.account)?
+            }
             Some(PlatformRollback::Restore(value)) => {
                 self.backend
                     .set_password(&self.service, &self.account, value)?
@@ -345,8 +340,7 @@ impl CredentialConfig {
                 (
                     value(lookup("OOKCITE_CREDENTIAL_SERVICE"))
                         .unwrap_or_else(|| "ookcite-mcp".into()),
-                    value(lookup("OOKCITE_CREDENTIAL_ACCOUNT"))
-                        .unwrap_or_else(|| "default".into()),
+                    value(lookup("OOKCITE_CREDENTIAL_ACCOUNT")).unwrap_or_else(|| "default".into()),
                 )
             });
         let command_timeout = value(lookup("OOKCITE_API_KEY_TIMEOUT"))
@@ -388,7 +382,11 @@ pub async fn load_credential<B: KeyringBackend>(
     {
         return Ok(Some(value.clone()));
     }
-    if let Some(command) = config.command.as_deref().filter(|value| present(Some(value))) {
+    if let Some(command) = config
+        .command
+        .as_deref()
+        .filter(|value| present(Some(value)))
+    {
         return load_command_credential(command, config.command_timeout)
             .await
             .map(Some);
