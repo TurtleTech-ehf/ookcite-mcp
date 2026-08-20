@@ -363,7 +363,7 @@ cargo build --release
 ./target/release/ookcite-mcp --version
 
 # Contract tests (optional locally; required in CI with secret):
-export OOKCITE_CONTRACT_KEY=$(pass show turtletech/ookcite-contract-key)
+export OOKCITE_CONTRACT_KEY="value-from-your-credential-manager"
 cargo test --test api_contract
 ```
 
