@@ -35,4 +35,6 @@
 //! `endpoints` is exported so contract tests and helpers (e.g. `setup`) can
 //! depend on the registry without pulling in `rmcp` tool macros.
 
+pub mod connect;
+pub mod credentials;
 pub mod endpoints;
