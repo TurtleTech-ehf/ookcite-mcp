@@ -349,12 +349,17 @@ impl CredentialConfig {
                         .unwrap_or_else(|| "default".into()),
                 )
             });
+        let command_timeout = value(lookup("OOKCITE_API_KEY_TIMEOUT"))
+            .and_then(|seconds| seconds.parse::<u64>().ok())
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(10));
         Self {
             api_key,
             command,
             file,
             platform,
-            command_timeout: Duration::from_secs(10),
+            command_timeout,
         }
     }
 }
