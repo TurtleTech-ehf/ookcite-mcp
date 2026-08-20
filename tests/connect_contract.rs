@@ -6,9 +6,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ookcite_mcp::connect::{
-    ConnectError, ConnectSecrets, DashboardClient, DevicePoll, LoopbackListener, Pkce,
-    StartBrowserRequest, StartDeviceRequest, callback_state_matches, generate_pkce,
-    random_journey_id, random_token, redact_diagnostic, verify_readiness,
+    ConnectError, ConnectMode, ConnectSecrets, DashboardClient, DevicePoll, LoopbackListener,
+    Pkce, StartBrowserRequest, StartDeviceRequest, callback_state_matches,
+    connection_config_env, device_poll_delay, finalize_installation, generate_pkce,
+    open_browser_or_device, poll_device_until_authorized, random_journey_id, random_token,
+    redact_diagnostic, verify_readiness,
 };
 use ookcite_mcp::credentials::{
     CredentialConfig, CredentialReference, CredentialSink, CredentialSource, KeyringBackend,
@@ -186,6 +188,243 @@ fn configuration_references_never_contain_the_secret() {
         let rendered = format!("{reference:?} {:?}", reference.config_env());
         assert!(!rendered.contains(KEY));
     }
+}
+
+#[derive(Default)]
+struct RecordingBrowser {
+    urls: Mutex<Vec<String>>,
+    fail: bool,
+}
+
+impl ookcite_mcp::connect::BrowserOpener for RecordingBrowser {
+    fn open(&self, url: &str) -> anyhow::Result<()> {
+        self.urls.lock().unwrap().push(url.into());
+        if self.fail {
+            anyhow::bail!("browser unavailable")
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn browser_open_failure_selects_the_device_flow_without_leaking_the_url() {
+    let browser = RecordingBrowser::default();
+    assert_eq!(
+        open_browser_or_device(&browser, "https://my.turtletech.us/connect"),
+        ConnectMode::Browser
+    );
+    assert_eq!(browser.urls.lock().unwrap().len(), 1);
+
+    let unavailable = RecordingBrowser {
+        urls: Mutex::new(Vec::new()),
+        fail: true,
+    };
+    assert_eq!(
+        open_browser_or_device(&unavailable, "https://my.turtletech.us/connect"),
+        ConnectMode::Device
+    );
+    assert_eq!(unavailable.urls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn device_polling_uses_the_server_interval_and_expires_at_the_deadline() {
+    assert_eq!(device_poll_delay(5), Duration::from_secs(5));
+
+    let dashboard = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp/ookcite/device/poll"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+            "status": "pending"
+        })))
+        .up_to_n_times(1)
+        .mount(&dashboard)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/mcp/ookcite/device/poll"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "authorization_code",
+            "code": "authorization-code"
+        })))
+        .mount(&dashboard)
+        .await;
+    let started = ookcite_mcp::connect::StartDeviceResponse {
+        device_code: "device-code".into(),
+        user_code: "ABCD-EFGH".into(),
+        verification_uri: "https://my.turtletech.us/connect/ookcite-mcp".into(),
+        expires_in: 2,
+        interval: 0,
+    };
+    assert_eq!(
+        poll_device_until_authorized(
+            &DashboardClient::new(dashboard.uri()),
+            &started,
+            "state-value"
+        )
+        .await
+        .unwrap(),
+        "authorization-code"
+    );
+
+    let expired = ookcite_mcp::connect::StartDeviceResponse {
+        expires_in: 0,
+        ..started
+    };
+    assert_eq!(
+        poll_device_until_authorized(
+            &DashboardClient::new(dashboard.uri()),
+            &expired,
+            "state-value"
+        )
+        .await
+        .unwrap_err(),
+        ConnectError::Expired
+    );
+}
+
+struct TransactionalSink {
+    fail_store: bool,
+    stored: Mutex<bool>,
+    cleaned: Mutex<bool>,
+}
+
+impl CredentialSink for TransactionalSink {
+    fn store(&self, _secret: &SecretString) -> anyhow::Result<CredentialReference> {
+        if self.fail_store {
+            anyhow::bail!("credential store failed")
+        }
+        *self.stored.lock().unwrap() = true;
+        Ok(CredentialReference::Platform {
+            service: "ookcite-mcp".into(),
+            account: "default".into(),
+        })
+    }
+
+    fn cleanup(&self, _reference: &CredentialReference) -> anyhow::Result<()> {
+        *self.cleaned.lock().unwrap() = true;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn failed_storage_keeps_exchange_resumable_and_receipt_waits_for_configuration() {
+    let dashboard = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp/ookcite/receipt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "credential_installed": true
+        })))
+        .expect(1)
+        .mount(&dashboard)
+        .await;
+    let api = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "authenticated": true,
+            "plan": "Free",
+            "lookups_remaining": 60,
+            "lookups_limit": 60
+        })))
+        .expect(1)
+        .mount(&api)
+        .await;
+    let exchange = ookcite_mcp::connect::ExchangeResult {
+        credential: SecretString::new(KEY.into()),
+        installation_receipt: "receipt-secret-value".into(),
+        plan: "Free".into(),
+    };
+    let failing = TransactionalSink {
+        fail_store: true,
+        stored: Mutex::new(false),
+        cleaned: Mutex::new(false),
+    };
+    assert!(
+        finalize_installation(
+            &DashboardClient::new(dashboard.uri()),
+            &api.uri(),
+            &exchange,
+            &failing,
+            |_, _| Ok(())
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(exchange.credential.expose_secret(), KEY);
+
+    let working = TransactionalSink {
+        fail_store: false,
+        stored: Mutex::new(false),
+        cleaned: Mutex::new(false),
+    };
+    let journey = "018f47e2-19c3-7b8a-8f62-62fe39151ec4";
+    let reference = finalize_installation(
+        &DashboardClient::new(dashboard.uri()),
+        &api.uri(),
+        &exchange,
+        &working,
+        |reference, credential| {
+            assert_eq!(credential.expose_secret(), KEY);
+            let config = connection_config_env(reference, journey);
+            assert!(config.contains(&("OOKCITE_JOURNEY_ID".into(), journey.into())));
+            let rendered = format!("{config:?}");
+            assert!(!rendered.contains(KEY));
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert!(working.stored.into_inner().unwrap());
+    assert!(!working.cleaned.into_inner().unwrap());
+    assert_eq!(
+        reference,
+        CredentialReference::Platform {
+            service: "ookcite-mcp".into(),
+            account: "default".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn configuration_failure_rolls_back_the_new_credential_without_redeeming() {
+    let dashboard = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp/ookcite/receipt"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&dashboard)
+        .await;
+    let api = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "authenticated": true,
+            "plan": "Free",
+            "lookups_remaining": 60,
+            "lookups_limit": 60
+        })))
+        .mount(&api)
+        .await;
+    let exchange = ookcite_mcp::connect::ExchangeResult {
+        credential: SecretString::new(KEY.into()),
+        installation_receipt: "receipt-secret-value".into(),
+        plan: "Free".into(),
+    };
+    let sink = TransactionalSink {
+        fail_store: false,
+        stored: Mutex::new(false),
+        cleaned: Mutex::new(false),
+    };
+    let result = finalize_installation(
+        &DashboardClient::new(dashboard.uri()),
+        &api.uri(),
+        &exchange,
+        &sink,
+        |_, _| anyhow::bail!("client configuration failed"),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(*sink.cleaned.lock().unwrap());
+    assert!(!result.unwrap_err().to_string().contains(KEY));
 }
 
 #[derive(Default)]
