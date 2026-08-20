@@ -18,7 +18,19 @@ npx @turtletech/ookcite-mcp setup
 ```
 
 This auto-detects supported MCP clients and writes the configuration for you.
-Add an API key for higher rate limits and collection tools:
+Connect an OokCite account for higher rate limits and collection tools without
+putting an API key in shell arguments or MCP configuration:
+
+```bash
+npx @turtletech/ookcite-mcp setup --connect
+```
+
+The command opens the TurtleTech dashboard, creates or activates the Free plan,
+stores the issued key in the platform credential store, and writes only a
+credential reference to detected clients. Use `setup --connect --device` on a
+headless machine.
+
+An existing API key remains supported:
 
 ```bash
 npx @turtletech/ookcite-mcp setup --key YOUR_API_KEY
@@ -91,36 +103,57 @@ If you installed globally (`npm install -g` or `cargo install`), you can use
 
 ### Keeping the key out of the config file
 
-`npm/scripts/ookcite-mcp-credential-helper` fetches the key at launch and execs the
-server, so the config names a command instead of holding a secret:
+`setup --connect` uses the platform credential store by default. It refuses to
+replace an existing platform credential or named OokCite MCP configuration
+unless `--replace-credential` or `--replace-config` is given explicitly.
+
+A generic credential manager can be used instead. The store command receives
+the new key on standard input; it must not expect the key in a command-line
+argument. The retrieval command prints the key on standard output when the MCP
+server starts:
+
+```bash
+npx @turtletech/ookcite-mcp setup --connect \
+  --store-command "credential-cli store ookcite" \
+  --retrieve-command "credential-cli read ookcite"
+```
+
+For an explicit owner-only file instead of a credential manager:
+
+```bash
+npx @turtletech/ookcite-mcp setup --connect \
+  --credential-file "$HOME/.config/ookcite/api-key"
+```
+
+The file is created with owner-only permissions and is never overwritten. The
+platform, helper-command, and file forms put references such as these in client
+configuration:
 
 ```json
 {
   "mcpServers": {
     "ookcite": {
-      "command": "/path/to/ookcite-mcp-credential-helper",
+      "command": "npx",
+      "args": ["-y", "@turtletech/ookcite-mcp"],
       "env": {
-        "OOKCITE_API_KEY_COMMAND": "pass show services/ookcite-api-key"
+        "OOKCITE_API_KEY_COMMAND": "credential-cli read ookcite"
       }
     }
   }
 }
 ```
 
-It also takes `OOKCITE_API_KEY_FILE` for a plain file, and `OOKCITE_API_KEY`
-still wins if it is already set. With none of them the server starts anonymous.
+At startup, source precedence remains `OOKCITE_API_KEY`,
+`OOKCITE_API_KEY_COMMAND`, `OOKCITE_API_KEY_FILE`, then the platform credential
+reference. With none of them the server starts anonymous. `setup --key` remains
+available for existing deployments that intentionally keep the key in client
+configuration.
 
-Write your own wrapper instead and two things will bite, both of which present
-as the server hanging rather than as a credential error:
+Credential retrieval obeys two constraints:
 
-- **Anything run before `exec` inherits stdin, which belongs to the client.**
-  A helper that reads stdin consumes the `initialize` request; the server then
-  waits for a message that is already gone until the client gives up. Redirect
-  every command from `/dev/null`.
-- **A secret store can block indefinitely.** gpg asks for a passphrase over its
-  own agent socket, which `</dev/null` does not reach, so a locked key parks the
-  launch on a prompt the client never shows. Bound the lookup well inside the
-  client's connect timeout; `OOKCITE_API_KEY_TIMEOUT` defaults to 10 seconds.
+- Retrieval receives closed standard input, so it cannot consume MCP JSON-RPC.
+- Retrieval is bounded by `OOKCITE_API_KEY_TIMEOUT`, which defaults to 10
+  seconds, and its output is never copied into diagnostics.
 
 Consult your client's MCP documentation for its configuration-file location.
 Use the `mcpServers.ookcite` JSON above when automatic setup is unavailable,
@@ -135,9 +168,12 @@ Optional env (stdio MCP, all clients):
 | `OOKCITE_MCP_READ_ONLY` | `1` hard-disables collection mutations (review / CI automation) |
 | `OOKCITE_MCP_ALLOW_MUTATE` | `0` denies mutations; unset or `1` allows (API key still required server-side) |
 | `OOKCITE_STARTUP_PROBES` | `1` runs auth + npm update checks on **stderr** before accepting MCP connections (default off for faster connect) |
-| `OOKCITE_API_KEY_COMMAND` | Credential helper only: command printing the key on stdout |
-| `OOKCITE_API_KEY_FILE` | Credential helper only: file whose first line is the key |
-| `OOKCITE_API_KEY_TIMEOUT` | Credential helper only: seconds to allow the lookup (default 10) |
+| `OOKCITE_API_KEY_COMMAND` | Command printing the key on stdout; stdin is closed |
+| `OOKCITE_API_KEY_FILE` | Owner-protected file whose first line is the key |
+| `OOKCITE_API_KEY_TIMEOUT` | Seconds allowed for credential retrieval (default 10) |
+| `OOKCITE_CREDENTIAL_STORE` | `platform` to load a platform credential reference |
+| `OOKCITE_CREDENTIAL_SERVICE` | Platform credential service name (default `ookcite-mcp`) |
+| `OOKCITE_CREDENTIAL_ACCOUNT` | Platform credential account name (default `default`) |
 
 ### MCP usage tips
 
