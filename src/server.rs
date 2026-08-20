@@ -1,8 +1,8 @@
 //! MCP server: tool router, HTTP client, and handlers.
 
 use crate::batch_limits::{
-    collect_dois_from_collection_body, format_member_valid_lines, format_usage_report,
-    plan_metered_batch, read_only_concurrency, DoiResponseCache, MeQuota,
+    DoiResponseCache, MeQuota, collect_dois_from_collection_body, format_member_valid_lines,
+    format_usage_report, plan_metered_batch, read_only_concurrency,
 };
 use crate::collection_entries::{
     apply_entry_metadata_overrides, entry_doi, entry_metadata_by_id,
@@ -10,8 +10,8 @@ use crate::collection_entries::{
     resolve_entry_id_in_collection,
 };
 use crate::constants::{
-    api_base_url, build_api_client, rate_limit_hint, setup_help_block,
     MIN_CONFIDENT_REVERSE_LOOKUP_SCORE, MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
+    api_base_url, build_api_client, rate_limit_hint, setup_help_block,
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail,
@@ -20,10 +20,10 @@ use crate::policy::{self, block_mutate};
 use crate::resolve_helpers::{
     batch_resolve_request_body, classify_reverse_lookup_response, format_batch_resolve_results,
     format_resolve_candidates, lookup_doi_with_retry, resolve_payload_metadata, resolve_text_body,
-    resolver_answer_agrees_with_ranking, reverse_lookup_resolve_body,
+    resolver_answer_agrees_with_ranking, reverse_lookup_resolve_body, send_reverse_with_one_retry,
 };
 use crate::tool_args::*;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use ookcite_mcp::endpoints::{self, Endpoint};
 use rmcp::ServerHandler;
 use rmcp::{
@@ -393,7 +393,7 @@ impl Server {
 
     #[tool(
         name = "reverse_lookup",
-        description = "Parse a messy citation string or author name and find matching papers. Uses /api/v1/reverse (author-aware lexical ranking) first, then falls back to live resolve when empty or weak. Optional author/journal/year/orcid filters are folded into the query. Set use_live_queries=true to force the live resolve path earlier. For many citations prefer batch_format.",
+        description = "Parse a messy citation string or author name and find matching papers. Uses /api/v1/reverse (author-aware lexical ranking) first, then falls back to live resolve when empty or weak. On 503/504 from reverse, waits Retry-After (or 2s) and retries reverse once; does not fall back to resolve on those errors. Optional author/journal/year/orcid filters are folded into the query. Set use_live_queries=true to force the live resolve path earlier. For many citations prefer batch_format.",
         annotations(
             title = "Reverse lookup citation",
             read_only_hint = true,
@@ -405,11 +405,10 @@ impl Server {
         // web demo). Fall back to /resolve with live queries when reverse is
         // empty/weak or the caller forced use_live_queries.
         let reverse_body = crate::resolve_helpers::reverse_lookup_body(&args);
-        let r = self
-            .request(endpoints::REVERSE, &[])
-            .json(&reverse_body)
-            .send()
-            .await;
+        // 503 search pressure and 504 budget timeout wait Retry-After (or 2s)
+        // and retry /reverse once. Those statuses do not fall through to
+        // /resolve; that would enqueue a second search on the same queue.
+        let r = send_reverse_with_one_retry(&self.http, &self.api_base, &reverse_body).await;
         match classify_reverse_lookup_response(r).await {
             Ok(Some(local_match))
                 if !args.use_live_queries
@@ -2759,9 +2758,9 @@ mod tests {
     use crate::constants::version_output;
     use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{
-        default_style, BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs,
-        OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs,
-        VerifyArgs,
+        BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs, OrcidProfileArgs,
+        OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs, VerifyArgs,
+        default_style,
     };
 
     /// Serializes OOKCITE_API_KEY mutations across parallel tokio tests.
@@ -4761,9 +4760,51 @@ mod tests {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/reverse"))
-            .respond_with(ResponseTemplate::new(503).set_body_string(
-                "Lookup service temporarily unavailable. Please try again shortly.",
-            ))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("Retry-After", "0")
+                    .set_body_string(
+                        "Lookup service temporarily unavailable. Please try again shortly.",
+                    ),
+            )
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "test".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: false,
+            }))
+            .await;
+        assert!(result.starts_with("TEMPORARY ERROR"));
+        assert!(!result.contains("No matches"));
+    }
+
+    #[tokio::test]
+    async fn test_reverse_lookup_503_retries_reverse_once_without_resolve() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("Retry-After", "0")
+                    .set_body_string("SearchPressureError"),
+            )
+            .expect(2)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "candidates": []
+            })))
+            .expect(0)
             .mount(&mock)
             .await;
 
