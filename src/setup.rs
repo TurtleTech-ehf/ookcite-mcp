@@ -395,7 +395,9 @@ pub async fn run(args: &[String]) {
         }
     } else {
         println!("No API key provided (anonymous mode: 20 lookups/day).");
-        println!("  Get a key at https://my.turtletech.us/signup");
+        println!(
+            "  Get a key at https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp"
+        );
         println!("  Then re-run: ookcite-mcp setup --key YOUR_KEY\n");
     }
 

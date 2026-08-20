@@ -20,7 +20,7 @@
       "environmentVariables": [
         {
           "name": "OOKCITE_API_KEY",
-          "description": "Optional. Raises the anonymous rate limit and enables the collection tools. Sign up at https://my.turtletech.us/signup",
+          "description": "Optional. Raises the anonymous rate limit and enables the collection tools. Sign up at https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp",
           "isRequired": false,
           "isSecret": true
         }

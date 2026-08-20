@@ -52,11 +52,11 @@ pub fn version_output() -> String {
 /// reserved for auth-failure / blocked-mutation diagnostics.
 pub fn rate_limit_hint() -> String {
     if std::env::var("OOKCITE_API_KEY").is_ok() {
-        "Check remaining quota with the usage tool, or raise it: https://my.turtletech.us/signup"
+        "Check remaining quota with the usage tool, or raise it: https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp"
             .to_string()
     } else {
         "Anonymous cap is 20 lookups/day. A free account raises that to 60/day: \
-         sign up at https://my.turtletech.us/signup, then set OOKCITE_API_KEY \
+         sign up at https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp, then set OOKCITE_API_KEY \
          (or run `ookcite-mcp setup --key YOUR_KEY`)."
             .to_string()
     }
