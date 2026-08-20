@@ -134,7 +134,7 @@ fn store_command_receives_the_secret_on_standard_input() {
 fn protected_file_is_owner_only_and_refuses_overwrite() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("credential");
-    let sink = ProtectedFileSink { path: path.clone() };
+    let sink = ProtectedFileSink::new(path.clone());
     let reference = sink.store(&SecretString::new(KEY.into())).unwrap();
 
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
@@ -359,7 +359,7 @@ async fn retrieval_command_is_bounded_and_never_echoes_secret_failures() {
 fn protected_file_cleanup_removes_only_the_file_created_by_the_sink() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("credential");
-    let sink = ProtectedFileSink { path: path.clone() };
+    let sink = ProtectedFileSink::new(path.clone());
     let reference = sink.store(&SecretString::new(KEY.into())).unwrap();
     sink.cleanup(&reference).unwrap();
     assert!(!path.exists());
