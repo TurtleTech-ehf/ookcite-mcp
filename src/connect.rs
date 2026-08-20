@@ -1,5 +1,8 @@
 use std::fmt;
 
+use base64::Engine as _;
+use sha2::{Digest as _, Sha256};
+
 #[derive(Clone)]
 pub struct ConnectSecrets {
     pub state: String,
@@ -29,15 +32,24 @@ pub struct Pkce {
 
 impl Pkce {
     pub fn from_verifier(verifier: impl Into<String>) -> Self {
+        let verifier = verifier.into();
         Self {
-            verifier: verifier.into(),
-            challenge: String::new(),
+            challenge: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(Sha256::digest(verifier.as_bytes())),
+            verifier,
         }
     }
 }
 
-pub fn callback_state_matches(_expected: &str, _received: &str) -> bool {
-    false
+pub fn callback_state_matches(expected: &str, received: &str) -> bool {
+    if expected.len() != received.len() {
+        return false;
+    }
+    expected
+        .bytes()
+        .zip(received.bytes())
+        .fold(0_u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
 }
 
 pub struct LoopbackListener {
@@ -45,8 +57,9 @@ pub struct LoopbackListener {
 }
 
 impl LoopbackListener {
-    pub async fn bind(_port: u16) -> anyhow::Result<Self> {
-        anyhow::bail!("loopback callback is unavailable")
+    pub async fn bind(port: u16) -> anyhow::Result<Self> {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+        Ok(Self { listener })
     }
 
     pub fn local_addr(&self) -> anyhow::Result<std::net::SocketAddr> {
