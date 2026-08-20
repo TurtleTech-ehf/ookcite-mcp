@@ -120,6 +120,24 @@ fn public_quota_claims_match_the_runtime_contract() {
     assert!(setup.contains("anonymous mode: 20 lookups/day"));
     assert!(constants.contains("IP daily limit ~20"));
     assert!(batch_limits.contains("~20/day anonymous"));
+
+    for required in [
+        "setup --connect",
+        "platform credential store",
+        "--store-command",
+        "--retrieve-command",
+        "--credential-file",
+        "standard input",
+        "setup --key",
+        "OOKCITE_API_KEY_COMMAND",
+        "OOKCITE_API_KEY_FILE",
+    ] {
+        assert!(
+            readme.contains(required),
+            "README.md is missing secure connection guidance: {required}"
+        );
+    }
+    assert!(!readme.contains("pass show"));
 }
 
 /// Pull one tool's `description = "..."` out of a whitespace-flattened
