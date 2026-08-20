@@ -329,6 +329,36 @@ pub struct CredentialConfig {
     pub command_timeout: Duration,
 }
 
+impl CredentialConfig {
+    pub fn from_environment() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    pub fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
+        let value = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+        let api_key = value(lookup("OOKCITE_API_KEY")).map(SecretString::new);
+        let command = value(lookup("OOKCITE_API_KEY_COMMAND"));
+        let file = value(lookup("OOKCITE_API_KEY_FILE")).map(PathBuf::from);
+        let platform = value(lookup("OOKCITE_CREDENTIAL_STORE"))
+            .filter(|store| store.eq_ignore_ascii_case("platform"))
+            .map(|_| {
+                (
+                    value(lookup("OOKCITE_CREDENTIAL_SERVICE"))
+                        .unwrap_or_else(|| "ookcite-mcp".into()),
+                    value(lookup("OOKCITE_CREDENTIAL_ACCOUNT"))
+                        .unwrap_or_else(|| "default".into()),
+                )
+            });
+        Self {
+            api_key,
+            command,
+            file,
+            platform,
+            command_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
 impl fmt::Debug for CredentialConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

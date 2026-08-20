@@ -6,6 +6,18 @@ use ookcite_mcp::endpoints;
 
 use crate::constants::API;
 
+pub async fn load_configured_auth() -> anyhow::Result<bool> {
+    use ookcite_mcp::credentials::{CredentialConfig, SystemKeyring, load_credential};
+    use secrecy::ExposeSecret as _;
+
+    let config = CredentialConfig::from_environment();
+    let Some(credential) = load_credential(&config, &SystemKeyring).await? else {
+        return Ok(false);
+    };
+    std::env::set_var("OOKCITE_API_KEY", credential.expose_secret());
+    Ok(true)
+}
+
 pub async fn validate_auth() {
     let api_key = match std::env::var("OOKCITE_API_KEY") {
         Ok(k) if !k.is_empty() => k,

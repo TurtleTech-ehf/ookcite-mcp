@@ -23,7 +23,7 @@ mod tool_args;
 
 use rmcp::ServiceExt;
 
-use crate::cli::{check_for_updates, validate_auth};
+use crate::cli::{check_for_updates, load_configured_auth, validate_auth};
 use crate::constants::{startup_probes_enabled, version_output};
 use crate::server::Server;
 #[tokio::main]
@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
         setup::run(&args).await;
         return Ok(());
     }
+    load_configured_auth().await?;
     if args.iter().any(|a| a == "doctor") {
         // Stdout OK for human CLI; MCP never uses this path for JSON-RPC.
         println!("{}", Server::doctor_report_sync_prelude());
