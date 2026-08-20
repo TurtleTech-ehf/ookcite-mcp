@@ -374,7 +374,11 @@ impl Server {
                 )
             }
             Ok(r) if r.status().as_u16() == 429 => {
-                format!("RATE LIMITED: {}\n{}", error_detail(r).await, rate_limit_hint())
+                format!(
+                    "RATE LIMITED: {}\n{}",
+                    error_detail(r).await,
+                    rate_limit_hint()
+                )
             }
             Ok(r) if r.status().as_u16() == 403 => {
                 format!("ACCESS DENIED: {}", error_detail(r).await)
@@ -523,7 +527,11 @@ impl Server {
                 }
             }
             Ok(r) if r.status().as_u16() == 429 => {
-                format!("RATE LIMITED: {}\n{}", error_detail(r).await, rate_limit_hint())
+                format!(
+                    "RATE LIMITED: {}\n{}",
+                    error_detail(r).await,
+                    rate_limit_hint()
+                )
             }
             Ok(r) if r.status().as_u16() == 403 => {
                 format!("ACCESS DENIED: {}", error_detail(r).await)
@@ -646,7 +654,11 @@ impl Server {
                 "AUTH REQUIRED: debug_resolve requires authentication (API key)".into()
             }
             Ok(r) if r.status().as_u16() == 429 => {
-                format!("RATE LIMITED: {}\n{}", error_detail(r).await, rate_limit_hint())
+                format!(
+                    "RATE LIMITED: {}\n{}",
+                    error_detail(r).await,
+                    rate_limit_hint()
+                )
             }
             Ok(r) if r.status().as_u16() == 403 => {
                 format!("ACCESS DENIED: {}", error_detail(r).await)
@@ -677,7 +689,11 @@ impl Server {
         let meta: serde_json::Value = match lookup {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
             Ok(r) if r.status().as_u16() == 429 => {
-                return format!("RATE LIMITED: {}\n{}", error_detail(r).await, rate_limit_hint());
+                return format!(
+                    "RATE LIMITED: {}\n{}",
+                    error_detail(r).await,
+                    rate_limit_hint()
+                );
             }
             Ok(r) if r.status().as_u16() == 403 => {
                 return format!("ACCESS DENIED: {}", error_detail(r).await);
@@ -2187,7 +2203,11 @@ impl Server {
                 format_batch_resolve_results(&args.citations, &payload).join("\n")
             }
             Ok(r) if r.status().as_u16() == 429 => {
-                format!("RATE LIMITED: {}\n{}", error_detail(r).await, rate_limit_hint())
+                format!(
+                    "RATE LIMITED: {}\n{}",
+                    error_detail(r).await,
+                    rate_limit_hint()
+                )
             }
             Ok(r) => format!("Batch resolve failed: {}", error_detail(r).await),
             Err(e) => format!("Batch resolve failed: {e}"),
@@ -2267,7 +2287,11 @@ impl Server {
                 format_enhanced_search(&data)
             }
             Ok(r) if r.status().as_u16() == 429 => {
-                format!("RATE LIMITED: {}\n{}", error_detail(r).await, rate_limit_hint())
+                format!(
+                    "RATE LIMITED: {}\n{}",
+                    error_detail(r).await,
+                    rate_limit_hint()
+                )
             }
             Ok(r) => format!("Enhanced search failed: {}", error_detail(r).await),
             Err(e) => format!("Enhanced search failed: {e}"),

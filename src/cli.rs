@@ -7,7 +7,7 @@ use ookcite_mcp::endpoints;
 use crate::constants::API;
 
 pub async fn load_configured_auth() -> anyhow::Result<bool> {
-    use ookcite_mcp::credentials::{CredentialConfig, SystemKeyring, load_credential};
+    use ookcite_mcp::credentials::{load_credential, CredentialConfig, SystemKeyring};
     use secrecy::ExposeSecret as _;
 
     let config = CredentialConfig::from_environment();

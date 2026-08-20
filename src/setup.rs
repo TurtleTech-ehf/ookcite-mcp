@@ -1,13 +1,13 @@
-use ookcite_mcp::endpoints;
 use ookcite_mcp::connect::{
-    ConnectMode, DashboardClient, LoopbackListener, StartBrowserRequest, StartDeviceRequest,
-    SystemBrowser, finalize_installation, generate_pkce, open_browser_or_device,
-    poll_device_until_authorized, random_journey_id, random_token,
+    finalize_installation, generate_pkce, open_browser_or_device, poll_device_until_authorized,
+    random_journey_id, random_token, ConnectMode, DashboardClient, LoopbackListener,
+    StartBrowserRequest, StartDeviceRequest, SystemBrowser,
 };
 use ookcite_mcp::credentials::{
     CredentialReference, CredentialSink, PlatformCredentialSink, ProtectedFileSink,
     StoreCommandSink, SystemKeyring,
 };
+use ookcite_mcp::endpoints;
 
 use crate::constants::{API, VERSION};
 
@@ -139,9 +139,7 @@ fn parse_connect_options(args: &[String]) -> anyhow::Result<Option<ConnectOption
     let file = flag_value("--credential-file")?;
     let destination = match (store, retrieve, file) {
         (None, None, None) => CredentialDestination::Platform,
-        (Some(store), Some(retrieve), None) => {
-            CredentialDestination::Command { store, retrieve }
-        }
+        (Some(store), Some(retrieve), None) => CredentialDestination::Command { store, retrieve },
         (None, None, Some(path)) => CredentialDestination::File(path.into()),
         (Some(_), None, None) | (None, Some(_), None) => {
             anyhow::bail!("--store-command and --retrieve-command must be used together")
@@ -257,10 +255,7 @@ async fn exchange_connected_credential(
             ConnectMode::Browser => {
                 println!("Complete the OokCite connection in your browser.");
                 match listener
-                    .wait_for_callback(
-                        &state,
-                        std::time::Duration::from_secs(started.expires_in),
-                    )
+                    .wait_for_callback(&state, std::time::Duration::from_secs(started.expires_in))
                     .await
                 {
                     Ok(code) => code,
@@ -348,7 +343,10 @@ async fn run_connect(options: ConnectOptions) -> anyhow::Result<()> {
             install_connected_with_sink(&dashboard, &exchange, &journey_id, &options, &sink).await?
         }
     };
-    println!("OokCite connected with a {:?} credential reference.", reference);
+    println!(
+        "OokCite connected with a {:?} credential reference.",
+        reference
+    );
     println!("Restart MCP clients or reload their MCP servers to activate OokCite.");
     Ok(())
 }
@@ -442,9 +440,10 @@ mod tests {
 
     #[test]
     fn connect_options_default_to_platform_storage_and_support_explicit_sinks() {
-        let defaults = parse_connect_options(&["ookcite-mcp".into(), "setup".into(), "--connect".into()])
-            .unwrap()
-            .unwrap();
+        let defaults =
+            parse_connect_options(&["ookcite-mcp".into(), "setup".into(), "--connect".into()])
+                .unwrap()
+                .unwrap();
         assert_eq!(defaults.destination, CredentialDestination::Platform);
         assert!(!defaults.device_only);
         assert!(!defaults.replace_credential);

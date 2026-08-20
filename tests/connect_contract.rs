@@ -1,20 +1,19 @@
+use std::collections::HashMap;
 use std::io::Read as _;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ookcite_mcp::connect::{
-    ConnectError, ConnectMode, ConnectSecrets, DashboardClient, DevicePoll, LoopbackListener,
-    Pkce, StartBrowserRequest, StartDeviceRequest, callback_state_matches,
-    connection_config_env, device_poll_delay, finalize_installation, generate_pkce,
-    open_browser_or_device, poll_device_until_authorized, random_journey_id, random_token,
-    redact_diagnostic, verify_readiness,
+    callback_state_matches, connection_config_env, device_poll_delay, finalize_installation,
+    generate_pkce, open_browser_or_device, poll_device_until_authorized, random_journey_id,
+    random_token, redact_diagnostic, verify_readiness, ConnectError, ConnectMode, ConnectSecrets,
+    DashboardClient, DevicePoll, LoopbackListener, Pkce, StartBrowserRequest, StartDeviceRequest,
 };
 use ookcite_mcp::credentials::{
-    CredentialConfig, CredentialReference, CredentialSink, CredentialSource, KeyringBackend,
-    PlatformCredentialSink, ProtectedFileSink, StoreCommandSink, choose_source, load_credential,
+    choose_source, load_credential, CredentialConfig, CredentialReference, CredentialSink,
+    CredentialSource, KeyringBackend, PlatformCredentialSink, ProtectedFileSink, StoreCommandSink,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use wiremock::matchers::{body_json, method, path};
@@ -33,7 +32,10 @@ fn pkce_uses_the_rfc_7636_s256_challenge() {
 #[test]
 fn callback_state_requires_an_exact_constant_time_match() {
     assert!(callback_state_matches("random-state", "random-state"));
-    assert!(!callback_state_matches("random-state", "random-state-extra"));
+    assert!(!callback_state_matches(
+        "random-state",
+        "random-state-extra"
+    ));
     assert!(!callback_state_matches("random-state", "other-state"));
 }
 
@@ -41,7 +43,10 @@ fn callback_state_requires_an_exact_constant_time_match() {
 async fn loopback_listener_uses_a_random_localhost_port() {
     let listener = LoopbackListener::bind(0).await.unwrap();
     let address = listener.local_addr().unwrap();
-    assert_eq!(address.ip(), std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    assert_eq!(
+        address.ip(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    );
     assert_ne!(address.port(), 0);
 }
 
@@ -139,9 +144,14 @@ fn protected_file_is_owner_only_and_refuses_overwrite() {
     let sink = ProtectedFileSink::new(path.clone());
     let reference = sink.store(&SecretString::new(KEY.into())).unwrap();
 
-    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{KEY}\n"));
-    assert!(sink.store(&SecretString::new("replacement".into())).is_err());
+    assert!(sink
+        .store(&SecretString::new("replacement".into()))
+        .is_err());
     assert_eq!(
         reference.config_env(),
         vec![(
@@ -182,7 +192,8 @@ fn process_configuration_recognizes_existing_sources_and_platform_references() {
         ("OOKCITE_CREDENTIAL_ACCOUNT", "custom-account"),
         ("OOKCITE_API_KEY_TIMEOUT", "7"),
     ]);
-    let config = CredentialConfig::from_lookup(|name| values.get(name).map(|value| value.to_string()));
+    let config =
+        CredentialConfig::from_lookup(|name| values.get(name).map(|value| value.to_string()));
     assert_eq!(
         config.api_key.as_ref().unwrap().expose_secret(),
         "environment-key"
@@ -202,7 +213,8 @@ fn process_configuration_recognizes_existing_sources_and_platform_references() {
     assert_eq!(config.command_timeout, Duration::from_secs(7));
 
     let defaults = HashMap::from([("OOKCITE_CREDENTIAL_STORE", "platform")]);
-    let config = CredentialConfig::from_lookup(|name| defaults.get(name).map(|value| value.to_string()));
+    let config =
+        CredentialConfig::from_lookup(|name| defaults.get(name).map(|value| value.to_string()));
     assert_eq!(
         config.platform,
         Some(("ookcite-mcp".into(), "default".into()))
@@ -376,17 +388,15 @@ async fn failed_storage_keeps_exchange_resumable_and_receipt_waits_for_configura
         stored: Mutex::new(false),
         cleaned: Mutex::new(false),
     };
-    assert!(
-        finalize_installation(
-            &DashboardClient::new(dashboard.uri()),
-            &api.uri(),
-            &exchange,
-            &failing,
-            |_| Ok(())
-        )
-        .await
-        .is_err()
-    );
+    assert!(finalize_installation(
+        &DashboardClient::new(dashboard.uri()),
+        &api.uri(),
+        &exchange,
+        &failing,
+        |_| Ok(())
+    )
+    .await
+    .is_err());
     assert_eq!(exchange.credential.expose_secret(), KEY);
 
     let working = TransactionalSink {
@@ -481,9 +491,7 @@ impl MemoryKeyring {
 
 impl KeyringBackend for MemoryKeyring {
     fn get_password(&self, service: &str, account: &str) -> anyhow::Result<Option<SecretString>> {
-        Ok(self
-            .password(service, account)
-            .map(SecretString::new))
+        Ok(self.password(service, account).map(SecretString::new))
     }
 
     fn set_password(
@@ -526,8 +534,8 @@ fn platform_sink_refuses_overwrite_and_rolls_back_only_its_change() {
         Some("existing-key")
     );
 
-    let replacing = PlatformCredentialSink::new(&backend, "ookcite-mcp", "default")
-        .allow_replace(true);
+    let replacing =
+        PlatformCredentialSink::new(&backend, "ookcite-mcp", "default").allow_replace(true);
     let reference = replacing.store(&SecretString::new(KEY.into())).unwrap();
     assert_eq!(
         backend.password("ookcite-mcp", "default").as_deref(),
@@ -686,7 +694,9 @@ async fn browser_start_uses_random_pkce_state_journey_and_loopback_port() {
         .await
         .unwrap();
     assert_eq!(response.expires_in, 300);
-    assert!(response.authorization_url.starts_with("https://my.turtletech.us/"));
+    assert!(response
+        .authorization_url
+        .starts_with("https://my.turtletech.us/"));
 }
 
 #[tokio::test]
@@ -803,7 +813,9 @@ async fn exchange_readiness_and_receipt_complete_without_diagnostic_leakage() {
         .await;
     Mock::given(method("POST"))
         .and(path("/mcp/ookcite/receipt"))
-        .and(body_json(serde_json::json!({"receipt": "receipt-secret-value"})))
+        .and(body_json(
+            serde_json::json!({"receipt": "receipt-secret-value"}),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "credential_installed": true
         })))
