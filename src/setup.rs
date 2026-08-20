@@ -148,6 +148,7 @@ pub async fn run(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ookcite_mcp::credentials::CredentialReference;
 
     #[test]
     fn setup_banner_includes_current_version() {
@@ -163,5 +164,107 @@ mod tests {
         assert!(src.contains("mcpServers"));
         assert!(src.contains("@turtletech/ookcite-mcp"));
         assert!(src.contains("OOKCITE_STARTUP_PROBES"));
+    }
+
+    #[test]
+    fn connect_options_default_to_platform_storage_and_support_explicit_sinks() {
+        let defaults = parse_connect_options(&["ookcite-mcp".into(), "setup".into(), "--connect".into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(defaults.destination, CredentialDestination::Platform);
+        assert!(!defaults.device_only);
+        assert!(!defaults.replace_credential);
+
+        let helper = parse_connect_options(&[
+            "ookcite-mcp".into(),
+            "setup".into(),
+            "--connect".into(),
+            "--store-command".into(),
+            "credential-cli store ookcite".into(),
+            "--retrieve-command".into(),
+            "credential-cli read ookcite".into(),
+            "--device".into(),
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            helper.destination,
+            CredentialDestination::Command {
+                store: "credential-cli store ookcite".into(),
+                retrieve: "credential-cli read ookcite".into(),
+            }
+        );
+        assert!(helper.device_only);
+
+        let file = parse_connect_options(&[
+            "ookcite-mcp".into(),
+            "setup".into(),
+            "--connect".into(),
+            "--credential-file".into(),
+            "/tmp/ookcite-key".into(),
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            file.destination,
+            CredentialDestination::File("/tmp/ookcite-key".into())
+        );
+    }
+
+    #[test]
+    fn connect_options_reject_ambiguous_or_incomplete_storage_flags() {
+        let both = vec![
+            "ookcite-mcp".into(),
+            "setup".into(),
+            "--connect".into(),
+            "--credential-file".into(),
+            "/tmp/key".into(),
+            "--store-command".into(),
+            "store".into(),
+            "--retrieve-command".into(),
+            "read".into(),
+        ];
+        assert!(parse_connect_options(&both).is_err());
+        let missing_retrieval = vec![
+            "ookcite-mcp".into(),
+            "setup".into(),
+            "--connect".into(),
+            "--store-command".into(),
+            "store".into(),
+        ];
+        assert!(parse_connect_options(&missing_retrieval).is_err());
+    }
+
+    #[test]
+    fn connected_add_mcp_arguments_contain_references_and_journey_but_no_key() {
+        let journey = "018f47e2-19c3-7b8a-8f62-62fe39151ec4";
+        for reference in [
+            CredentialReference::Platform {
+                service: "ookcite-mcp".into(),
+                account: "default".into(),
+            },
+            CredentialReference::Command {
+                retrieve_command: "credential-cli read ookcite".into(),
+            },
+            CredentialReference::File {
+                path: "/tmp/ookcite-key".into(),
+            },
+        ] {
+            let arguments = connected_add_mcp_arguments("ookcite-mcp", &reference, journey);
+            let rendered = format!("{arguments:?}");
+            assert!(rendered.contains("OOKCITE_JOURNEY_ID"));
+            assert!(rendered.contains(journey));
+            assert!(!rendered.contains("ookc_example-secret-value"));
+            assert!(!arguments.iter().any(|argument| argument == "--key"));
+        }
+    }
+
+    #[test]
+    fn automatic_configuration_refuses_an_existing_named_server() {
+        assert!(listing_contains_ookcite(
+            "Cursor\n  ookcite  stdio  npx -y @turtletech/ookcite-mcp\n"
+        ));
+        assert!(listing_contains_ookcite("ookcite: configured\n"));
+        assert!(!listing_contains_ookcite("context7\nother-citation-tool\n"));
     }
 }
