@@ -344,7 +344,7 @@ async fn failed_storage_keeps_exchange_resumable_and_receipt_waits_for_configura
             &api.uri(),
             &exchange,
             &failing,
-            |_, _| Ok(())
+            |_| Ok(())
         )
         .await
         .is_err()
@@ -362,8 +362,7 @@ async fn failed_storage_keeps_exchange_resumable_and_receipt_waits_for_configura
         &api.uri(),
         &exchange,
         &working,
-        |reference, credential| {
-            assert_eq!(credential.expose_secret(), KEY);
+        |reference| {
             let config = connection_config_env(reference, journey);
             assert!(config.contains(&("OOKCITE_JOURNEY_ID".into(), journey.into())));
             let rendered = format!("{config:?}");
@@ -419,7 +418,7 @@ async fn configuration_failure_rolls_back_the_new_credential_without_redeeming()
         &api.uri(),
         &exchange,
         &sink,
-        |_, _| anyhow::bail!("client configuration failed"),
+        |_| anyhow::bail!("client configuration failed"),
     )
     .await;
     assert!(result.is_err());

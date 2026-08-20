@@ -7,6 +7,8 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::credentials::{CredentialReference, CredentialSink};
+
 #[derive(Clone)]
 pub struct ConnectSecrets {
     pub state: String,
@@ -157,6 +159,20 @@ impl BrowserOpener for SystemBrowser {
     fn open(&self, url: &str) -> anyhow::Result<()> {
         webbrowser::open(url)?;
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectMode {
+    Browser,
+    Device,
+}
+
+pub fn open_browser_or_device(opener: &impl BrowserOpener, url: &str) -> ConnectMode {
+    if opener.open(url).is_ok() {
+        ConnectMode::Browser
+    } else {
+        ConnectMode::Device
     }
 }
 
@@ -426,6 +442,79 @@ pub async fn verify_readiness(
             .map_err(|_| ConnectError::Unavailable)?,
     )
     .await
+}
+
+pub fn device_poll_delay(interval_seconds: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(interval_seconds)
+}
+
+pub async fn poll_device_until_authorized(
+    client: &DashboardClient,
+    started: &StartDeviceResponse,
+    state: &str,
+) -> Result<String, ConnectError> {
+    let deadline = tokio::time::Instant::now()
+        .checked_add(std::time::Duration::from_secs(started.expires_in))
+        .ok_or(ConnectError::Expired)?;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ConnectError::Expired);
+        }
+        match client.poll_device(&started.device_code, state).await? {
+            DevicePoll::AuthorizationCode(code) => return Ok(code),
+            DevicePoll::Pending => {
+                let delay = device_poll_delay(started.interval);
+                if tokio::time::Instant::now() + delay >= deadline {
+                    return Err(ConnectError::Expired);
+                }
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+pub fn connection_config_env(
+    reference: &CredentialReference,
+    journey_id: &str,
+) -> Vec<(String, String)> {
+    let mut environment = reference.config_env();
+    environment.push(("OOKCITE_JOURNEY_ID".into(), journey_id.into()));
+    environment
+}
+
+pub async fn finalize_installation<S, F>(
+    dashboard: &DashboardClient,
+    api_base: &str,
+    exchange: &ExchangeResult,
+    sink: &S,
+    configure: F,
+) -> anyhow::Result<CredentialReference>
+where
+    S: CredentialSink,
+    F: FnOnce(&CredentialReference) -> anyhow::Result<()>,
+{
+    let reference = sink.store(&exchange.credential)?;
+    let readiness = match verify_readiness(api_base, &exchange.credential).await {
+        Ok(readiness) if readiness.authenticated => readiness,
+        Ok(_) => {
+            let _ = sink.cleanup(&reference);
+            anyhow::bail!("connected credential was not accepted")
+        }
+        Err(_) => {
+            let _ = sink.cleanup(&reference);
+            anyhow::bail!("connected credential readiness check failed")
+        }
+    };
+    let _ = readiness;
+    if configure(&reference).is_err() {
+        let _ = sink.cleanup(&reference);
+        anyhow::bail!("client configuration failed")
+    }
+    dashboard
+        .redeem_receipt(&exchange.installation_receipt)
+        .await
+        .map_err(|_| anyhow::anyhow!("credential installation receipt could not be recorded"))?;
+    Ok(reference)
 }
 
 pub fn generate_pkce() -> Pkce {
