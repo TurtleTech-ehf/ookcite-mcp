@@ -1,5 +1,7 @@
 #[test]
 fn public_quota_claims_match_the_runtime_contract() {
+    const OOKCITE_SIGNUP_URL: &str =
+        "https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp";
     let readme = include_str!("../README.md");
     let npm_readme = include_str!("../npm/README.md");
     let cli = include_str!("../src/cli.rs");
@@ -36,6 +38,20 @@ fn public_quota_claims_match_the_runtime_contract() {
         npm_readme, readme,
         "the npm package README must mirror the public root contract"
     );
+    for (path, contents) in [
+        ("README.md", readme),
+        ("npm/README.md", npm_readme),
+        ("src/setup.rs", setup),
+        ("src/constants.rs", constants),
+        ("src/batch_limits.rs", batch_limits),
+    ] {
+        assert!(
+            contents.contains(OOKCITE_SIGNUP_URL),
+            "{path} must preserve OokCite context on signup links"
+        );
+    }
+    let server_json = include_str!("../server.json");
+    assert!(server_json.contains(OOKCITE_SIGNUP_URL));
 
     let plan_row = |tier: &str| {
         readme

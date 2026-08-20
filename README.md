@@ -37,7 +37,7 @@ npx @turtletech/ookcite-mcp setup --key YOUR_API_KEY
 ```
 
 No API key required for basic usage (20 lookups/day).
-[Sign up](https://my.turtletech.us/signup) for more.
+[Sign up](https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp) for more.
 
 After changing MCP config, restart the client or reload its MCP servers.
 Many clients do not hot-reload environment-variable changes for already-running
@@ -313,7 +313,7 @@ The MCP server connects to the public [OokCite](https://ookcite.turtletech.us)
 API to look up and format citations. It's a thin MCP wrapper around the OokCite
 REST API with no local database, and no heavy dependencies.
 
-[Sign up](https://my.turtletech.us/signup) for a free account (60 lookups/day),
+[Sign up](https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp) for a free account (60 lookups/day),
 or upgrade to Academic (EUR 4/mo) or Business (EUR 10/mo) for higher monthly
 API limits, larger collections, paid utilities, merge, and batch-move.
 
