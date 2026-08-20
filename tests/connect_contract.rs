@@ -172,6 +172,42 @@ fn existing_credential_sources_keep_their_precedence() {
 }
 
 #[test]
+fn process_configuration_recognizes_existing_sources_and_platform_references() {
+    let values = HashMap::from([
+        ("OOKCITE_API_KEY", "environment-key"),
+        ("OOKCITE_API_KEY_COMMAND", "credential-cli read ookcite"),
+        ("OOKCITE_API_KEY_FILE", "/protected/ookcite-key"),
+        ("OOKCITE_CREDENTIAL_STORE", "platform"),
+        ("OOKCITE_CREDENTIAL_SERVICE", "custom-service"),
+        ("OOKCITE_CREDENTIAL_ACCOUNT", "custom-account"),
+    ]);
+    let config = CredentialConfig::from_lookup(|name| values.get(name).map(|value| value.to_string()));
+    assert_eq!(
+        config.api_key.as_ref().unwrap().expose_secret(),
+        "environment-key"
+    );
+    assert_eq!(
+        config.command.as_deref(),
+        Some("credential-cli read ookcite")
+    );
+    assert_eq!(
+        config.file.as_deref(),
+        Some(std::path::Path::new("/protected/ookcite-key"))
+    );
+    assert_eq!(
+        config.platform,
+        Some(("custom-service".into(), "custom-account".into()))
+    );
+
+    let defaults = HashMap::from([("OOKCITE_CREDENTIAL_STORE", "platform")]);
+    let config = CredentialConfig::from_lookup(|name| defaults.get(name).map(|value| value.to_string()));
+    assert_eq!(
+        config.platform,
+        Some(("ookcite-mcp".into(), "default".into()))
+    );
+}
+
+#[test]
 fn configuration_references_never_contain_the_secret() {
     for reference in [
         CredentialReference::Platform {
