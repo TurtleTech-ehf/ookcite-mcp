@@ -180,6 +180,7 @@ fn process_configuration_recognizes_existing_sources_and_platform_references() {
         ("OOKCITE_CREDENTIAL_STORE", "platform"),
         ("OOKCITE_CREDENTIAL_SERVICE", "custom-service"),
         ("OOKCITE_CREDENTIAL_ACCOUNT", "custom-account"),
+        ("OOKCITE_API_KEY_TIMEOUT", "7"),
     ]);
     let config = CredentialConfig::from_lookup(|name| values.get(name).map(|value| value.to_string()));
     assert_eq!(
@@ -198,6 +199,7 @@ fn process_configuration_recognizes_existing_sources_and_platform_references() {
         config.platform,
         Some(("custom-service".into(), "custom-account".into()))
     );
+    assert_eq!(config.command_timeout, Duration::from_secs(7));
 
     let defaults = HashMap::from([("OOKCITE_CREDENTIAL_STORE", "platform")]);
     let config = CredentialConfig::from_lookup(|name| defaults.get(name).map(|value| value.to_string()));
