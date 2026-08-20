@@ -1,6 +1,6 @@
 //! Reverse-lookup and free-text resolve helpers.
 
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 use crate::constants::rate_limit_hint;
 use crate::http_error::error_detail;
@@ -332,6 +332,46 @@ fn is_retryable_lookup_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 502..=504)
 }
 
+/// 503 search pressure and 504 budget timeout on `/reverse`.
+pub fn is_reverse_pressure_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 503 | 504)
+}
+
+const DEFAULT_REVERSE_RETRY_SECS: u64 = 2;
+
+/// Wait `Retry-After` seconds when that header is a delay, otherwise 2s.
+pub fn reverse_retry_delay(retry_after: Option<&reqwest::header::HeaderValue>) -> Duration {
+    retry_after
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(DEFAULT_REVERSE_RETRY_SECS))
+}
+
+/// POST `/reverse` once, then at most one more time after 503/504.
+pub async fn send_reverse_with_one_retry(
+    http: &reqwest::Client,
+    api_base: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let first = http
+        .post(endpoints::REVERSE.url(api_base, &[]))
+        .json(body)
+        .send()
+        .await?;
+    if !is_reverse_pressure_status(first.status()) {
+        return Ok(first);
+    }
+    sleep(reverse_retry_delay(
+        first.headers().get(reqwest::header::RETRY_AFTER),
+    ))
+    .await;
+    http.post(endpoints::REVERSE.url(api_base, &[]))
+        .json(body)
+        .send()
+        .await
+}
+
 pub async fn lookup_doi_with_retry(
     http: &reqwest::Client,
     api_base: &str,
@@ -373,6 +413,36 @@ mod tests {
         ] {
             assert!(is_retryable_lookup_status(status), "status {status}");
         }
+    }
+
+    #[test]
+    fn reverse_retry_policy_is_pressure_and_timeout_only() {
+        use super::is_reverse_pressure_status;
+        assert!(is_reverse_pressure_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_reverse_pressure_status(StatusCode::GATEWAY_TIMEOUT));
+        assert!(!is_reverse_pressure_status(StatusCode::BAD_GATEWAY));
+        assert!(!is_reverse_pressure_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!is_reverse_pressure_status(StatusCode::REQUEST_TIMEOUT));
+    }
+
+    #[test]
+    fn reverse_retry_delay_uses_retry_after_seconds_else_two() {
+        use super::reverse_retry_delay;
+        use reqwest::header::HeaderValue;
+        use tokio::time::Duration;
+
+        assert_eq!(reverse_retry_delay(None), Duration::from_secs(2));
+        let zero = HeaderValue::from_static("0");
+        assert_eq!(reverse_retry_delay(Some(&zero)), Duration::from_secs(0));
+        let five = HeaderValue::from_static("5");
+        assert_eq!(reverse_retry_delay(Some(&five)), Duration::from_secs(5));
+        let padded = HeaderValue::from_static(" 3 ");
+        assert_eq!(reverse_retry_delay(Some(&padded)), Duration::from_secs(3));
+        let http_date = HeaderValue::from_static("Wed, 21 Oct 2015 07:28:00 GMT");
+        assert_eq!(
+            reverse_retry_delay(Some(&http_date)),
+            Duration::from_secs(2)
+        );
     }
 }
 
