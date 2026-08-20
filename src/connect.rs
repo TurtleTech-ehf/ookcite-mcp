@@ -490,7 +490,7 @@ pub async fn finalize_installation<S, F>(
     configure: F,
 ) -> anyhow::Result<CredentialReference>
 where
-    S: CredentialSink,
+    S: CredentialSink + ?Sized,
     F: FnOnce(&CredentialReference) -> anyhow::Result<()>,
 {
     let reference = sink.store(&exchange.credential)?;

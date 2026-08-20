@@ -1,4 +1,13 @@
 use ookcite_mcp::endpoints;
+use ookcite_mcp::connect::{
+    ConnectMode, DashboardClient, LoopbackListener, StartBrowserRequest, StartDeviceRequest,
+    SystemBrowser, finalize_installation, generate_pkce, open_browser_or_device,
+    poll_device_until_authorized, random_journey_id, random_token,
+};
+use ookcite_mcp::credentials::{
+    CredentialReference, CredentialSink, PlatformCredentialSink, ProtectedFileSink,
+    StoreCommandSink, SystemKeyring,
+};
 
 use crate::constants::{API, VERSION};
 
@@ -93,8 +102,273 @@ fn run_add_mcp(api_key: Option<&str>) -> bool {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CredentialDestination {
+    Platform,
+    Command { store: String, retrieve: String },
+    File(std::path::PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectOptions {
+    destination: CredentialDestination,
+    device_only: bool,
+    replace_credential: bool,
+    replace_config: bool,
+}
+
+fn parse_connect_options(args: &[String]) -> anyhow::Result<Option<ConnectOptions>> {
+    if !args.iter().any(|argument| argument == "--connect") {
+        return Ok(None);
+    }
+    if args.iter().any(|argument| argument == "--key") {
+        anyhow::bail!("--connect and --key cannot be used together")
+    }
+    let flag_value = |name: &str| -> anyhow::Result<Option<String>> {
+        let Some(position) = args.iter().position(|argument| argument == name) else {
+            return Ok(None);
+        };
+        let value = args
+            .get(position + 1)
+            .filter(|value| !value.starts_with("--"))
+            .ok_or_else(|| anyhow::anyhow!("{name} requires a value"))?;
+        Ok(Some(value.clone()))
+    };
+    let store = flag_value("--store-command")?;
+    let retrieve = flag_value("--retrieve-command")?;
+    let file = flag_value("--credential-file")?;
+    let destination = match (store, retrieve, file) {
+        (None, None, None) => CredentialDestination::Platform,
+        (Some(store), Some(retrieve), None) => {
+            CredentialDestination::Command { store, retrieve }
+        }
+        (None, None, Some(path)) => CredentialDestination::File(path.into()),
+        (Some(_), None, None) | (None, Some(_), None) => {
+            anyhow::bail!("--store-command and --retrieve-command must be used together")
+        }
+        _ => anyhow::bail!("select only one credential destination"),
+    };
+    Ok(Some(ConnectOptions {
+        destination,
+        device_only: args.iter().any(|argument| argument == "--device"),
+        replace_credential: args
+            .iter()
+            .any(|argument| argument == "--replace-credential"),
+        replace_config: args.iter().any(|argument| argument == "--replace-config"),
+    }))
+}
+
+fn connected_add_mcp_arguments(
+    target: &str,
+    reference: &CredentialReference,
+    journey_id: &str,
+) -> Vec<String> {
+    let mut arguments = vec![
+        target.into(),
+        "--name".into(),
+        "ookcite".into(),
+        "-y".into(),
+        "--all".into(),
+    ];
+    for (name, value) in ookcite_mcp::connect::connection_config_env(reference, journey_id) {
+        arguments.push("--env".into());
+        arguments.push(format!("{name}={value}"));
+    }
+    arguments
+}
+
+fn listing_contains_ookcite(listing: &str) -> bool {
+    listing.split_whitespace().any(|word| {
+        word.trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+            .eq_ignore_ascii_case("ookcite")
+    })
+}
+
+fn existing_ookcite_configuration() -> anyhow::Result<bool> {
+    let output = std::process::Command::new("npx")
+        .args(["-y", "add-mcp", "list"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|_| anyhow::anyhow!("could not inspect existing MCP configuration"))?;
+    if !output.status.success() {
+        anyhow::bail!("could not inspect existing MCP configuration")
+    }
+    Ok(listing_contains_ookcite(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn run_connected_add_mcp(
+    reference: &CredentialReference,
+    journey_id: &str,
+    replace_config: bool,
+) -> anyhow::Result<()> {
+    if !replace_config && existing_ookcite_configuration()? {
+        anyhow::bail!("OokCite is already configured; use --replace-config to replace it")
+    }
+    let target = find_binary().unwrap_or_else(|| "npx -y @turtletech/ookcite-mcp".into());
+    let arguments = connected_add_mcp_arguments(&target, reference, journey_id);
+    let status = std::process::Command::new("npx")
+        .args(["-y", "add-mcp"])
+        .args(arguments)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .map_err(|_| anyhow::anyhow!("add-mcp could not be started"))?;
+    if !status.success() {
+        anyhow::bail!("add-mcp failed")
+    }
+    Ok(())
+}
+
+async fn exchange_connected_credential(
+    dashboard: &DashboardClient,
+    device_only: bool,
+) -> anyhow::Result<(ookcite_mcp::connect::ExchangeResult, String)> {
+    let pkce = generate_pkce();
+    let state = random_token();
+    let journey_id = random_journey_id();
+
+    let authorization_code = if device_only {
+        let started = dashboard
+            .start_device(StartDeviceRequest {
+                journey_id: &journey_id,
+                code_challenge: &pkce.challenge,
+                code_challenge_method: "S256",
+                state: &state,
+            })
+            .await?;
+        println!("Open: {}", started.verification_uri);
+        println!("Enter code: {}", started.user_code);
+        poll_device_until_authorized(dashboard, &started, &state).await?
+    } else {
+        let listener = LoopbackListener::bind(0).await?;
+        let callback_port = listener.local_addr()?.port();
+        let started = dashboard
+            .start_browser(StartBrowserRequest {
+                journey_id: &journey_id,
+                code_challenge: &pkce.challenge,
+                code_challenge_method: "S256",
+                state: &state,
+                callback_port,
+            })
+            .await?;
+        match open_browser_or_device(&SystemBrowser, &started.authorization_url) {
+            ConnectMode::Browser => {
+                println!("Complete the OokCite connection in your browser.");
+                match listener
+                    .wait_for_callback(
+                        &state,
+                        std::time::Duration::from_secs(started.expires_in),
+                    )
+                    .await
+                {
+                    Ok(code) => code,
+                    Err(error) => {
+                        let _ = dashboard.cancel(&started.authorization_id, &state).await;
+                        return Err(error.into());
+                    }
+                }
+            }
+            ConnectMode::Device => {
+                let _ = dashboard.cancel(&started.authorization_id, &state).await;
+                let device = dashboard
+                    .start_device(StartDeviceRequest {
+                        journey_id: &journey_id,
+                        code_challenge: &pkce.challenge,
+                        code_challenge_method: "S256",
+                        state: &state,
+                    })
+                    .await?;
+                println!("Open: {}", device.verification_uri);
+                println!("Enter code: {}", device.user_code);
+                poll_device_until_authorized(dashboard, &device, &state).await?
+            }
+        }
+    };
+    let exchange = dashboard
+        .exchange(&authorization_code, &pkce.verifier, &state)
+        .await?;
+    Ok((exchange, journey_id))
+}
+
+#[cfg(windows)]
+fn store_command(command: String) -> Vec<String> {
+    vec!["cmd".into(), "/C".into(), command]
+}
+
+#[cfg(not(windows))]
+fn store_command(command: String) -> Vec<String> {
+    vec!["sh".into(), "-c".into(), command]
+}
+
+async fn install_connected_with_sink<S: CredentialSink + ?Sized>(
+    dashboard: &DashboardClient,
+    exchange: &ookcite_mcp::connect::ExchangeResult,
+    journey_id: &str,
+    options: &ConnectOptions,
+    sink: &S,
+) -> anyhow::Result<CredentialReference> {
+    finalize_installation(
+        dashboard,
+        &crate::constants::api_base_url(),
+        exchange,
+        sink,
+        |reference| run_connected_add_mcp(reference, journey_id, options.replace_config),
+    )
+    .await
+}
+
+async fn run_connect(options: ConnectOptions) -> anyhow::Result<()> {
+    let dashboard_api = std::env::var("OOKCITE_DASHBOARD_API")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "https://dashboard-api.turtletech.us/api/v1".into());
+    let dashboard = DashboardClient::new(dashboard_api);
+    let (exchange, journey_id) =
+        exchange_connected_credential(&dashboard, options.device_only).await?;
+
+    let reference = match &options.destination {
+        CredentialDestination::Platform => {
+            let backend = SystemKeyring;
+            let sink = PlatformCredentialSink::new(&backend, "ookcite-mcp", "default")
+                .allow_replace(options.replace_credential);
+            install_connected_with_sink(&dashboard, &exchange, &journey_id, &options, &sink).await?
+        }
+        CredentialDestination::Command { store, retrieve } => {
+            let sink = StoreCommandSink {
+                command: store_command(store.clone()),
+                retrieve_command: retrieve.clone(),
+            };
+            install_connected_with_sink(&dashboard, &exchange, &journey_id, &options, &sink).await?
+        }
+        CredentialDestination::File(path) => {
+            let sink = ProtectedFileSink::new(path);
+            install_connected_with_sink(&dashboard, &exchange, &journey_id, &options, &sink).await?
+        }
+    };
+    println!("OokCite connected with a {:?} credential reference.", reference);
+    println!("Restart MCP clients or reload their MCP servers to activate OokCite.");
+    Ok(())
+}
+
 pub async fn run(args: &[String]) {
     println!("{}", setup_banner());
+
+    match parse_connect_options(args) {
+        Ok(Some(options)) => {
+            if let Err(error) = run_connect(options).await {
+                eprintln!("OokCite connection failed: {error}");
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("OokCite setup options are invalid: {error}");
+            return;
+        }
+    }
 
     // Parse --key flag
     let api_key = args
