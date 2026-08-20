@@ -1,6 +1,8 @@
 use std::fmt;
 
 use base64::Engine as _;
+use rand::RngCore as _;
+use secrecy::ExposeSecret as _;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -70,10 +72,78 @@ impl LoopbackListener {
 
     pub async fn wait_for_callback(
         &self,
-        _expected_state: &str,
-        _timeout: std::time::Duration,
+        expected_state: &str,
+        timeout: std::time::Duration,
     ) -> Result<String, ConnectError> {
-        Err(ConnectError::Unavailable)
+        let (mut stream, peer) = tokio::time::timeout(timeout, self.listener.accept())
+            .await
+            .map_err(|_| ConnectError::Expired)?
+            .map_err(|_| ConnectError::Unavailable)?;
+        if !peer.ip().is_loopback() {
+            return Err(ConnectError::InvalidResponse);
+        }
+
+        use tokio::io::AsyncReadExt as _;
+        let mut request = Vec::with_capacity(1024);
+        loop {
+            let mut chunk = [0_u8; 1024];
+            let read = tokio::time::timeout(timeout, stream.read(&mut chunk))
+                .await
+                .map_err(|_| ConnectError::Expired)?
+                .map_err(|_| ConnectError::InvalidResponse)?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+            if request.len() > 8192 {
+                return Err(ConnectError::InvalidResponse);
+            }
+        }
+        let request = std::str::from_utf8(&request).map_err(|_| ConnectError::InvalidResponse)?;
+        let first_line = request.lines().next().ok_or(ConnectError::InvalidResponse)?;
+        let mut parts = first_line.split_whitespace();
+        if parts.next() != Some("GET") {
+            return Err(ConnectError::InvalidResponse);
+        }
+        let target = parts.next().ok_or(ConnectError::InvalidResponse)?;
+        let url = url::Url::parse(&format!("http://127.0.0.1{target}"))
+            .map_err(|_| ConnectError::InvalidResponse)?;
+        if url.path() != "/callback" {
+            return Err(ConnectError::InvalidResponse);
+        }
+        let parameter = |name: &str| {
+            url.query_pairs()
+                .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
+        };
+        let received_state = parameter("state").ok_or(ConnectError::InvalidState)?;
+        if !callback_state_matches(expected_state, &received_state) {
+            let _ = write_callback_response(&mut stream, "400 Bad Request", "").await;
+            return Err(ConnectError::InvalidState);
+        }
+        if let Some(error) = parameter("error") {
+            let _ = write_callback_response(
+                &mut stream,
+                "200 OK",
+                "Connection declined. Return to terminal.",
+            )
+            .await;
+            return Err(match error.as_str() {
+                "access_denied" => ConnectError::Denied,
+                "cancelled" => ConnectError::Cancelled,
+                _ => ConnectError::InvalidResponse,
+            });
+        }
+        let code = parameter("code").ok_or(ConnectError::InvalidResponse)?;
+        write_callback_response(
+            &mut stream,
+            "200 OK",
+            "OokCite connected. Return to your terminal.",
+        )
+        .await?;
+        Ok(code)
     }
 }
 
@@ -198,58 +268,230 @@ impl DashboardClient {
 
     pub async fn start_browser(
         &self,
-        _request: StartBrowserRequest<'_>,
+        request: StartBrowserRequest<'_>,
     ) -> Result<StartBrowserResponse, ConnectError> {
-        let _ = (&self.base_url, &self.client);
-        Err(ConnectError::Unavailable)
+        decode_response(
+            self.client
+                .post(self.endpoint("/mcp/ookcite/authorize"))
+                .json(&request)
+                .send()
+                .await
+                .map_err(|_| ConnectError::Unavailable)?,
+        )
+        .await
     }
 
     pub async fn start_device(
         &self,
-        _request: StartDeviceRequest<'_>,
+        request: StartDeviceRequest<'_>,
     ) -> Result<StartDeviceResponse, ConnectError> {
-        Err(ConnectError::Unavailable)
+        decode_response(
+            self.client
+                .post(self.endpoint("/mcp/ookcite/device"))
+                .json(&request)
+                .send()
+                .await
+                .map_err(|_| ConnectError::Unavailable)?,
+        )
+        .await
     }
 
     pub async fn poll_device(
         &self,
-        _device_code: &str,
-        _state: &str,
+        device_code: &str,
+        state: &str,
     ) -> Result<DevicePoll, ConnectError> {
-        Err(ConnectError::Unavailable)
+        #[derive(Serialize)]
+        struct Request<'a> {
+            device_code: &'a str,
+            state: &'a str,
+        }
+        #[derive(Deserialize)]
+        struct Response {
+            status: String,
+            code: Option<String>,
+        }
+        let response: Response = decode_response(
+            self.client
+                .post(self.endpoint("/mcp/ookcite/device/poll"))
+                .json(&Request { device_code, state })
+                .send()
+                .await
+                .map_err(|_| ConnectError::Unavailable)?,
+        )
+        .await?;
+        match response.status.as_str() {
+            "pending" => Ok(DevicePoll::Pending),
+            "authorization_code" => response
+                .code
+                .map(DevicePoll::AuthorizationCode)
+                .ok_or(ConnectError::InvalidResponse),
+            _ => Err(ConnectError::InvalidResponse),
+        }
     }
 
     pub async fn exchange(
         &self,
-        _code: &str,
-        _verifier: &str,
-        _state: &str,
+        code: &str,
+        verifier: &str,
+        state: &str,
     ) -> Result<ExchangeResult, ConnectError> {
-        Err(ConnectError::Unavailable)
+        #[derive(Serialize)]
+        struct Request<'a> {
+            code: &'a str,
+            verifier: &'a str,
+            state: &'a str,
+        }
+        #[derive(Deserialize)]
+        struct Response {
+            api_key: String,
+            installation_receipt: String,
+            plan: String,
+        }
+        let response: Response = decode_response(
+            self.client
+                .post(self.endpoint("/mcp/ookcite/exchange"))
+                .json(&Request {
+                    code,
+                    verifier,
+                    state,
+                })
+                .send()
+                .await
+                .map_err(|_| ConnectError::Unavailable)?,
+        )
+        .await?;
+        Ok(ExchangeResult {
+            credential: SecretString::new(response.api_key),
+            installation_receipt: response.installation_receipt,
+            plan: response.plan,
+        })
     }
 
-    pub async fn redeem_receipt(&self, _receipt: &str) -> Result<(), ConnectError> {
-        Err(ConnectError::Unavailable)
+    pub async fn redeem_receipt(&self, receipt: &str) -> Result<(), ConnectError> {
+        let response = self
+            .client
+            .post(self.endpoint("/mcp/ookcite/receipt"))
+            .json(&serde_json::json!({ "receipt": receipt }))
+            .send()
+            .await
+            .map_err(|_| ConnectError::Unavailable)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(response_error(response).await)
+        }
+    }
+
+    pub async fn cancel(
+        &self,
+        authorization_id: &str,
+        state: &str,
+    ) -> Result<(), ConnectError> {
+        let response = self
+            .client
+            .post(self.endpoint(&format!(
+                "/mcp/ookcite/authorizations/{authorization_id}/cancel"
+            )))
+            .json(&serde_json::json!({ "state": state }))
+            .send()
+            .await
+            .map_err(|_| ConnectError::Unavailable)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(response_error(response).await)
+        }
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        format!("{}{}", self.base_url.trim_end_matches('/'), path)
     }
 }
 
 pub async fn verify_readiness(
-    _api_base: &str,
-    _credential: &SecretString,
+    api_base: &str,
+    credential: &SecretString,
 ) -> Result<Readiness, ConnectError> {
-    Err(ConnectError::Unavailable)
+    decode_response(
+        reqwest::Client::new()
+            .get(format!(
+                "{}/api/v1/me",
+                api_base.trim_end_matches('/')
+            ))
+            .header("origin", "https://ookcite.turtletech.us")
+            .bearer_auth(credential.expose_secret())
+            .send()
+            .await
+            .map_err(|_| ConnectError::Unavailable)?,
+    )
+    .await
 }
 
 pub fn generate_pkce() -> Pkce {
-    Pkce::from_verifier("")
+    Pkce::from_verifier(random_token())
 }
 
 pub fn random_token() -> String {
-    String::new()
+    let mut bytes = [0_u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 pub fn random_journey_id() -> String {
-    String::new()
+    uuid::Uuid::new_v4().to_string()
+}
+
+async fn decode_response<T: for<'de> Deserialize<'de>>(
+    response: reqwest::Response,
+) -> Result<T, ConnectError> {
+    if !response.status().is_success() {
+        return Err(response_error(response).await);
+    }
+    response
+        .json::<T>()
+        .await
+        .map_err(|_| ConnectError::InvalidResponse)
+}
+
+async fn response_error(response: reqwest::Response) -> ConnectError {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        error: Option<String>,
+    }
+    let status = response.status();
+    let code = response
+        .json::<ErrorBody>()
+        .await
+        .ok()
+        .and_then(|body| body.error);
+    match code.as_deref() {
+        Some("invalid_state") => ConnectError::InvalidState,
+        Some("expired") => ConnectError::Expired,
+        Some("access_denied") => ConnectError::Denied,
+        Some("cancelled") => ConnectError::Cancelled,
+        Some("already_consumed") => ConnectError::AlreadyConsumed,
+        _ if status == reqwest::StatusCode::GONE => ConnectError::Expired,
+        _ if status == reqwest::StatusCode::FORBIDDEN => ConnectError::Denied,
+        _ if status == reqwest::StatusCode::CONFLICT => ConnectError::AlreadyConsumed,
+        _ => ConnectError::Unavailable,
+    }
+}
+
+async fn write_callback_response(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    body: &str,
+) -> Result<(), ConnectError> {
+    use tokio::io::AsyncWriteExt as _;
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|_| ConnectError::Unavailable)
 }
 
 pub fn redact_diagnostic(message: &str, secrets: &ConnectSecrets) -> String {
