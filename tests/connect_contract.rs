@@ -1,7 +1,9 @@
 use std::io::Read as _;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ookcite_mcp::connect::{
     ConnectError, ConnectSecrets, DashboardClient, DevicePoll, LoopbackListener, Pkce,
@@ -9,8 +11,8 @@ use ookcite_mcp::connect::{
     random_journey_id, random_token, redact_diagnostic, verify_readiness,
 };
 use ookcite_mcp::credentials::{
-    CredentialReference, CredentialSink, CredentialSource, ProtectedFileSink, StoreCommandSink,
-    choose_source,
+    CredentialConfig, CredentialReference, CredentialSink, CredentialSource, KeyringBackend,
+    PlatformCredentialSink, ProtectedFileSink, StoreCommandSink, choose_source, load_credential,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use wiremock::matchers::{body_json, method, path};
@@ -184,6 +186,187 @@ fn configuration_references_never_contain_the_secret() {
         let rendered = format!("{reference:?} {:?}", reference.config_env());
         assert!(!rendered.contains(KEY));
     }
+}
+
+#[derive(Default)]
+struct MemoryKeyring {
+    entries: Mutex<HashMap<(String, String), String>>,
+}
+
+impl MemoryKeyring {
+    fn password(&self, service: &str, account: &str) -> Option<String> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(&(service.into(), account.into()))
+            .cloned()
+    }
+}
+
+impl KeyringBackend for MemoryKeyring {
+    fn get_password(&self, service: &str, account: &str) -> anyhow::Result<Option<SecretString>> {
+        Ok(self
+            .password(service, account)
+            .map(SecretString::new))
+    }
+
+    fn set_password(
+        &self,
+        service: &str,
+        account: &str,
+        secret: &SecretString,
+    ) -> anyhow::Result<()> {
+        self.entries.lock().unwrap().insert(
+            (service.into(), account.into()),
+            secret.expose_secret().to_string(),
+        );
+        Ok(())
+    }
+
+    fn delete_password(&self, service: &str, account: &str) -> anyhow::Result<()> {
+        self.entries
+            .lock()
+            .unwrap()
+            .remove(&(service.into(), account.into()));
+        Ok(())
+    }
+}
+
+#[test]
+fn platform_sink_refuses_overwrite_and_rolls_back_only_its_change() {
+    let backend = MemoryKeyring::default();
+    backend
+        .set_password(
+            "ookcite-mcp",
+            "default",
+            &SecretString::new("existing-key".into()),
+        )
+        .unwrap();
+
+    let refusing = PlatformCredentialSink::new(&backend, "ookcite-mcp", "default");
+    assert!(refusing.store(&SecretString::new(KEY.into())).is_err());
+    assert_eq!(
+        backend.password("ookcite-mcp", "default").as_deref(),
+        Some("existing-key")
+    );
+
+    let replacing = PlatformCredentialSink::new(&backend, "ookcite-mcp", "default")
+        .allow_replace(true);
+    let reference = replacing.store(&SecretString::new(KEY.into())).unwrap();
+    assert_eq!(
+        backend.password("ookcite-mcp", "default").as_deref(),
+        Some(KEY)
+    );
+    replacing.cleanup(&reference).unwrap();
+    assert_eq!(
+        backend.password("ookcite-mcp", "default").as_deref(),
+        Some("existing-key")
+    );
+
+    let empty_backend = MemoryKeyring::default();
+    let creating = PlatformCredentialSink::new(&empty_backend, "ookcite-mcp", "default");
+    let reference = creating.store(&SecretString::new(KEY.into())).unwrap();
+    creating.cleanup(&reference).unwrap();
+    assert_eq!(empty_backend.password("ookcite-mcp", "default"), None);
+}
+
+#[tokio::test]
+async fn credential_loader_preserves_environment_command_file_platform_precedence() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("credential");
+    std::fs::write(&file, "file-key\n").unwrap();
+    let backend = Arc::new(MemoryKeyring::default());
+    backend
+        .set_password(
+            "ookcite-mcp",
+            "default",
+            &SecretString::new("platform-key".into()),
+        )
+        .unwrap();
+    let mut config = CredentialConfig {
+        api_key: Some(SecretString::new("environment-key".into())),
+        command: Some("printf command-key".into()),
+        file: Some(file),
+        platform: Some(("ookcite-mcp".into(), "default".into())),
+        command_timeout: Duration::from_secs(1),
+    };
+
+    assert_eq!(
+        load_credential(&config, backend.as_ref())
+            .await
+            .unwrap()
+            .unwrap()
+            .expose_secret(),
+        "environment-key"
+    );
+    config.api_key = None;
+    assert_eq!(
+        load_credential(&config, backend.as_ref())
+            .await
+            .unwrap()
+            .unwrap()
+            .expose_secret(),
+        "command-key"
+    );
+    config.command = None;
+    assert_eq!(
+        load_credential(&config, backend.as_ref())
+            .await
+            .unwrap()
+            .unwrap()
+            .expose_secret(),
+        "file-key"
+    );
+    config.file = None;
+    assert_eq!(
+        load_credential(&config, backend.as_ref())
+            .await
+            .unwrap()
+            .unwrap()
+            .expose_secret(),
+        "platform-key"
+    );
+}
+
+#[tokio::test]
+async fn retrieval_command_is_bounded_and_never_echoes_secret_failures() {
+    let backend = MemoryKeyring::default();
+    let failure = CredentialConfig {
+        api_key: None,
+        command: Some(format!("printf {KEY}; exit 9")),
+        file: None,
+        platform: None,
+        command_timeout: Duration::from_secs(1),
+    };
+    let diagnostic = load_credential(&failure, &backend)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!diagnostic.contains(KEY));
+    assert!(!diagnostic.contains(&KEY[..12]));
+
+    let timeout = CredentialConfig {
+        api_key: None,
+        command: Some("sleep 5".into()),
+        file: None,
+        platform: None,
+        command_timeout: Duration::from_millis(50),
+    };
+    assert!(load_credential(&timeout, &backend).await.is_err());
+}
+
+#[test]
+fn protected_file_cleanup_removes_only_the_file_created_by_the_sink() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("credential");
+    let sink = ProtectedFileSink { path: path.clone() };
+    let reference = sink.store(&SecretString::new(KEY.into())).unwrap();
+    sink.cleanup(&reference).unwrap();
+    assert!(!path.exists());
+
+    std::fs::write(&path, "user-owned\n").unwrap();
+    assert!(sink.store(&SecretString::new(KEY.into())).is_err());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "user-owned\n");
 }
 
 #[tokio::test]
