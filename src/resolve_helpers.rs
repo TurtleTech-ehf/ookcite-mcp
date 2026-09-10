@@ -26,6 +26,12 @@ pub fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<Reve
     };
     let mut out = Vec::new();
     let mut top_score = f64::NEG_INFINITY;
+    // `/api/v1/resolve` answers with the chosen `paper` *and* keeps that
+    // same record in `candidates`. Rendering both printed every top hit
+    // twice, which read as the corpus holding duplicate works rather
+    // than as a formatting bug. Remember what `paper` claimed so the
+    // candidate loop can skip it.
+    let mut seen: Option<(String, String)> = None;
     if let Some(paper) = payload.get("paper") {
         let title = paper["title"].as_str().unwrap_or("?");
         let doi = paper["doi"].as_str().unwrap_or("?");
@@ -35,19 +41,38 @@ pub fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<Reve
             "1. [score:100] {title} | {authors} | {journal} (doi:{doi})"
         ));
         top_score = top_score.max(100.0);
+        seen = Some((
+            doi.trim().to_ascii_lowercase(),
+            title.trim().to_ascii_lowercase(),
+        ));
     }
-    let offset = out.len();
-    for (i, c) in array_candidates.iter().enumerate() {
+    for c in array_candidates.iter() {
         let meta = c.get("metadata").unwrap_or(c);
         let title = meta["title"].as_str().unwrap_or("?");
         let doi = meta["doi"].as_str().unwrap_or("?");
         let journal = meta["journal"].as_str().unwrap_or("N/A");
         let authors = format_author_list(meta);
         let score = c["score"].as_f64().unwrap_or(0.0);
+        if let Some((seen_doi, seen_title)) = seen.as_ref() {
+            let cand_doi = doi.trim().to_ascii_lowercase();
+            let cand_title = title.trim().to_ascii_lowercase();
+            // Match on DOI when both carry one, else fall back to the
+            // title: aggregator rows routinely arrive with no DOI at
+            // all, and those are exactly the ones that duplicated.
+            let same = if cand_doi != "?" && *seen_doi != "?" {
+                cand_doi == *seen_doi
+            } else {
+                cand_title == *seen_title
+            };
+            if same {
+                top_score = top_score.max(score);
+                continue;
+            }
+        }
         top_score = top_score.max(score);
         out.push(format!(
             "{}. [score:{:.0}] {title} | {authors} | {journal} (doi:{doi})",
-            offset + i + 1,
+            out.len() + 1,
             score
         ));
     }
@@ -397,7 +422,50 @@ pub async fn lookup_doi_with_retry(
 #[cfg(test)]
 mod tests {
     use super::is_retryable_lookup_status;
+    use super::format_reverse_lookup_payload;
     use reqwest::StatusCode;
+
+    #[test]
+    fn resolve_payload_does_not_repeat_the_chosen_paper() {
+        // /api/v1/resolve returns the chosen record as `paper` and also
+        // leaves it in `candidates`. Both were rendered, so every top
+        // hit printed twice and read as a duplicated corpus record.
+        let payload = serde_json::json!({
+            "paper": {
+                "title": "Nanometre-scale thermometry in a living cell",
+                "journal": "RePEc: Research Papers in Economics"
+            },
+            "candidates": [{
+                "score": 10000.0,
+                "metadata": {
+                    "title": "Nanometre-scale thermometry in a living cell",
+                    "journal": "RePEc: Research Papers in Economics"
+                }
+            }]
+        });
+        let out = format_reverse_lookup_payload(&payload).expect("formatted");
+        assert_eq!(
+            out.output.lines().count(),
+            1,
+            "chosen paper must not repeat as a candidate: {}",
+            out.output
+        );
+    }
+
+    #[test]
+    fn resolve_payload_keeps_genuinely_distinct_candidates() {
+        let payload = serde_json::json!({
+            "paper": { "title": "A", "doi": "10.1/a" },
+            "candidates": [
+                { "score": 9.0, "metadata": { "title": "A", "doi": "10.1/a" } },
+                { "score": 5.0, "metadata": { "title": "B", "doi": "10.1/b" } }
+            ]
+        });
+        let out = format_reverse_lookup_payload(&payload).expect("formatted");
+        let lines: Vec<&str> = out.output.lines().collect();
+        assert_eq!(lines.len(), 2, "distinct candidate must survive: {}", out.output);
+        assert!(lines[1].starts_with("2. "), "numbering must stay sequential: {}", lines[1]);
+    }
 
     #[test]
     fn lookup_retry_policy_stops_on_rate_limit() {
