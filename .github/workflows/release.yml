@@ -17,7 +17,7 @@ jobs:
             os: ubuntu-latest
             name: ookcite-mcp-x86_64-unknown-linux-gnu
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             name: ookcite-mcp-aarch64-unknown-linux-gnu
           - target: x86_64-apple-darwin
             os: macos-latest
@@ -45,19 +45,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config
 
-      - name: Install cross-compilation tools (Linux aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          # Host dbus-1.pc (from the previous step) is enough for
-          # libdbus-sys's pkg-config probe; the aarch64 linker still
-          # uses the cross gcc. Adding arm64 apt sources on noble fails.
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
-
       - name: Build
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package (unix)
