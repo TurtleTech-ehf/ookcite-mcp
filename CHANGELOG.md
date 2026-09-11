@@ -2,6 +2,38 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.6.2 - 2026-09-11
+#### Features
+- (**auth**) load referenced credentials at startup - (ef1f8a1) - Rohit Goswami
+- (**connect**) add fallback and transactional installation - (0e58f40) - Rohit Goswami
+- (**connect**) implement browser and device authorization - (8f65c1c) - Rohit Goswami
+- (**connect**) secure PKCE and credential primitives - (d181f27) - Rohit Goswami
+- (**credentials**) add transactional credential stores - (a3a12d9) - Rohit Goswami
+- (**mcp**) point rate-limit and quota-refusal messages at signup - (58f6341) - Rohit Goswami
+- (**setup**) connect OokCite through secure credential references - (c1cd19d) - Rohit Goswami
+#### Bugfixes
+- (**conversion**) preserve OokCite signup context - (9050e34) - Rohit Goswami
+- (**reverse**) stop rendering the resolved paper twice - (ffe081e) - Rohit Goswami
+- (**reverse**) retry /reverse once on 503/504 without falling back to /resolve - (46b988d) - Rohit Goswami
+#### Documentation
+- (**mcp**) teach secure browser connection - (0334f47) - Rohit Goswami
+#### Tests
+- (**connect**) specify fallback and resumable installation - (23a868d) - Rohit Goswami
+- (**connect**) specify dashboard authorization protocol - (9f12f90) - Rohit Goswami
+- (**connect**) specify browser and credential contracts - (1cbb103) - Rohit Goswami
+- (**credentials**) preserve retrieval timeout configuration - (b147b3c) - Rohit Goswami
+- (**credentials**) specify process configuration loading - (d6b0e75) - Rohit Goswami
+- (**credentials**) specify platform storage and loading - (c87457f) - Rohit Goswami
+- (**docs**) specify secure connection guidance - (2bca3d7) - Rohit Goswami
+- (**setup**) specify connected installation CLI - (05fba75) - Rohit Goswami
+#### Maintenance
+- (**deps**) lock secure connection support - (0da9106) - Rohit Goswami
+- (**deps**) lock credential contract fixtures - (dd79fb2) - Rohit Goswami
+#### Style
+- apply Rust formatting - (88a3293) - Rohit Goswami
+
+- - -
+
 ## v0.6.1 - 2026-08-14
 #### Bugfixes
 - (**registry**) declare mcpName so the registry can verify package ownership - (d655ae7) - Rohit Goswami
