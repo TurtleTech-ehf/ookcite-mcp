@@ -62,6 +62,23 @@ pub fn rate_limit_hint() -> String {
     }
 }
 
+/// Soft warning before the hard 429. `remaining * 5 <= limit` is 80% used.
+pub fn quota_soft_hint(remaining: u32, limit: u32) -> Option<String> {
+    if limit == 0 || remaining.saturating_mul(5) > limit {
+        return None;
+    }
+    if std::env::var("OOKCITE_API_KEY").is_ok() {
+        Some(format!(
+            "Near today's lookup cap ({remaining}/{limit}). Check the usage tool before a large batch."
+        ))
+    } else {
+        Some(format!(
+            "Near the anonymous cap ({remaining}/{limit}). A free account is 60/day plus collections: \
+             https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp"
+        ))
+    }
+}
+
 /// Install and authentication guidance appended to client-facing errors.
 pub fn setup_help_block() -> String {
     format!(
@@ -95,6 +112,14 @@ mod tests {
         if std::env::var("OOKCITE_STARTUP_PROBES").is_err() {
             assert!(!startup_probes_enabled());
         }
+    }
+
+    #[test]
+    fn quota_soft_hint_fires_at_eighty_percent() {
+        assert!(quota_soft_hint(4, 20).is_some());
+        assert!(quota_soft_hint(5, 20).is_none());
+        assert!(quota_soft_hint(0, 20).is_some());
+        assert!(quota_soft_hint(1, 0).is_none());
     }
 
     #[test]
