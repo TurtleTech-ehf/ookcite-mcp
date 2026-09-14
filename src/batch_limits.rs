@@ -57,7 +57,11 @@ pub fn format_usage_report(v: &serde_json::Value) -> String {
         v["daily"]["limit"].as_i64(),
     ) {
         (Some(remaining), Some(limit)) => {
-            lines.push(format!("Daily lookups: {remaining} remaining of {limit}"))
+            lines.push(format!("Daily lookups: {remaining} remaining of {limit}"));
+            if let Some(hint) = crate::constants::quota_soft_hint(remaining as u32, limit as u32)
+            {
+                lines.push(hint);
+            }
         }
         _ => lines.push("Daily lookups: not reported".into()),
     }
