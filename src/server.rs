@@ -181,14 +181,17 @@ impl Server {
         let futs: Vec<_> = pf
             .need_lookup
             .iter()
-            .map(|doi| {
+            .map(|item| {
                 let server = self.clone();
-                let doi = doi.clone();
+                let doi = item.text.clone();
                 async move { server.lookup_doi_json_cached(&doi).await.ok() }
             })
             .collect();
+        // `buffered`, not `buffer_unordered`: `group_cite` numbers these
+        // entries by position and `generate_citation_keys` returns one key
+        // per position, so completion order is the user's numbering.
         let looked: Vec<_> = stream::iter(futs)
-            .buffer_unordered(conc)
+            .buffered(conc)
             .collect::<Vec<_>>()
             .await;
         entries.extend(looked.into_iter().flatten());
@@ -801,9 +804,9 @@ impl Server {
         let futs: Vec<_> = pf
             .need_lookup
             .iter()
-            .map(|doi| {
+            .map(|item| {
                 let server = self.clone();
-                let doi = doi.clone();
+                let doi = item.text.clone();
                 async move {
                     match server.lookup_doi_json_cached(&doi).await {
                         Ok(meta) => {
@@ -816,7 +819,7 @@ impl Server {
             })
             .collect();
         let looked_up = stream::iter(futs)
-            .buffer_unordered(conc)
+            .buffered(conc)
             .collect::<Vec<_>>()
             .await;
         results.extend(looked_up);
@@ -863,16 +866,18 @@ impl Server {
         let futs: Vec<_> = pf
             .need_lookup
             .iter()
-            .enumerate()
-            .map(|(i, text)| {
+            .map(|item| {
                 let server = self.clone();
-                let text = text.clone();
+                let text = item.text.clone();
+                // The user's position, not this list's: blanks and
+                // collection members are already gone from `need_lookup`.
+                let position = item.index + 1;
                 async move {
                     if looks_like_doi_token(&text) {
                         return server
                             .lookup_doi_json_cached(&text)
                             .await
-                            .map_err(|error| format!("[{}] {error}", i + 1));
+                            .map_err(|error| format!("[{position}] {error}"));
                     }
                     if let Some(meta) = server
                         .resolve_query_to_metadata(&text, use_live_queries)
@@ -881,15 +886,20 @@ impl Server {
                         Ok(meta)
                     } else {
                         Err(format!(
-                            "[{}] Not found: {}",
-                            i + 1,
+                            "[{position}] Not found: {}",
                             &text[..text.len().min(60)]
                         ))
                     }
                 }
             })
             .collect();
-        let resolved: Vec<_> = stream::iter(futs).buffer_unordered(conc).collect().await;
+        // `buffered` preserves input order; `buffer_unordered` yields in
+        // completion order, so a numeric style numbered the references by
+        // which HTTP request came back first and a second run of the same
+        // command numbered them differently. The server builds its paired
+        // data in input order and says so twice; this is the client
+        // throwing that away.
+        let resolved: Vec<_> = stream::iter(futs).buffered(conc).collect().await;
 
         let mut errors = Vec::new();
         for result in resolved {
@@ -1759,8 +1769,11 @@ impl Server {
                 }
             })
             .collect();
+        // Entries land in the collection in this order, and
+        // `reorder_collection` exists as a tool because that order is
+        // user-visible. `buffered` keeps the order the user gave.
         let resolved: Vec<_> = stream::iter(futs)
-            .buffer_unordered(MUTATE_BATCH_CONCURRENCY)
+            .buffered(MUTATE_BATCH_CONCURRENCY)
             .collect()
             .await;
 

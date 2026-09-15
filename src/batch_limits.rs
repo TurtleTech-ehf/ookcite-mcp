@@ -83,11 +83,28 @@ pub fn format_usage_report(v: &serde_json::Value) -> String {
     lines.join("\n")
 }
 
+/// One item of the user's batch that still needs a metered lookup, with
+/// the position it held in what the user submitted.
+///
+/// The position has to travel with the item. `plan_metered_batch` skips
+/// blanks and diverts collection members, so `need_lookup` is a filtered
+/// subsequence: its third element can be the user's seventh citation, and
+/// an error reported as "[3]" then names a citation the user did not
+/// write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchLookupItem {
+    /// Zero-based position in the slice the caller passed to
+    /// `plan_metered_batch`. Report it to the user as `index + 1`.
+    pub index: usize,
+    pub text: String,
+}
+
 /// Result of planning a multi-item metered batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchPreflight {
-    /// Normalized DOIs (or opaque query keys) that still need a metered lookup.
-    pub need_lookup: Vec<String>,
+    /// Normalized DOIs (or opaque query keys) that still need a metered
+    /// lookup, each carrying its position in the user's list.
+    pub need_lookup: Vec<BatchLookupItem>,
     /// Items answered from collection membership (normalized DOI -> optional title hint).
     pub members: Vec<(String, Option<String>)>,
     /// If set, refuse the whole batch and do not issue lookups.
@@ -109,9 +126,9 @@ pub fn plan_metered_batch(
     has_api_key: bool,
 ) -> BatchPreflight {
     let mut members = Vec::new();
-    let mut need_lookup = Vec::new();
+    let mut need_lookup: Vec<BatchLookupItem> = Vec::new();
 
-    for item in items {
+    for (index, item) in items.iter().enumerate() {
         let trimmed = item.trim();
         if trimmed.is_empty() {
             continue;
@@ -123,10 +140,11 @@ pub fn plan_metered_batch(
                 members.push((key, title));
                 continue;
             }
-            need_lookup.push(trimmed.to_string());
-        } else {
-            need_lookup.push(trimmed.to_string());
         }
+        need_lookup.push(BatchLookupItem {
+            index,
+            text: trimmed.to_string(),
+        });
     }
 
     let metered = need_lookup.len() as u32;
@@ -289,6 +307,41 @@ pub fn read_only_concurrency() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A blank item and a collection member are both skipped, so the
+    /// position in `need_lookup` is not the position the user wrote. The
+    /// item has to carry its own index or "[3]" names the wrong citation.
+    #[test]
+    fn need_lookup_carries_the_users_position() {
+        let items: Vec<String> = vec![
+            "10.1038/187493a0".into(), // 0: a collection member, diverted
+            "   ".into(),              // 1: blank, skipped
+            "10.1/first-lookup".into(), // 2
+            "Henkelman nudged elastic band".into(), // 3
+        ];
+        let mut members = HashSet::new();
+        members.insert(normalize_doi_token("10.1038/187493a0"));
+        let pf = plan_metered_batch(&items, &members, &HashMap::new(), None, false);
+        assert_eq!(pf.need_lookup.len(), 2);
+        assert_eq!(pf.need_lookup[0].index, 2);
+        assert_eq!(pf.need_lookup[0].text, "10.1/first-lookup");
+        assert_eq!(pf.need_lookup[1].index, 3);
+        assert_eq!(
+            pf.need_lookup[1].text, "Henkelman nudged elastic band",
+            "the second lookup is the user's fourth citation, not their second"
+        );
+    }
+
+    /// Items keep the order they were submitted in, so a caller that
+    /// numbers the results by position numbers them the way the user
+    /// listed them.
+    #[test]
+    fn need_lookup_keeps_the_submitted_order() {
+        let items: Vec<String> = (0..5).map(|i| format!("10.1/test{i}")).collect();
+        let pf = plan_metered_batch(&items, &HashSet::new(), &HashMap::new(), None, false);
+        let order: Vec<usize> = pf.need_lookup.iter().map(|item| item.index).collect();
+        assert_eq!(order, vec![0, 1, 2, 3, 4]);
+    }
 
     #[test]
     fn preflight_refuses_when_quota_too_low() {
