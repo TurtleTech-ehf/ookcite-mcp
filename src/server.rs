@@ -1,8 +1,8 @@
 //! MCP server: tool router, HTTP client, and handlers.
 
 use crate::batch_limits::{
-    collect_dois_from_collection_body, format_member_valid_lines, format_usage_report,
-    plan_metered_batch, read_only_concurrency, DoiResponseCache, MeQuota,
+    batch_add_shortfall_line, collect_dois_from_collection_body, format_member_valid_lines,
+    format_usage_report, plan_metered_batch, read_only_concurrency, DoiResponseCache, MeQuota,
 };
 use crate::collection_entries::{
     apply_entry_metadata_overrides, entry_doi, entry_metadata_by_id,
@@ -1804,6 +1804,12 @@ impl Server {
                     "Added {added} to '{}', {dupes} duplicates skipped",
                     args.collection
                 );
+                out.push_str(&batch_add_shortfall_line(
+                    entries.len(),
+                    added,
+                    dupes,
+                    data["dropped"].as_u64(),
+                ));
                 if !errors.is_empty() {
                     out.push_str(&format!("\n\nUnresolved:\n{}", errors.join("\n")));
                 }
