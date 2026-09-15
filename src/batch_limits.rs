@@ -211,6 +211,39 @@ pub fn format_member_valid_lines(members: &[(String, Option<String>)]) -> Vec<St
         .collect()
 }
 
+/// What to say when a collection batch add returns fewer entries than it
+/// was sent.
+///
+/// Empty when everything is accounted for. The server used to truncate to
+/// the plan's entry limit and return `added` alone, so an import of 200
+/// that kept 40 printed "Added 40 to 'refs', 0 duplicates skipped" and
+/// listed nothing as unresolved -- the 160 resolved perfectly well. Say
+/// the shortfall out loud whether or not the server names it.
+pub fn batch_add_shortfall_line(
+    requested: usize,
+    added: u64,
+    duplicates_skipped: u64,
+    dropped: Option<u64>,
+) -> String {
+    if let Some(dropped) = dropped.filter(|n| *n > 0) {
+        return format!(
+            "\nWARNING: the server dropped {dropped} of {requested} entries. \
+             They are not in the collection."
+        );
+    }
+    let accounted = added.saturating_add(duplicates_skipped);
+    let requested = requested as u64;
+    if accounted >= requested {
+        return String::new();
+    }
+    let missing = requested - accounted;
+    format!(
+        "\nWARNING: sent {requested} entries, {added} added and {duplicates_skipped} \
+         skipped as duplicates -- {missing} are unaccounted for and are not in the \
+         collection. A full collection is the usual cause; check your plan's entry limit."
+    )
+}
+
 /// Identity-safe process-local exact-DOI metadata cache (TTL).
 #[derive(Clone, Default)]
 pub struct DoiResponseCache {
@@ -341,6 +374,29 @@ mod tests {
         let pf = plan_metered_batch(&items, &HashSet::new(), &HashMap::new(), None, false);
         let order: Vec<usize> = pf.need_lookup.iter().map(|item| item.index).collect();
         assert_eq!(order, vec![0, 1, 2, 3, 4]);
+    }
+
+    /// Silence is the failure: 200 sent, 40 added, 0 duplicates is a
+    /// successful-looking response missing 80% of a bibliography.
+    #[test]
+    fn a_short_batch_add_says_so() {
+        let line = batch_add_shortfall_line(200, 40, 0, None);
+        assert!(line.contains("160"), "{line}");
+        assert!(line.contains("WARNING"), "{line}");
+
+        let named = batch_add_shortfall_line(200, 40, 0, Some(160));
+        assert!(named.contains("dropped 160"), "{named}");
+    }
+
+    /// Nothing to say when every entry is accounted for.
+    #[test]
+    fn a_complete_batch_add_says_nothing() {
+        assert!(batch_add_shortfall_line(10, 7, 3, None).is_empty());
+        assert!(batch_add_shortfall_line(10, 10, 0, Some(0)).is_empty());
+        assert!(
+            batch_add_shortfall_line(10, 12, 0, None).is_empty(),
+            "a server that reports more than it was sent is not a shortfall"
+        );
     }
 
     #[test]
