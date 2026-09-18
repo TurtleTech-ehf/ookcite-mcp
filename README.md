@@ -286,8 +286,8 @@ These three require an Academic or Business plan.
 | --------- | --------- | ----------- | --------------- | ----------- | ------------------ |
 | Anonymous | Free      | 20          | --              | 0           | --                 |
 | Free      | Free      | 60          | --              | 4           | 200                |
-| Academic  | EUR 4/mo  | 20,000      | 10,000          | 10          | 1,000              |
-| Business  | EUR 10/mo | 20,000      | 40,000          | 20          | 4,000              |
+| Academic  | EUR 4/mo excl. VAT  | 20,000      | 10,000          | 10          | 1,000              |
+| Business  | EUR 10/mo excl. VAT | 20,000      | 40,000          | 20          | 4,000              |
 
 Re-lookups can be served without quota use when collection metadata is already
 available to the API. A retrieval that has to resolve the paper again can count
@@ -314,7 +314,7 @@ API to look up and format citations. It's a thin MCP wrapper around the OokCite
 REST API with no local database, and no heavy dependencies.
 
 [Sign up](https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp) for a free account (60 lookups/day),
-or upgrade to Academic (EUR 4/mo) or Business (EUR 10/mo) for higher monthly
+or upgrade to Academic (EUR 4/mo excl. VAT) or Business (EUR 10/mo excl. VAT) for higher monthly
 API limits, larger collections, paid utilities, merge, and batch-move.
 
 
