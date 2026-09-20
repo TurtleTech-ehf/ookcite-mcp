@@ -1,8 +1,8 @@
 //! MCP server: tool router, HTTP client, and handlers.
 
 use crate::batch_limits::{
-    DoiResponseCache, MeQuota, collect_dois_from_collection_body, format_member_valid_lines,
-    format_usage_report, plan_metered_batch, read_only_concurrency,
+    collect_dois_from_collection_body, format_member_valid_lines, format_usage_report,
+    plan_metered_batch, read_only_concurrency, DoiResponseCache, MeQuota,
 };
 use crate::collection_entries::{
     apply_entry_metadata_overrides, entry_doi, entry_metadata_by_id,
@@ -10,11 +10,16 @@ use crate::collection_entries::{
     resolve_entry_id_in_collection,
 };
 use crate::constants::{
-    MIN_CONFIDENT_REVERSE_LOOKUP_SCORE, MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
     api_base_url, build_api_client, rate_limit_hint, setup_help_block,
+    MIN_CONFIDENT_REVERSE_LOOKUP_SCORE, MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail,
+};
+use crate::plaintext::{
+    attach_original_query, citation_units_from_parse_payload, collection_entry_metadata,
+    detect_bibliography_kind, export_kind, optional_collection_name, render_bibtex_entries,
+    split_plaintext_citations, BibliographyKind, ExportKind,
 };
 use crate::policy::{self, block_mutate};
 use crate::resolve_helpers::{
@@ -23,7 +28,7 @@ use crate::resolve_helpers::{
     resolver_answer_agrees_with_ranking, reverse_lookup_resolve_body, send_reverse_with_one_retry,
 };
 use crate::tool_args::*;
-use futures::{StreamExt, stream};
+use futures::{stream, StreamExt};
 use ookcite_mcp::endpoints::{self, Endpoint};
 use rmcp::ServerHandler;
 use rmcp::{
@@ -393,7 +398,7 @@ impl Server {
 
     #[tool(
         name = "reverse_lookup",
-        description = "Parse a messy citation string or author name and find matching papers. Uses /api/v1/reverse (author-aware lexical ranking) first, then falls back to live resolve when empty or weak. On 503/504 from reverse, waits Retry-After (or 2s) and retries reverse once; does not fall back to resolve on those errors. Optional author/journal/year/orcid filters are folded into the query. Set use_live_queries=true to force the live resolve path earlier. For many citations prefer batch_format.",
+        description = "Parse a messy citation string or author name and find matching papers. Returns the original query, a confidence score, and the title of each hit. Uses /api/v1/reverse (author-aware lexical ranking) first, then falls back to live resolve when empty or weak. On 503/504 from reverse, waits Retry-After (or 2s) and retries reverse once; does not fall back to resolve on those errors. Optional author/journal/year/orcid filters are folded into the query. Set use_live_queries=true to force the live resolve path earlier. For many citations prefer batch_format.",
         annotations(
             title = "Reverse lookup citation",
             read_only_hint = true,
@@ -409,7 +414,7 @@ impl Server {
         // and retry /reverse once. Those statuses do not fall through to
         // /resolve; that would enqueue a second search on the same queue.
         let r = send_reverse_with_one_retry(&self.http, &self.api_base, &reverse_body).await;
-        match classify_reverse_lookup_response(r).await {
+        let body = match classify_reverse_lookup_response(r).await {
             Ok(Some(local_match))
                 if !args.use_live_queries
                     && local_match.top_score < MIN_CONFIDENT_REVERSE_LOOKUP_SCORE =>
@@ -460,12 +465,13 @@ impl Server {
                 match classify_reverse_lookup_response(live).await {
                     Ok(Some(live_match)) => live_match.output,
                     Ok(None) => "No matches found".into(),
-                    Err(message) => message,
+                    Err(message) => return message,
                 }
             }
             Ok(None) => "No matches found".into(),
-            Err(message) => message,
-        }
+            Err(message) => return message,
+        };
+        attach_original_query(&args.text, &body)
     }
 
     #[tool(
@@ -672,7 +678,7 @@ impl Server {
 
     #[tool(
         name = "format_citation",
-        description = "Format a citation by DOI in a specific CSL style. Returns both the in-text marker and the full bibliography entry. Prefer batch_format for multiple citations.",
+        description = "Format a citation by DOI in a specific CSL style. Returns both the in-text marker and the full bibliography entry. No API key required for a single citation (anonymous daily cap applies). Prefer batch_format for multiple citations.",
         annotations(
             title = "Format citation",
             read_only_hint = true,
@@ -1068,9 +1074,9 @@ impl Server {
 
     #[tool(
         name = "export_collection",
-        description = "Export a collection as BibTeX. Returns the full .bib file content with Better BibTeX keys. Call this when the user wants the collection as a file, or to hand its entries to a LaTeX or reference manager workflow.",
+        description = "Export a collection as BibTeX (format=bib, default) or CSL bibliography text (format=csl, or pass a CSL style id such as apa/ieee). BibTeX uses Better BibTeX keys. Call this when the user wants the collection as a file or as formatted copy-out.",
         annotations(
-            title = "Export collection BibTeX",
+            title = "Export collection bibliography",
             read_only_hint = true,
             idempotent_hint = true
         )
@@ -1084,15 +1090,41 @@ impl Server {
             Err(e) => return e,
         };
 
-        let r = self
-            .request(endpoints::COLLECTION_EXPORT_BIB, &[("id", &col_id)])
-            .send()
-            .await;
-        match r {
-            Ok(r) if r.status().is_success() => {
-                r.text().await.unwrap_or_else(|_| "Export failed.".into())
+        match export_kind(&args.format, &args.style) {
+            ExportKind::Bibtex => {
+                let r = self
+                    .request(endpoints::COLLECTION_EXPORT_BIB, &[("id", &col_id)])
+                    .send()
+                    .await;
+                match r {
+                    Ok(r) if r.status().is_success() => {
+                        r.text().await.unwrap_or_else(|_| "Export failed.".into())
+                    }
+                    _ => "Failed to export collection.".into(),
+                }
             }
-            _ => "Failed to export collection.".into(),
+            ExportKind::Csl { style } => {
+                let r = self
+                    .request(endpoints::COLLECTION_GET, &[("id", &col_id)])
+                    .send()
+                    .await;
+                let collection: serde_json::Value = match r {
+                    Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+                    _ => return "Failed to load collection.".into(),
+                };
+                let entries: Vec<serde_json::Value> = collection
+                    .get("entries")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().map(collection_entry_metadata).collect())
+                    .unwrap_or_default();
+                if entries.is_empty() {
+                    return "Collection is empty.".into();
+                }
+                match self.format_entries_csl(&entries, &style).await {
+                    Ok(text) => text,
+                    Err(e) => e,
+                }
+            }
         }
     }
 
@@ -1344,6 +1376,178 @@ impl Server {
         }
     }
 
+    async fn plaintext_citation_units(&self, text: &str) -> Vec<String> {
+        let r = self
+            .request(endpoints::PARSE_CITATIONS, &[])
+            .json(&serde_json::json!({"text": text}))
+            .send()
+            .await;
+        let from_api = match r {
+            Ok(resp) if resp.status().is_success() => {
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                citation_units_from_parse_payload(&body)
+            }
+            _ => Vec::new(),
+        };
+        if from_api.is_empty() {
+            split_plaintext_citations(text)
+        } else {
+            from_api
+        }
+    }
+
+    async fn resolve_plaintext_entries(
+        &self,
+        units: &[String],
+    ) -> (Vec<serde_json::Value>, Vec<String>) {
+        let futs: Vec<_> = units
+            .iter()
+            .enumerate()
+            .map(|(i, query)| {
+                let server = self.clone();
+                let query = query.clone();
+                async move {
+                    match server.resolve_query_to_metadata(&query, false).await {
+                        Some(m) => Ok(m),
+                        None => Err(format!(
+                            "[{}] Could not resolve: {}",
+                            i + 1,
+                            &query[..query.len().min(60)]
+                        )),
+                    }
+                }
+            })
+            .collect();
+        let resolved: Vec<_> = stream::iter(futs)
+            .buffered(read_only_concurrency())
+            .collect()
+            .await;
+        let mut entries = Vec::new();
+        let mut errors = Vec::new();
+        for result in resolved {
+            match result {
+                Ok(meta) => entries.push(meta),
+                Err(e) => errors.push(e),
+            }
+        }
+        (entries, errors)
+    }
+
+    async fn format_entries_csl(
+        &self,
+        entries: &[serde_json::Value],
+        style: &str,
+    ) -> Result<String, String> {
+        let fmt = self
+            .request(endpoints::FORMAT, &[])
+            .json(&serde_json::json!({
+                "entries": entries,
+                "style": style,
+                "locale": "en-US"
+            }))
+            .send()
+            .await;
+        match fmt {
+            Ok(r) if r.status().is_success() => {
+                let result: serde_json::Value = r.json().await.unwrap_or_default();
+                let plain = result["plain"].as_str().unwrap_or("").trim();
+                if !plain.is_empty() {
+                    return Ok(plain.to_string());
+                }
+                if let Some(fe) = result["entries"].as_array() {
+                    let lines: Vec<String> = fe
+                        .iter()
+                        .map(|entry| entry["bib_plain"].as_str().unwrap_or("").trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !lines.is_empty() {
+                        return Ok(lines.join("\n"));
+                    }
+                }
+                Err("Format returned no bibliography text.".into())
+            }
+            Ok(r) => Err(format!("Format failed: {}", error_detail(r).await)),
+            Err(e) => Err(format!("Format failed: {e}")),
+        }
+    }
+
+    async fn import_plaintext(
+        &self,
+        collection: Option<&str>,
+        content: &str,
+        style: Option<&str>,
+    ) -> String {
+        let units = self.plaintext_citation_units(content).await;
+        if units.is_empty() {
+            return "No citations found in text.".into();
+        }
+        let has_key = std::env::var("OOKCITE_API_KEY").is_ok();
+        let quota = self.fetch_me_quota().await;
+        let pf = plan_metered_batch(
+            &units,
+            &HashSet::new(),
+            &HashMap::new(),
+            quota.as_ref(),
+            has_key,
+        );
+        if let Some(msg) = pf.refuse_message {
+            return msg;
+        }
+        let (entries, errors) = self.resolve_plaintext_entries(&pf.need_lookup).await;
+        if entries.is_empty() {
+            return format!("No citations resolved.\n{}", errors.join("\n"));
+        }
+        let bib = render_bibtex_entries(&entries);
+        let mut out = format!(
+            "Resolved {} of {} citations.\n\n{bib}",
+            entries.len(),
+            units.len()
+        );
+        if let Some(style) = style.map(str::trim).filter(|s| !s.is_empty()) {
+            match self.format_entries_csl(&entries, style).await {
+                Ok(csl) => {
+                    out.push_str("\nCSL text:\n");
+                    out.push_str(&csl);
+                }
+                Err(e) => {
+                    out.push_str(&format!("\nCSL format skipped: {e}"));
+                }
+            }
+        }
+        if let Some(name) = collection {
+            if let Some(msg) = block_mutate() {
+                return format!("{msg}\n\n{out}");
+            }
+            let col_id = match self.resolve_or_create_collection(name).await {
+                Ok(id) => id,
+                Err(e) => return format!("{e}\n\n{out}"),
+            };
+            let r = self
+                .request(endpoints::COLLECTION_ENTRIES_BATCH, &[("id", &col_id)])
+                .json(&serde_json::json!({"entries": entries}))
+                .send()
+                .await;
+            let saved = match r {
+                Ok(r) if r.status().is_success() => {
+                    let data: serde_json::Value = r.json().await.unwrap_or_default();
+                    let added = data["added"].as_u64().unwrap_or(0);
+                    let dupes = data["duplicates_skipped"].as_u64().unwrap_or(0);
+                    format!("Imported into '{name}': {added} added, {dupes} duplicates skipped")
+                }
+                Ok(r) if r.status().as_u16() == 401 => {
+                    "Authentication required. Set OOKCITE_API_KEY.".into()
+                }
+                Ok(r) => format!("Import failed: {}", error_detail(r).await),
+                Err(e) => format!("Import failed: {e}"),
+            };
+            out = format!("{saved}\n\n{out}");
+        }
+        if !errors.is_empty() {
+            out.push_str(&format!("\n\nUnresolved:\n{}", errors.join("\n")));
+        }
+        out
+    }
+
     // --- Phase 1: High-value new tools ---
 
     #[tool(
@@ -1400,9 +1604,9 @@ impl Server {
 
     #[tool(
         name = "import_bibliography",
-        description = "Import a BibTeX (.bib) or RIS file into a collection. Pass the file content as a string. Creates the collection if it doesn't exist, but collection import may require a paid plan or additional collection capacity. Call this when the user has an existing bibliography file, in preference to adding its entries one at a time.",
+        description = "Import bibliography content. Accepts BibTeX, RIS, or a pasted plaintext citation list (format=plaintext or auto). A small plaintext paste (within the anonymous batch cap) returns .bib with no API key and no collection. Passing collection still saves resolved entries when a key is set. BibTeX/RIS file import into a collection requires a key. Prefer this over adding entries one at a time.",
         annotations(
-            title = "Import bibliography file",
+            title = "Import bibliography",
             read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = false
@@ -1412,15 +1616,25 @@ impl Server {
         &self,
         Parameters(args): Parameters<ImportBibliographyArgs>,
     ) -> String {
+        let kind = detect_bibliography_kind(&args.content, &args.format);
+        let collection = optional_collection_name(&args.collection);
+        if kind == BibliographyKind::Plaintext {
+            return self
+                .import_plaintext(collection, &args.content, args.style.as_deref())
+                .await;
+        }
+        let Some(collection) = collection else {
+            return "Collection name required for BibTeX/RIS import. Omit collection only for a small plaintext paste (returns .bib, no API key).".into();
+        };
         if let Some(msg) = block_mutate() {
             return msg;
         }
-        let col_id = match self.resolve_or_create_collection(&args.collection).await {
+        let col_id = match self.resolve_or_create_collection(collection).await {
             Ok(id) => id,
             Err(e) => return e,
         };
 
-        let filename = if args.format == "ris" {
+        let filename = if kind == BibliographyKind::Ris {
             "import.ris"
         } else {
             "import.bib"
@@ -1444,10 +1658,7 @@ impl Server {
                 let data: serde_json::Value = r.json().await.unwrap_or_default();
                 let added = data["added"].as_u64().unwrap_or(0);
                 let dupes = data["duplicates_skipped"].as_u64().unwrap_or(0);
-                format!(
-                    "Imported into '{}': {added} added, {dupes} duplicates skipped",
-                    args.collection
-                )
+                format!("Imported into '{collection}': {added} added, {dupes} duplicates skipped")
             }
             Ok(r) if r.status().as_u16() == 401 => {
                 "Authentication required. Set OOKCITE_API_KEY.".into()
@@ -2727,6 +2938,7 @@ impl ServerHandler for Server {
              separates the two. \
              Prefer the batch tools over repeated single calls -- verify_references, batch_format, \
              batch_add_to_collection, and import_bibliography each take a whole set in one request. \
+             format_citation and a small plaintext import_bibliography (no collection) need no API key. \
              Collection tools need OOKCITE_API_KEY; merge_collections, batch_move_entries, \
              generate_citation_keys, and expand_journal additionally need an academic or business plan. \
              Tools annotated as destructive change or revoke data permanently -- confirm which \
@@ -2758,9 +2970,9 @@ mod tests {
     use crate::constants::version_output;
     use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{
-        BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs, OrcidProfileArgs,
-        OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs, VerifyArgs,
-        default_style,
+        default_style, BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs,
+        OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs,
+        VerifyArgs,
     };
 
     /// Serializes OOKCITE_API_KEY mutations across parallel tokio tests.
@@ -2782,6 +2994,18 @@ mod tests {
             let prev = std::env::var(key).ok();
             // SAFETY: held under env_lock for the guard lifetime.
             unsafe { std::env::set_var(key, val) };
+            Self {
+                key,
+                prev,
+                _lock: lock,
+            }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let lock = env_lock();
+            let prev = std::env::var(key).ok();
+            // SAFETY: held under env_lock for the guard lifetime.
+            unsafe { std::env::remove_var(key) };
             Self {
                 key,
                 prev,
@@ -3171,7 +3395,18 @@ mod tests {
     fn test_args_import_default_format() {
         let args: ImportBibliographyArgs =
             serde_json::from_str(r#"{"collection": "test", "content": "@article{...}"}"#).unwrap();
-        assert_eq!(args.format, "bibtex");
+        assert_eq!(args.format, "auto");
+        assert_eq!(args.collection.as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn test_args_import_plaintext_omits_collection() {
+        let args: ImportBibliographyArgs = serde_json::from_str(
+            r#"{"content": "1. Maiman Nature 1960\n2. Einstein 1905", "format": "plaintext"}"#,
+        )
+        .unwrap();
+        assert!(args.collection.is_none());
+        assert_eq!(args.format, "plaintext");
     }
 
     #[test]
@@ -3181,6 +3416,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(args.format, "ris");
+    }
+
+    #[test]
+    fn test_args_export_defaults_to_bib() {
+        let args: ExportCollectionArgs = serde_json::from_str(r#"{"collection": "lab"}"#).unwrap();
+        assert_eq!(args.format, "bib");
+        assert_eq!(args.style, "apa");
     }
 
     #[test]
@@ -3510,6 +3752,190 @@ mod tests {
             .await;
         assert!(result.contains("Stimulated Optical Radiation"));
         assert!(result.contains("10.1038/187493a0"));
+        assert!(
+            result.contains("original: Maiman 1960 ruby laser"),
+            "original query missing: {result}"
+        );
+        assert!(
+            result.contains("[confidence:95]"),
+            "confidence missing: {result}"
+        );
+        assert!(
+            result.contains("title: Stimulated Optical Radiation in Ruby"),
+            "title field missing: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plaintext_import_returns_bib_without_api_key() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/parse-citations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "citations": [
+                    {"index": 0, "source_text": "1. Maiman 1960", "cleaned_text": "Maiman 1960 ruby"}
+                ]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "paper": {
+                    "title": "Stimulated Optical Radiation in Ruby",
+                    "doi": "10.1038/187493a0",
+                    "journal": "Nature",
+                    "date": {"year": 1960},
+                    "authors": [{"family": "Maiman", "given": "T. H."}]
+                },
+                "candidates": []
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "score": 95.0,
+                    "metadata": {
+                        "title": "Stimulated Optical Radiation in Ruby",
+                        "doi": "10.1038/187493a0"
+                    }
+                }
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let _no_key = EnvGuard::unset("OOKCITE_API_KEY");
+        let s = test_server(&mock.uri());
+        let result = s
+            .import_bibliography(Parameters(ImportBibliographyArgs {
+                collection: None,
+                content: "1. Maiman, T. H. Stimulated Optical Radiation in Ruby. Nature (1960)."
+                    .into(),
+                format: "plaintext".into(),
+                style: None,
+            }))
+            .await;
+        assert!(
+            result.contains("@article{Maiman1960,"),
+            "expected bibtex, got: {result}"
+        );
+        assert!(result.contains("doi = {10.1038/187493a0}"));
+        assert!(
+            !result.contains("Authentication required"),
+            "small plaintext import must not demand a key: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plaintext_import_refuses_anonymous_over_soft_cap() {
+        let mock = MockServer::start().await;
+        let citations: Vec<serde_json::Value> = (0..9)
+            .map(|i| {
+                serde_json::json!({
+                    "index": i,
+                    "cleaned_text": format!("Paper {i} 2020")
+                })
+            })
+            .collect();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/parse-citations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "citations": citations
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let _no_key = EnvGuard::unset("OOKCITE_API_KEY");
+        let s = test_server(&mock.uri());
+        let list = (0..9)
+            .map(|i| format!("{}. Paper {i} 2020", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = s
+            .import_bibliography(Parameters(ImportBibliographyArgs {
+                collection: None,
+                content: list,
+                format: "plaintext".into(),
+                style: None,
+            }))
+            .await;
+        assert!(result.contains("REFUSED"), "got: {result}");
+        assert!(result.contains("OOKCITE_API_KEY") || result.contains("anonymous"));
+    }
+
+    #[tokio::test]
+    async fn export_collection_csl_formats_entries() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-1", "name": "lab"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": "e1",
+                    "metadata": {
+                        "title": "Stimulated Optical Radiation in Ruby",
+                        "doi": "10.1038/187493a0",
+                        "authors": [{"family": "Maiman", "given": "T. H."}]
+                    }
+                }]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/format"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plain": "Maiman, T. H. (1960). Stimulated Optical Radiation in Ruby. Nature."
+            })))
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_export_csl");
+        let s = test_server(&mock.uri());
+        let result = s
+            .export_collection(Parameters(ExportCollectionArgs {
+                collection: "lab".into(),
+                format: "csl".into(),
+                style: "apa".into(),
+            }))
+            .await;
+        assert!(
+            result.contains("Stimulated Optical Radiation in Ruby"),
+            "got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bibtex_import_without_collection_is_refused() {
+        let s = test_server("http://127.0.0.1:9");
+        let result = s
+            .import_bibliography(Parameters(ImportBibliographyArgs {
+                collection: None,
+                content: "@article{a,\n  title={T},\n  author={A}\n}".into(),
+                format: "bibtex".into(),
+                style: None,
+            }))
+            .await;
+        assert!(result.contains("Collection name required"), "got: {result}");
     }
 
     #[tokio::test]
@@ -3541,7 +3967,7 @@ mod tests {
                 use_live_queries: false,
             }))
             .await;
-        assert_eq!(result, "No matches found");
+        assert_eq!(result, "original: nonexistent paper xyz\nNo matches found");
     }
 
     #[tokio::test]
@@ -3697,7 +4123,10 @@ mod tests {
             }))
             .await;
 
-        assert_eq!(result, "No confident matches found");
+        assert_eq!(
+            result,
+            "original: Attention Is All You Need Vaswani 2017\nNo confident matches found"
+        );
     }
 
     #[tokio::test]

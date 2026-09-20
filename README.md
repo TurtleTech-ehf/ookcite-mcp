@@ -36,8 +36,19 @@ An existing API key remains supported:
 npx @turtletech/ookcite-mcp setup --key YOUR_API_KEY
 ```
 
-No API key required for basic usage (20 lookups/day).
+No API key required for basic usage (20 lookups/day): `format_citation` and a
+small plaintext `import_bibliography` (omit `collection`, up to 8 items).
 [Sign up](https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp) for more.
+
+### Paste a list to BibTeX
+
+`import_bibliography` accepts a numbered or blank-line citation list, not only
+`.bib` / `.ris`. Omit `collection` for a small paste: the tool resolves the
+items and returns `.bib` text. With a key, pass `collection` to save the
+resolved entries. `export_collection` can then emit `.bib` (`format=bib`) or
+CSL bibliography text (`format=csl` or a style id such as `ieee`).
+`npx @turtletech/ookcite-mcp setup` remains the installer. The server never
+fetches PDFs.
 
 After changing MCP config, restart the client or reload its MCP servers.
 Many clients do not hot-reload environment-variable changes for already-running
@@ -193,7 +204,7 @@ Optional env (stdio MCP, all clients):
 | ------------------- | --------------------------------------------- |
 | `validate_doi`      | Check if a DOI exists (anti-hallucination)    |
 | `lookup_isbn`       | Look up a book by ISBN                        |
-| `reverse_lookup`    | Find a paper from messy citation text         |
+| `reverse_lookup`    | Find a paper from messy citation text; returns original query, confidence, and title |
 | `batch_resolve`     | Resolve many citation strings in one request (max 50) |
 | `enhanced_search`   | Corpus search with author / category / citation facets |
 | `health_check`      | Check API availability and health             |
@@ -202,7 +213,7 @@ Optional env (stdio MCP, all clients):
 
 | Tool                | Purpose                                       |
 | ------------------- | --------------------------------------------- |
-| `format_citation`   | Format a DOI in any of 2900+ CSL styles       |
+| `format_citation`   | Format a DOI in any of 2900+ CSL styles (no API key for a single citation) |
 | `verify_references` | Batch-check a list of DOIs                    |
 | `batch_format`      | Format multiple citations at once             |
 | `search_styles`     | Find CSL style IDs by name                    |
@@ -226,14 +237,16 @@ Optional env (stdio MCP, all clients):
 ### Collections (requires sign-in)
 
 Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
+A small plaintext `import_bibliography` with no `collection` is the exception:
+it returns `.bib` under the anonymous cap.
 
 | Tool                       | Purpose                                  |
 | -------------------------- | ---------------------------------------- |
 | `list_collections`         | List saved citation collections          |
 | `add_to_collection`        | Add a citation (by DOI or free-text)     |
 | `batch_add_to_collection`  | Add multiple citations at once           |
-| `import_bibliography`      | Import BibTeX/RIS files into a collection|
-| `export_collection`        | Export collection as BibTeX              |
+| `import_bibliography`      | Import BibTeX, RIS, or a pasted plaintext list |
+| `export_collection`        | Export collection as BibTeX or CSL text  |
 | `search_collection`        | Search within a collection; returns `entry_id` per match |
 | `check_duplicates`         | Check for duplicates; returns `entry_id` for matches     |
 | `delete_collection`        | Delete a collection                     |
@@ -246,9 +259,9 @@ Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
 
 Typical workflow:
 
-1. Keep `references.bib` or `library.bib` under version control in your project
-2. Import that file into an OokCite collection with `import_bibliography`
-3. Use `search_collection`, `check_duplicates`, and `export_collection` while revising
+1. Paste a numbered citation list into `import_bibliography` (omit `collection` for a small list) and keep the returned `.bib`
+2. Or keep `references.bib` / `library.bib` under version control and import that file into a collection
+3. Use `search_collection`, `check_duplicates`, and `export_collection` (`bib` or `csl`) while revising
 4. Treat the collection as an audit/export companion, not the only copy of your bibliography
 
 **Removing a single entry:** call `search_collection` (or `check_duplicates`) to
@@ -333,6 +346,7 @@ There is no local citation database; all state lives on the API.
 | `src/constants.rs` | API base URL, package version, reverse-lookup confidence threshold |
 | `src/http_error.rs` | `error_detail` and HTTP status classification for client-facing strings |
 | `src/collection_entries.rs` | Collection entry ids, bare DOI / `doi:` alias resolution, search lines |
+| `src/plaintext.rs` | Pasted-list split and local `.bib` render |
 | `src/resolve_helpers.rs` | Reverse-lookup and free-text resolve payload helpers |
 | `src/endpoints.rs` | Endpoint registry (`lib` crate surface); contract-tested |
 | `src/lib.rs` | Library root (exports `endpoints` only) |

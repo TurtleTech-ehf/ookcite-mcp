@@ -1,6 +1,6 @@
 //! Reverse-lookup and free-text resolve helpers.
 
-use tokio::time::{Duration, sleep};
+use tokio::time::{sleep, Duration};
 
 use crate::constants::rate_limit_hint;
 use crate::http_error::error_detail;
@@ -38,7 +38,7 @@ pub fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<Reve
         let journal = paper["journal"].as_str().unwrap_or("N/A");
         let authors = format_author_list(paper);
         out.push(format!(
-            "1. [score:100] {title} | {authors} | {journal} (doi:{doi})"
+            "1. [confidence:100] title: {title} | {authors} | {journal} (doi:{doi})"
         ));
         top_score = top_score.max(100.0);
         seen = Some((
@@ -71,7 +71,7 @@ pub fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<Reve
         }
         top_score = top_score.max(score);
         out.push(format!(
-            "{}. [score:{:.0}] {title} | {authors} | {journal} (doi:{doi})",
+            "{}. [confidence:{:.0}] title: {title} | {authors} | {journal} (doi:{doi})",
             out.len() + 1,
             score
         ));
@@ -421,8 +421,8 @@ pub async fn lookup_doi_with_retry(
 
 #[cfg(test)]
 mod tests {
-    use super::is_retryable_lookup_status;
     use super::format_reverse_lookup_payload;
+    use super::is_retryable_lookup_status;
     use reqwest::StatusCode;
 
     #[test]
@@ -463,8 +463,38 @@ mod tests {
         });
         let out = format_reverse_lookup_payload(&payload).expect("formatted");
         let lines: Vec<&str> = out.output.lines().collect();
-        assert_eq!(lines.len(), 2, "distinct candidate must survive: {}", out.output);
-        assert!(lines[1].starts_with("2. "), "numbering must stay sequential: {}", lines[1]);
+        assert_eq!(
+            lines.len(),
+            2,
+            "distinct candidate must survive: {}",
+            out.output
+        );
+        assert!(
+            lines[1].starts_with("2. "),
+            "numbering must stay sequential: {}",
+            lines[1]
+        );
+        assert!(lines[0].contains("[confidence:100]"));
+        assert!(lines[0].contains("title: A"));
+    }
+
+    #[test]
+    fn reverse_lookup_payload_names_confidence_and_title() {
+        let payload = serde_json::json!([{
+            "score": 95.0,
+            "metadata": {
+                "title": "Stimulated Optical Radiation in Ruby",
+                "doi": "10.1038/187493a0",
+                "journal": "Nature",
+                "authors": [{"family": "Maiman", "given": "T. H."}]
+            }
+        }]);
+        let out = format_reverse_lookup_payload(&payload).expect("formatted");
+        assert!(out.output.contains("[confidence:95]"));
+        assert!(out
+            .output
+            .contains("title: Stimulated Optical Radiation in Ruby"));
+        assert!(!out.output.contains("[score:"));
     }
 
     #[test]
