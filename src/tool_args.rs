@@ -110,6 +110,15 @@ pub struct AddToCollectionArgs {
 pub struct ExportCollectionArgs {
     /// Collection name to export
     pub collection: String,
+    /// `bib` (default) for a `.bib` file, `csl` for formatted bibliography text, or a CSL style id (`apa`, `ieee`, …)
+    #[serde(default = "default_export_format")]
+    pub format: String,
+    /// CSL style when `format` is `csl` (default: "apa")
+    #[serde(default = "default_style")]
+    pub style: String,
+}
+pub fn default_export_format() -> String {
+    "bib".into()
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -127,13 +136,20 @@ pub struct HealthCheckArgs {}
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ImportBibliographyArgs {
-    /// Collection name (creates if doesn't exist)
-    pub collection: String,
-    /// BibTeX or RIS content to import
+    /// Collection name. Omit for a small plaintext paste: resolve and return `.bib` with no API key. BibTeX/RIS file import still needs a collection and a key.
+    #[serde(default)]
+    pub collection: Option<String>,
+    /// Bibliography content: BibTeX, RIS, or a pasted plaintext citation list
     pub content: String,
-    /// File format: "bibtex" or "ris" (default: "bibtex")
-    #[serde(default = "default_bibtex")]
+    /// `auto` (default), `bibtex`, `ris`, or `plaintext`
+    #[serde(default = "default_import_format")]
     pub format: String,
+    /// Optional CSL style; when set, plaintext import also returns formatted bibliography text
+    #[serde(default)]
+    pub style: Option<String>,
+}
+pub fn default_import_format() -> String {
+    "auto".into()
 }
 pub fn default_bibtex() -> String {
     "bibtex".into()

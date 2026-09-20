@@ -15,6 +15,7 @@ mod cli;
 mod collection_entries;
 mod constants;
 mod http_error;
+mod plaintext;
 mod policy;
 mod resolve_helpers;
 mod server;
