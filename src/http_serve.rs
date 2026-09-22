@@ -4,7 +4,6 @@
 //! transport is not served. The hosted endpoint requires a short-lived
 //! sign-in token. An API key is only for a copy you run yourself.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};

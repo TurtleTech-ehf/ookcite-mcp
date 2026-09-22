@@ -2,7 +2,8 @@
 
 use crate::batch_limits::{
     batch_add_shortfall_line, collect_dois_from_collection_body, format_member_valid_lines,
-    format_usage_report, plan_metered_batch, read_only_concurrency, DoiResponseCache, MeQuota,
+    format_usage_report, plan_metered_batch, read_only_concurrency, BatchLookupItem,
+    DoiResponseCache, MeQuota,
 };
 use crate::collection_entries::{
     apply_entry_metadata_overrides, entry_doi, entry_metadata_by_id,
@@ -1394,20 +1395,19 @@ impl Server {
 
     async fn resolve_plaintext_entries(
         &self,
-        units: &[String],
+        units: &[BatchLookupItem],
     ) -> (Vec<serde_json::Value>, Vec<String>) {
         let futs: Vec<_> = units
             .iter()
-            .enumerate()
-            .map(|(i, query)| {
+            .map(|item| {
                 let server = self.clone();
-                let query = query.clone();
+                let query = item.text.clone();
+                let position = item.index + 1;
                 async move {
                     match server.resolve_query_to_metadata(&query, false).await {
                         Some(m) => Ok(m),
                         None => Err(format!(
-                            "[{}] Could not resolve: {}",
-                            i + 1,
+                            "[{position}] Could not resolve: {}",
                             &query[..query.len().min(60)]
                         )),
                     }
@@ -1477,7 +1477,7 @@ impl Server {
         if units.is_empty() {
             return "No citations found in text.".into();
         }
-        let has_key = std::env::var("OOKCITE_API_KEY").is_ok();
+        let has_key = inbound_auth::has_api_key();
         let quota = self.fetch_me_quota().await;
         let pf = plan_metered_batch(
             &units,
@@ -1530,9 +1530,7 @@ impl Server {
                     let dupes = data["duplicates_skipped"].as_u64().unwrap_or(0);
                     format!("Imported into '{name}': {added} added, {dupes} duplicates skipped")
                 }
-                Ok(r) if r.status().as_u16() == 401 => {
-                    "Authentication required. Set OOKCITE_API_KEY.".into()
-                }
+                Ok(r) if r.status().as_u16() == 401 => inbound_auth::auth_required_text().into(),
                 Ok(r) => format!("Import failed: {}", error_detail(r).await),
                 Err(e) => format!("Import failed: {e}"),
             };
