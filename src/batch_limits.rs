@@ -58,8 +58,7 @@ pub fn format_usage_report(v: &serde_json::Value) -> String {
     ) {
         (Some(remaining), Some(limit)) => {
             lines.push(format!("Daily lookups: {remaining} remaining of {limit}"));
-            if let Some(hint) = crate::constants::quota_soft_hint(remaining as u32, limit as u32)
-            {
+            if let Some(hint) = crate::constants::quota_soft_hint(remaining as u32, limit as u32) {
                 lines.push(hint);
             }
         }
@@ -347,9 +346,9 @@ mod tests {
     #[test]
     fn need_lookup_carries_the_users_position() {
         let items: Vec<String> = vec![
-            "10.1038/187493a0".into(), // 0: a collection member, diverted
-            "   ".into(),              // 1: blank, skipped
-            "10.1/first-lookup".into(), // 2
+            "10.1038/187493a0".into(),              // 0: a collection member, diverted
+            "   ".into(),                           // 1: blank, skipped
+            "10.1/first-lookup".into(),             // 2
             "Henkelman nudged elastic band".into(), // 3
         ];
         let mut members = HashSet::new();

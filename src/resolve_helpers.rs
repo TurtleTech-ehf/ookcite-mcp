@@ -379,11 +379,11 @@ pub async fn send_reverse_with_one_retry(
     api_base: &str,
     body: &serde_json::Value,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    let first = http
-        .post(endpoints::REVERSE.url(api_base, &[]))
-        .json(body)
-        .send()
-        .await?;
+    let first = crate::inbound_auth::apply_bearer(
+        http.post(endpoints::REVERSE.url(api_base, &[])).json(body),
+    )
+    .send()
+    .await?;
     if !is_reverse_pressure_status(first.status()) {
         return Ok(first);
     }
@@ -391,8 +391,7 @@ pub async fn send_reverse_with_one_retry(
         first.headers().get(reqwest::header::RETRY_AFTER),
     ))
     .await;
-    http.post(endpoints::REVERSE.url(api_base, &[]))
-        .json(body)
+    crate::inbound_auth::apply_bearer(http.post(endpoints::REVERSE.url(api_base, &[])).json(body))
         .send()
         .await
 }
@@ -404,11 +403,12 @@ pub async fn lookup_doi_with_retry(
 ) -> Result<reqwest::Response, reqwest::Error> {
     let mut attempt = 0u8;
     loop {
-        let response = http
-            .post(endpoints::LOOKUP_DOI.url(api_base, &[]))
-            .json(&serde_json::json!({ "doi": doi }))
-            .send()
-            .await?;
+        let response = crate::inbound_auth::apply_bearer(
+            http.post(endpoints::LOOKUP_DOI.url(api_base, &[]))
+                .json(&serde_json::json!({ "doi": doi })),
+        )
+        .send()
+        .await?;
         let status = response.status();
         if attempt < 2 && is_retryable_lookup_status(status) {
             attempt += 1;

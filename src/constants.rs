@@ -51,7 +51,7 @@ pub fn version_output() -> String {
 /// line, unlike `setup_help_block`, which documents every env var and is
 /// reserved for auth-failure / blocked-mutation diagnostics.
 pub fn rate_limit_hint() -> String {
-    if std::env::var("OOKCITE_API_KEY").is_ok() {
+    if crate::inbound_auth::has_api_key() {
         "Check remaining quota with the usage tool, or raise it: https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp"
             .to_string()
     } else {
@@ -67,7 +67,7 @@ pub fn quota_soft_hint(remaining: u32, limit: u32) -> Option<String> {
     if limit == 0 || remaining.saturating_mul(5) > limit {
         return None;
     }
-    if std::env::var("OOKCITE_API_KEY").is_ok() {
+    if crate::inbound_auth::has_api_key() {
         Some(format!(
             "Near today's lookup cap ({remaining}/{limit}). Check the usage tool before a large batch."
         ))
