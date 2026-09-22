@@ -6,8 +6,9 @@
 
 Give MCP-capable tools the ability to validate DOIs, format citations, manage
 bibliography collections, and catch fabricated references. Returns citation
-metadata only -- not PDFs or full-text articles. Works with clients that support
-MCP servers over standard input and output.
+metadata only -- not PDFs or full-text articles. Desktop clients can run it
+over standard input and output. Remote clients use
+`https://ookcite-api.turtletech.us/mcp`.
 
 ## Quick Start
 
@@ -185,6 +186,45 @@ Optional env (stdio MCP, all clients):
 | `OOKCITE_CREDENTIAL_STORE` | `platform` to load a platform credential reference |
 | `OOKCITE_CREDENTIAL_SERVICE` | Platform credential service name (default `ookcite-mcp`) |
 | `OOKCITE_CREDENTIAL_ACCOUNT` | Platform credential account name (default `default`) |
+
+## Remote MCP
+
+Use OokCite from a chat product without installing anything. Add this address, choose sign-in, and approve the login when asked:
+
+```text
+https://ookcite-api.turtletech.us/mcp
+```
+
+The chat then sends a short-lived access token:
+
+```text
+Authorization: Bearer <access token>
+```
+
+Lookups count against that signed-in account. A pasted API key is rejected. The transport is stateless Streamable HTTP: one POST, JSON in and JSON out. Select Streamable HTTP and sign-in (OAuth). Do not select the legacy SSE transport, an API key, or "No authentication".
+
+eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
+
+| Field | Value |
+| ----- | ----- |
+| Name | OokCite |
+| Description | Verify DOIs and ISBNs, resolve messy citations, and format bibliography entries in CSL styles. Returns citation metadata only, not PDFs or full text. |
+| URL | `https://ookcite-api.turtletech.us/mcp` |
+| Transport | Streamable HTTP |
+| Authentication | OAuth |
+
+`ookcite-mcp serve` runs your own copy. Desktop clients that spawn a subprocess still use standard input and output.
+
+| Variable | Purpose |
+| -------- | ------- |
+| `OOKCITE_API` | OokCite API base URL (default `https://ookcite-api.turtletech.us`) |
+| `OOKCITE_MCP_HTTP_AUTH` | `oauth` for sign-in, `bearer` for your own copy, or `none` |
+| `OOKCITE_MCP_OIDC_ISSUER` | Sign-in issuer. Required when auth is `oauth` |
+| `OOKCITE_MCP_OIDC_AUDIENCE` | Token audience. Required when auth is `oauth` |
+| `OOKCITE_MCP_OIDC_SCOPE` | Required scope (default `openid`) |
+| `OOKCITE_MCP_PATH` | MCP path (default `/mcp`) |
+| `OOKCITE_MCP_ALLOWED_HOSTS` | Extra `Host` names, comma-separated. Loopback is always allowed |
+| `OOKCITE_MCP_ALLOWED_ORIGINS` | Browser `Origin` values that may call the endpoint. A missing Origin is allowed |
 
 ### MCP usage tips
 
