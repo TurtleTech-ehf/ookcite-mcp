@@ -15,6 +15,9 @@ mod cli;
 mod collection_entries;
 mod constants;
 mod http_error;
+mod http_serve;
+mod inbound_auth;
+mod oidc_resource;
 mod policy;
 mod resolve_helpers;
 mod server;
@@ -35,6 +38,12 @@ async fn main() -> anyhow::Result<()> {
     }
     if args.iter().any(|a| a == "setup") {
         setup::run(&args).await;
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "serve") {
+        // Do not load a stored desktop key into this process. HTTP auth is the
+        // inbound bearer on each request; a process key must not stand in for it.
+        http_serve::serve(&inbound_auth::bind_from_args(&args)).await?;
         return Ok(());
     }
     load_configured_auth().await?;

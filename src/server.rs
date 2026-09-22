@@ -1,8 +1,8 @@
 //! MCP server: tool router, HTTP client, and handlers.
 
 use crate::batch_limits::{
-    DoiResponseCache, MeQuota, batch_add_shortfall_line, collect_dois_from_collection_body,
-    format_member_valid_lines, format_usage_report, plan_metered_batch, read_only_concurrency,
+    batch_add_shortfall_line, collect_dois_from_collection_body, format_member_valid_lines,
+    format_usage_report, plan_metered_batch, read_only_concurrency, DoiResponseCache, MeQuota,
 };
 use crate::collection_entries::{
     apply_entry_metadata_overrides, entry_doi, entry_metadata_by_id,
@@ -10,12 +10,13 @@ use crate::collection_entries::{
     resolve_entry_id_in_collection,
 };
 use crate::constants::{
-    MIN_CONFIDENT_REVERSE_LOOKUP_SCORE, MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
     api_base_url, build_api_client, rate_limit_hint, setup_help_block,
+    MIN_CONFIDENT_REVERSE_LOOKUP_SCORE, MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail,
 };
+use crate::inbound_auth::{self, apply_bearer};
 use crate::policy::{self, block_mutate};
 use crate::resolve_helpers::{
     batch_resolve_request_body, classify_reverse_lookup_response, format_batch_resolve_results,
@@ -23,13 +24,15 @@ use crate::resolve_helpers::{
     resolver_answer_agrees_with_ranking, reverse_lookup_resolve_body, send_reverse_with_one_retry,
 };
 use crate::tool_args::*;
-use futures::{StreamExt, stream};
+use futures::{stream, StreamExt};
 use ookcite_mcp::endpoints::{self, Endpoint};
+use rmcp::handler::server::tool::ToolCallContext;
+use rmcp::service::RequestContext;
 use rmcp::ServerHandler;
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_handler, tool_router,
+    tool, tool_router, RoleServer,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -51,28 +54,18 @@ pub struct Server {
 #[tool_router]
 impl Server {
     pub fn new() -> Self {
-        let mut headers = reqwest::header::HeaderMap::new();
-
-        if let Ok(api_key) = std::env::var("OOKCITE_API_KEY") {
-            if let Ok(mut auth_val) =
-                format!("Bearer {api_key}").parse::<reqwest::header::HeaderValue>()
-            {
-                auth_val.set_sensitive(true);
-                headers.insert(reqwest::header::AUTHORIZATION, auth_val);
-            }
-        }
-        // Anonymous notice is emitted once from main when probes are off.
-
+        // The bearer is attached per request. A default header would leak a
+        // process key onto HTTP calls that did not present one.
         Self {
             tool_router: Self::tool_router(),
-            http: build_api_client(30, headers),
+            http: build_api_client(30, reqwest::header::HeaderMap::new()),
             api_base: api_base_url(),
             doi_cache: shared_doi_cache().clone(),
         }
     }
 
     async fn fetch_me_quota(&self) -> Option<MeQuota> {
-        if std::env::var("OOKCITE_API_KEY").is_err() {
+        if !inbound_auth::has_api_key() {
             return None;
         }
         let resp = self.request(endpoints::ME, &[]).send().await.ok()?;
@@ -88,7 +81,7 @@ impl Server {
     async fn load_collection_doi_membership(&self) -> (HashSet<String>, HashMap<String, String>) {
         let mut dois = HashSet::new();
         let mut titles = HashMap::new();
-        if std::env::var("OOKCITE_API_KEY").is_err() {
+        if !inbound_auth::has_api_key() {
             return (dois, titles);
         }
         let Ok(resp) = self.request(endpoints::COLLECTIONS_LIST, &[]).send().await else {
@@ -156,7 +149,7 @@ impl Server {
         &self,
         dois: &[String],
     ) -> Result<Vec<serde_json::Value>, String> {
-        let has_key = std::env::var("OOKCITE_API_KEY").is_ok();
+        let has_key = inbound_auth::has_api_key();
         let quota = self.fetch_me_quota().await;
         let (member_dois, member_titles) = if has_key {
             self.load_collection_doi_membership().await
@@ -185,10 +178,7 @@ impl Server {
         // `buffered`, not `buffer_unordered`: `group_cite` numbers these
         // entries by position and `generate_citation_keys` returns one key
         // per position, so completion order is the user's numbering.
-        let looked: Vec<_> = stream::iter(futs)
-            .buffered(conc)
-            .collect::<Vec<_>>()
-            .await;
+        let looked: Vec<_> = stream::iter(futs).buffered(conc).collect::<Vec<_>>().await;
         entries.extend(looked.into_iter().flatten());
         Ok(entries)
     }
@@ -221,7 +211,7 @@ impl Server {
             }
         }
 
-        if std::env::var("OOKCITE_API_KEY").is_ok() {
+        if inbound_auth::has_api_key() {
             match self.request(endpoints::ME, &[]).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     let data: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -260,7 +250,7 @@ impl Server {
     /// site cannot drift from the contract.
     fn request(&self, ep: Endpoint, params: &[(&str, &str)]) -> reqwest::RequestBuilder {
         let url = format!("{}{}", self.api_base, ep.render(params));
-        match ep.method {
+        let builder = match ep.method {
             "GET" => self.http.get(url),
             "POST" => self.http.post(url),
             "PUT" => self.http.put(url),
@@ -270,7 +260,8 @@ impl Server {
                 "ookcite-mcp: unsupported HTTP method `{other}` in registry for {}",
                 ep.path
             ),
-        }
+        };
+        apply_bearer(builder)
     }
 
     #[tool(
@@ -774,7 +765,7 @@ impl Server {
         )
     )]
     async fn verify_references(&self, Parameters(args): Parameters<VerifyArgs>) -> String {
-        let has_key = std::env::var("OOKCITE_API_KEY").is_ok();
+        let has_key = inbound_auth::has_api_key();
         let quota = self.fetch_me_quota().await;
         let (member_dois, member_titles) = if has_key {
             self.load_collection_doi_membership().await
@@ -812,10 +803,7 @@ impl Server {
                 }
             })
             .collect();
-        let looked_up = stream::iter(futs)
-            .buffered(conc)
-            .collect::<Vec<_>>()
-            .await;
+        let looked_up = stream::iter(futs).buffered(conc).collect::<Vec<_>>().await;
         results.extend(looked_up);
         results.join("\n")
     }
@@ -830,7 +818,7 @@ impl Server {
         )
     )]
     async fn batch_format(&self, Parameters(args): Parameters<BatchArgs>) -> String {
-        let has_key = std::env::var("OOKCITE_API_KEY").is_ok();
+        let has_key = inbound_auth::has_api_key();
         let quota = self.fetch_me_quota().await;
         let (member_dois, member_titles) = if has_key {
             self.load_collection_doi_membership().await
@@ -977,9 +965,7 @@ impl Server {
                     .collect::<Vec<_>>()
                     .join("\n")
             }
-            Ok(r) if r.status().as_u16() == 401 => {
-                "Authentication required. Set OOKCITE_API_KEY.".into()
-            }
+            Ok(r) if r.status().as_u16() == 401 => inbound_auth::auth_required_text().into(),
             Ok(r) if r.status().as_u16() == 503 => {
                 "Collections not available (S3 not configured).".into()
             }
@@ -1248,7 +1234,7 @@ impl Server {
             match self.request(endpoints::COLLECTIONS_LIST, &[]).send().await {
                 Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
                 Ok(r) if r.status().as_u16() == 401 => {
-                    return Err("Authentication required. Set OOKCITE_API_KEY.".into());
+                    return Err(inbound_auth::auth_required_text().into());
                 }
                 Ok(r) => {
                     return Err(format!(
@@ -1459,9 +1445,7 @@ impl Server {
                     args.collection
                 )
             }
-            Ok(r) if r.status().as_u16() == 401 => {
-                "Authentication required. Set OOKCITE_API_KEY.".into()
-            }
+            Ok(r) if r.status().as_u16() == 401 => inbound_auth::auth_required_text().into(),
             Ok(r) => format!("Import failed: {}", error_detail(r).await),
             Err(e) => format!("Import failed: {e}"),
         }
@@ -2724,8 +2708,35 @@ fn format_enhanced_search(data: &serde_json::Value) -> String {
     out.join("\n")
 }
 
-#[tool_handler]
 impl ServerHandler for Server {
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let http_key = context
+            .extensions
+            .get::<http::request::Parts>()
+            .map(|parts| inbound_auth::inbound_api_key(&parts.headers));
+        let tcc = ToolCallContext::new(self, request, context);
+        match http_key {
+            Some(key) => inbound_auth::with_http_bearer(key, self.tool_router.call(tcc)).await,
+            None => self.tool_router.call(tcc).await,
+        }
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        Ok(ListToolsResult::with_all_items(self.tool_router.list_all()))
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.tool_router.get(name).cloned()
+    }
+
     fn get_info(&self) -> ServerInfo {
         let mut caps = ServerCapabilities::default();
         caps.tools = Some(ToolsCapability { list_changed: None });
@@ -2777,9 +2788,9 @@ mod tests {
     use crate::constants::version_output;
     use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{
-        BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs, OrcidProfileArgs,
-        OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs, VerifyArgs,
-        default_style,
+        default_style, BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs,
+        OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs,
+        VerifyArgs,
     };
 
     /// Serializes OOKCITE_API_KEY mutations across parallel tokio tests.
