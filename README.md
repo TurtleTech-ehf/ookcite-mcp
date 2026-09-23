@@ -230,7 +230,8 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 
 - Prefer **batch** tools (`verify_references`, `batch_format`, `batch_add_to_collection`,
   `import_bibliography`) over many single-citation calls.
-- Collection mutations require `OOKCITE_API_KEY`. Destructive tools
+- Collection mutations require the signed-in account, or `OOKCITE_API_KEY` on a
+  copy you run yourself. Destructive tools
   (`delete_collection`, `remove_from_collection`, `unshare_collection`) are
   annotated for clients that honor MCP tool hints.
 - The server writes diagnostics to **stderr** only on the MCP path; stdout is
@@ -276,9 +277,10 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 
 ### Collections (requires sign-in)
 
-Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
-A small plaintext `import_bibliography` with no `collection` is the exception:
-it returns `.bib` under the anonymous cap.
+Collections are a signed-in feature. The hosted server uses the account from
+sign-in. A copy you run yourself uses `OOKCITE_API_KEY`. A small plaintext
+`import_bibliography` with no `collection` is the exception: it returns `.bib`
+under the anonymous cap.
 
 | Tool                       | Purpose                                  |
 | -------------------------- | ---------------------------------------- |

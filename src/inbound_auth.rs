@@ -53,16 +53,28 @@ pub fn apply_bearer(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder
 
 pub fn auth_required_text() -> &'static str {
     if in_http_scope() {
-        "Authentication required. Send Authorization: Bearer with an OokCite API key."
+        if std::env::var("OOKCITE_MCP_HTTP_AUTH")
+            .ok()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("oauth"))
+        {
+            "Sign in is required."
+        } else {
+            "Authentication required. Send Authorization: Bearer with an OokCite API key."
+        }
     } else {
         "Authentication required. Set OOKCITE_API_KEY."
     }
 }
 
+/// An API key is short. A sign-in access token is a JWT and is longer
+/// than 512 characters, so the bearer cap has to admit one header line
+/// without treating the token as an API key.
+const BEARER_MAX_LEN: usize = 8192;
+
 /// Printable ASCII token, no whitespace, short enough for one header.
 pub fn sanitize_api_key(raw: &str) -> Option<String> {
     let key = raw.trim();
-    if key.is_empty() || key.len() > 512 {
+    if key.is_empty() || key.len() > BEARER_MAX_LEN {
         return None;
     }
     if key
@@ -344,6 +356,16 @@ mod tests {
 
         headers.insert(AUTHORIZATION, "Bearer a.b.c".parse().unwrap());
         assert!(gate.decide(&headers).is_ok());
+
+        let long = format!("Bearer {}", "a".repeat(600));
+        headers.insert(AUTHORIZATION, long.parse().unwrap());
+        assert!(
+            gate.decide(&headers).is_ok(),
+            "a sign-in token longer than an API key must reach verification"
+        );
+        let huge = format!("Bearer {}", "a".repeat(9000));
+        headers.insert(AUTHORIZATION, huge.parse().unwrap());
+        assert_eq!(gate.decide(&headers), Err(GateDeny::Unauthorized));
     }
 
     #[tokio::test]

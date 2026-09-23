@@ -233,6 +233,8 @@ pub async fn serve(bind: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use super::*;
     use crate::inbound_auth::HttpAuthMode;
     use crate::oidc_resource::OidcPolicy;
