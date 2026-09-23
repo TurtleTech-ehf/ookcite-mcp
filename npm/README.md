@@ -280,7 +280,8 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 
 ### Collections (requires sign-in)
 
-Collections are a signed-in feature. Set `OOKCITE_API_KEY` to use these tools.
+Collections are a signed-in feature. The hosted server uses the account from
+sign-in. A copy you run yourself uses `OOKCITE_API_KEY`.
 A small plaintext `import_bibliography` with no `collection` is the exception:
 it returns `.bib` under the anonymous cap.
 
