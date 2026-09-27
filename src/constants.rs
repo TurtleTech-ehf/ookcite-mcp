@@ -128,4 +128,12 @@ mod tests {
         // Client is cloneable/reusable; construction is the perf-critical path.
         let _ = client.clone();
     }
+
+    #[test]
+    fn socks5h_proxy_is_a_known_scheme() {
+        // HTTPS_PROXY on this seat is socks5h. Without the socks feature,
+        // reqwest rejects that scheme and every call dies as
+        // "error sending request for url".
+        reqwest::Proxy::all("socks5h://127.0.0.1:1080").expect("socks5h proxy");
+    }
 }
