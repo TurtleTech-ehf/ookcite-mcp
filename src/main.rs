@@ -11,6 +11,7 @@
 //! helpers in [`collection_entries`], [`resolve_helpers`], and [`http_error`].
 
 mod batch_limits;
+mod bibliographic;
 mod cli;
 mod collection_entries;
 mod constants;

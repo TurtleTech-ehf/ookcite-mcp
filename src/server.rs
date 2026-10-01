@@ -5,10 +5,11 @@ use crate::batch_limits::{
     format_usage_report, plan_metered_batch, read_only_concurrency, BatchLookupItem,
     DoiResponseCache, MeQuota,
 };
+use crate::bibliographic::{format_validate_doi, format_verify_line};
 use crate::collection_entries::{
     apply_entry_metadata_overrides, entry_doi, entry_metadata_by_id,
     entry_metadata_overrides_present, format_collection_entry_line, looks_like_doi_token,
-    resolve_entry_id_in_collection,
+    normalize_doi_token, resolve_entry_id_in_collection,
 };
 use crate::constants::{
     api_base_url, build_api_client, rate_limit_hint, setup_help_block,
@@ -306,34 +307,12 @@ impl Server {
 
     #[tool(
         name = "validate_doi",
-        description = "Check if a DOI exists and return its metadata. Use this to verify citations are real. Returns title, authors, year, journal, volume, and issue. Prefer verify_references for multiple DOIs in one call.",
+        description = "Resolve a DOI and compare it with the bibliographic claim you pass. Returns title, authors, year, journal, volume, issue, and pages. Pass title, authors (family names), year, journal, volume, issue, and pages when the citation states them. VALID means every field you passed agrees with the resolved record. A disagreement is MISMATCH, not VALID. A field the record does not carry is INCOMPLETE, not VALID. Omitting the claim only checks that the DOI exists, which does not prove it is the paper you named. Prefer verify_references for several DOIs.",
         annotations(title = "Validate DOI", read_only_hint = true, idempotent_hint = true)
     )]
     async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
         match self.lookup_doi_json_cached(&args.doi).await {
-            Ok(meta) => {
-                let title = meta["title"].as_str().unwrap_or("?");
-                let authors = meta["authors"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x["family"].as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
-                let year = meta["date"]["year"]
-                    .as_i64()
-                    .map(|y| y.to_string())
-                    .unwrap_or_default();
-                let journal = meta["journal"].as_str().unwrap_or("N/A");
-                let volume = meta["volume"].as_str().unwrap_or("N/A");
-                let issue = meta["issue"].as_str().unwrap_or("N/A");
-                let doi = meta["doi"].as_str().unwrap_or(&args.doi);
-                format!(
-                    "VALID\nDOI: {doi}\nTitle: {title}\nAuthors: {authors}\nYear: {year}\nJournal: {journal}\nVolume: {volume}\nIssue: {issue}"
-                )
-            }
+            Ok(meta) => format_validate_doi(&args.doi, &meta, &args.claim),
             Err(msg) => msg,
         }
     }
@@ -764,7 +743,7 @@ impl Server {
 
     #[tool(
         name = "verify_references",
-        description = "Batch verify that a list of DOIs exist. Returns VALID or INVALID for each. Checks daily quota and collection membership upfront so oversized batches refuse before burning lookups; collection members are reported without a metered call. Prefer over repeated validate_doi.",
+        description = "Resolve DOIs and compare each one with the bibliographic claim at the same position in claims. Pass title, authors, year, journal, volume, issue, and pages when the citation states them. VALID means every supplied field agrees. A disagreement is MISMATCH, not VALID. A supplied field the record does not carry is INCOMPLETE, not VALID. Omitting claims only checks that each DOI exists. Existence is not the paper named in a citation. Checks quota up front. A collection member is free only when that DOI has no claim; a claim needs the resolved record.",
         annotations(
             title = "Verify DOIs (batch)",
             read_only_hint = true,
@@ -774,11 +753,22 @@ impl Server {
     async fn verify_references(&self, Parameters(args): Parameters<VerifyArgs>) -> String {
         let has_key = inbound_auth::has_api_key();
         let quota = self.fetch_me_quota().await;
-        let (member_dois, member_titles) = if has_key {
+        let (mut member_dois, member_titles) = if has_key {
             self.load_collection_doi_membership().await
         } else {
             (HashSet::new(), HashMap::new())
         };
+        // A claim needs the resolved record. Membership knows the DOI is
+        // in a collection, not that the year and pages agree.
+        for (index, doi) in args.dois.iter().enumerate() {
+            if args
+                .claims
+                .get(index)
+                .is_some_and(|claim| !claim.is_empty())
+            {
+                member_dois.remove(&normalize_doi_token(doi));
+            }
+        }
         let pf = plan_metered_batch(
             &args.dois,
             &member_dois,
@@ -799,12 +789,14 @@ impl Server {
             .map(|item| {
                 let server = self.clone();
                 let doi = item.text.clone();
+                let claim = args
+                    .claims
+                    .get(item.index)
+                    .filter(|claim| !claim.is_empty())
+                    .cloned();
                 async move {
                     match server.lookup_doi_json_cached(&doi).await {
-                        Ok(meta) => {
-                            let title = meta["title"].as_str().unwrap_or("?");
-                            format!("VALID {doi} : {title}")
-                        }
+                        Ok(meta) => format_verify_line(&doi, &meta, claim.as_ref()),
                         Err(e) => e,
                     }
                 }
@@ -2963,7 +2955,8 @@ impl ServerHandler for Server {
              full-text articles, or paper content, so do not reach for it to read a paper. \
              Resolve citation metadata through these tools rather than from memory or a web search: a \
              DOI that looks plausible is not evidence the work exists, and validate_doi is what \
-             separates the two. \
+             separates the two. A DOI that exists can still be a different paper: pass year, journal, \
+             volume, and pages with the claim fields, and treat MISMATCH as a failed check. \
              Prefer the batch tools over repeated single calls -- verify_references, batch_format, \
              batch_add_to_collection, and import_bibliography each take a whole set in one request. \
              format_citation and a small plaintext import_bibliography (no collection) need no API key. \
@@ -3097,6 +3090,7 @@ mod tests {
         let out = s
             .verify_references(Parameters(VerifyArgs {
                 dois: vec!["10.1/a".into(), "10.1/b".into(), "10.1/c".into()],
+                ..Default::default()
             }))
             .await;
         assert!(
@@ -3155,6 +3149,7 @@ mod tests {
         let out = s
             .verify_references(Parameters(VerifyArgs {
                 dois: vec!["10.1038/187493a0".into(), "10.1/not-in-collection".into()],
+                ..Default::default()
             }))
             .await;
         assert!(out.contains("REFUSED"), "got: {out}");
@@ -3186,11 +3181,13 @@ mod tests {
         let a = s
             .validate_doi(Parameters(DoiArgs {
                 doi: "10.1038/187493a0".into(),
+                ..Default::default()
             }))
             .await;
         let b = s
             .validate_doi(Parameters(DoiArgs {
                 doi: "10.1038/187493a0".into(),
+                ..Default::default()
             }))
             .await;
         assert!(a.contains("VALID") && a.contains("Ruby"), "first: {a}");
@@ -3611,6 +3608,7 @@ mod tests {
         let result = s
             .validate_doi(Parameters(DoiArgs {
                 doi: "10.1038/187493a0".into(),
+                ..Default::default()
             }))
             .await;
         assert!(result.starts_with("VALID"));
@@ -3631,6 +3629,7 @@ mod tests {
         let result = s
             .validate_doi(Parameters(DoiArgs {
                 doi: "10.9999/fake".into(),
+                ..Default::default()
             }))
             .await;
         assert!(result.starts_with("INVALID"));
@@ -3653,6 +3652,7 @@ mod tests {
         let result = s
             .validate_doi(Parameters(DoiArgs {
                 doi: "10.1038/187493a0".into(),
+                ..Default::default()
             }))
             .await;
         assert!(result.starts_with("RATE LIMITED"));
@@ -3677,6 +3677,7 @@ mod tests {
         let result = s
             .validate_doi(Parameters(DoiArgs {
                 doi: "10.1038/187493a0".into(),
+                ..Default::default()
             }))
             .await;
         assert!(result.starts_with("ACCESS DENIED"));
@@ -3699,6 +3700,7 @@ mod tests {
         let result = s
             .validate_doi(Parameters(DoiArgs {
                 doi: "10.1038/187493a0".into(),
+                ..Default::default()
             }))
             .await;
         assert!(result.starts_with("ACCESS DENIED"));
@@ -3719,6 +3721,7 @@ mod tests {
         let result = s
             .verify_references(Parameters(VerifyArgs {
                 dois: vec!["10.1038/187493a0".into()],
+                ..Default::default()
             }))
             .await;
 
@@ -3741,6 +3744,7 @@ mod tests {
         let result = s
             .validate_doi(Parameters(DoiArgs {
                 doi: "10.1038/187493a0".into(),
+                ..Default::default()
             }))
             .await;
         assert!(result.starts_with("TEMPORARY ERROR"));
@@ -4546,10 +4550,52 @@ mod tests {
         let result = s
             .verify_references(Parameters(VerifyArgs {
                 dois: vec!["10.1038/1".into(), "10.1038/2".into(), "10.1038/3".into()],
+                ..Default::default()
             }))
             .await;
         assert_eq!(result.lines().count(), 3);
         assert!(result.lines().all(|l| l.starts_with("VALID")));
+    }
+
+    #[tokio::test]
+    async fn verify_references_compares_a_bibliographic_claim() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1021/j100134a002",
+                "title": "Feynman path integral formulation of quantum mechanical transition-state theory",
+                "authors": [{"family": "Voth", "given": "Gregory A."}],
+                "date": {"year": 1993},
+                "journal": "The Journal of Physical Chemistry",
+                "volume": "97",
+                "issue": "32",
+                "pages": "8365-8377"
+            })))
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec!["10.1021/j100134a002".into()],
+                claims: vec![BibliographicClaim {
+                    year: Some(1989),
+                    journal: Some("J. Phys. Chem.".into()),
+                    volume: Some("93".into()),
+                    pages: Some("7009".into()),
+                    authors: Some(vec!["Voth".into(), "Chandler".into(), "Miller".into()]),
+                    ..BibliographicClaim::default()
+                }],
+            }))
+            .await;
+        assert!(result.starts_with("MISMATCH "), "{result}");
+        assert!(!result.contains("VALID"), "{result}");
+        assert!(
+            result.contains("year: claimed 1989, record 1993"),
+            "{result}"
+        );
+        assert!(result.contains("volume: claimed 93, record 97"), "{result}");
     }
 
     #[tokio::test]
@@ -4579,6 +4625,7 @@ mod tests {
         let result = s
             .verify_references(Parameters(VerifyArgs {
                 dois: vec!["10.1038/retry".into()],
+                ..Default::default()
             }))
             .await;
 
@@ -4602,6 +4649,7 @@ mod tests {
         let result = s
             .verify_references(Parameters(VerifyArgs {
                 dois: vec!["10.1038/187493a0".into()],
+                ..Default::default()
             }))
             .await;
         assert!(result.starts_with("RATE LIMITED 10.1038/187493a0 :"));
@@ -4673,6 +4721,7 @@ mod tests {
         let result = s
             .verify_references(Parameters(VerifyArgs {
                 dois: vec!["10.1038/good".into(), "10.1038/slow".into()],
+                ..Default::default()
             }))
             .await;
 
@@ -5312,6 +5361,7 @@ mod tests {
         let result = s
             .validate_doi(Parameters(DoiArgs {
                 doi: "10.9999/fake".into(),
+                ..Default::default()
             }))
             .await;
         assert!(
