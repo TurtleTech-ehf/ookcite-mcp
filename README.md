@@ -255,7 +255,7 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 | Tool                | Purpose                                       |
 | ------------------- | --------------------------------------------- |
 | `format_citation`   | Format a DOI in any of 2900+ CSL styles (no API key for a single citation) |
-| `verify_references` | Batch-check a list of DOIs                    |
+| `verify_references` | Batch-check DOIs, and any bibliographic claim passed with them |
 | `batch_format`      | Format multiple citations at once             |
 | `search_styles`     | Find CSL style IDs by name                    |
 | `list_styles`       | Page through the full CSL style list          |

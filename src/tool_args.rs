@@ -2,10 +2,54 @@
 
 use serde::Deserialize;
 
-#[derive(Deserialize, schemars::JsonSchema)]
+/// Fields of a citation the caller is asserting. Empty means the check is
+/// only that the identifier exists.
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
+pub struct BibliographicClaim {
+    /// Title as published, not a paraphrase.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Family names. "Voth", "Voth, Gregory A.", and "Gregory A. Voth" are the same claim.
+    #[serde(default)]
+    pub authors: Option<Vec<String>>,
+    /// Publication year.
+    #[serde(default)]
+    pub year: Option<i32>,
+    /// Journal or container. Abbreviations such as "J. Chem. Phys." are compared with the full name.
+    #[serde(default)]
+    pub journal: Option<String>,
+    /// Volume.
+    #[serde(default)]
+    pub volume: Option<String>,
+    /// Issue.
+    #[serde(default)]
+    pub issue: Option<String>,
+    /// First page or a page range (e.g. "7749" or "7749-7760").
+    #[serde(default)]
+    pub pages: Option<String>,
+}
+
+impl BibliographicClaim {
+    pub fn is_empty(&self) -> bool {
+        self.title.as_deref().is_none_or(|s| s.trim().is_empty())
+            && self.authors.as_ref().is_none_or(|names| names.is_empty())
+            && self.year.is_none()
+            && self.journal.as_deref().is_none_or(|s| s.trim().is_empty())
+            && self.volume.as_deref().is_none_or(|s| s.trim().is_empty())
+            && self.issue.as_deref().is_none_or(|s| s.trim().is_empty())
+            && self.pages.as_deref().is_none_or(|s| s.trim().is_empty())
+    }
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct DoiArgs {
     /// DOI to validate (e.g. "10.1038/187493a0")
     pub doi: String,
+    /// Bibliographic claim. Pass every field the citation states.
+    /// VALID means each supplied field agrees. A disagreement is MISMATCH.
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub claim: BibliographicClaim,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -59,10 +103,14 @@ pub fn default_style() -> String {
     "apa".into()
 }
 
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct VerifyArgs {
-    /// List of DOIs to verify exist
+    /// List of DOIs to verify.
     pub dois: Vec<String>,
+    /// Claims parallel to `dois`. Omit, or leave an element empty, to only check that the DOI exists.
+    /// A disagreement with the resolved record is MISMATCH, not VALID.
+    #[serde(default)]
+    pub claims: Vec<BibliographicClaim>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
