@@ -342,7 +342,11 @@ struct AccountInfo {
 }
 
 fn account_local_name(value: &str) -> String {
-    value.split_once('@').map(|(name, _)| name).unwrap_or(value).to_string()
+    value
+        .split_once('@')
+        .map(|(name, _)| name)
+        .unwrap_or(value)
+        .to_string()
 }
 
 async fn discovery_document(http: &reqwest::Client, issuer: &str) -> Result<Discovery, String> {
