@@ -91,7 +91,11 @@ impl Server {
         if !inbound_auth::has_api_key() {
             return (dois, titles);
         }
-        let Ok(resp) = self.request(endpoints::COLLECTIONS_LIST, &[]).send().await else {
+        let Ok(resp) = crate::resolve_helpers::send_idempotent_with_retry(|| {
+            self.request(endpoints::COLLECTIONS_LIST, &[])
+        })
+        .await
+        else {
             return (dois, titles);
         };
         if !resp.status().is_success() {
@@ -933,7 +937,10 @@ impl Server {
         &self,
         #[allow(unused)] Parameters(_args): Parameters<ListCollectionsArgs>,
     ) -> String {
-        let r = self.request(endpoints::COLLECTIONS_LIST, &[]).send().await;
+        let r = crate::resolve_helpers::send_idempotent_with_retry(|| {
+            self.request(endpoints::COLLECTIONS_LIST, &[])
+        })
+        .await;
         match r {
             Ok(r) if r.status().is_success() => {
                 let cols: Vec<serde_json::Value> = r.json().await.unwrap_or_default();
@@ -965,10 +972,12 @@ impl Server {
                     .join("\n")
             }
             Ok(r) if r.status().as_u16() == 401 => inbound_auth::auth_required_text().into(),
-            Ok(r) if r.status().as_u16() == 503 => {
-                "Collections not available (S3 not configured).".into()
-            }
-            _ => "Failed to list collections.".into(),
+            Ok(r) if r.status().as_u16() == 503 => format!(
+                "Collections are unavailable after 3 attempts ({}). The API answers 503 on every route while it restarts; retry in a minute before treating this as a storage fault.",
+                error_detail(r).await
+            ),
+            Ok(r) => format!("Failed to list collections: {}", error_detail(r).await),
+            Err(e) => format!("Failed to list collections: {e}"),
         }
     }
 
@@ -1256,7 +1265,11 @@ impl Server {
     /// instead of masking auth / 5xx / network errors with a second failed POST.
     async fn lookup_collection_id(&self, name: &str) -> Result<Option<String>, String> {
         let cols: Vec<serde_json::Value> =
-            match self.request(endpoints::COLLECTIONS_LIST, &[]).send().await {
+            match crate::resolve_helpers::send_idempotent_with_retry(|| {
+                self.request(endpoints::COLLECTIONS_LIST, &[])
+            })
+            .await
+            {
                 Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
                 Ok(r) if r.status().as_u16() == 401 => {
                     return Err(inbound_auth::auth_required_text().into());
@@ -2088,7 +2101,11 @@ impl Server {
         }
         // Resolve all collections to full objects
         let cols: Vec<serde_json::Value> =
-            match self.request(endpoints::COLLECTIONS_LIST, &[]).send().await {
+            match crate::resolve_helpers::send_idempotent_with_retry(|| {
+                self.request(endpoints::COLLECTIONS_LIST, &[])
+            })
+            .await
+            {
                 Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
                 _ => return "Failed to list collections.".into(),
             };
@@ -4186,6 +4203,51 @@ mod tests {
         let s = test_server("http://127.0.0.1:1");
         let result = s.health_check(Parameters(HealthCheckArgs {})).await;
         assert!(result.starts_with("API unreachable:"));
+    }
+
+    #[tokio::test]
+    async fn list_collections_outlasts_a_restart_window() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(503).insert_header("retry-after", "0"))
+            .up_to_n_times(2)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-123", "name": "femtolab", "entry_count": 30}
+            ])))
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s.list_collections(Parameters(ListCollectionsArgs {})).await;
+        assert!(result.contains("femtolab (30 entries)"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn list_collections_reports_the_reason_a_503_gives() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("retry-after", "0")
+                    .set_body_string("Collection storage not configured"),
+            )
+            .expect(3)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s.list_collections(Parameters(ListCollectionsArgs {})).await;
+        assert!(
+            result.contains("Collection storage not configured"),
+            "{result}"
+        );
+        assert!(result.contains("after 3 attempts"), "{result}");
     }
 
     #[tokio::test]

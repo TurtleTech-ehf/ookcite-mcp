@@ -396,6 +396,38 @@ pub async fn send_reverse_with_one_retry(
         .await
 }
 
+/// Attempts an idempotent read gets before its 502/503/504 is reported.
+const IDEMPOTENT_READ_ATTEMPTS: u8 = 3;
+/// Longest wait between two attempts, whatever `Retry-After` asks for.
+const IDEMPOTENT_RETRY_CAP: Duration = Duration::from_secs(5);
+
+/// Delay before the next attempt of an idempotent read.
+pub fn idempotent_retry_delay(retry_after: Option<&reqwest::header::HeaderValue>) -> Duration {
+    reverse_retry_delay(retry_after).min(IDEMPOTENT_RETRY_CAP)
+}
+
+/// Send an idempotent read, again after a gateway or unavailable status.
+///
+/// A restart of the API answers every route with 503 for about a minute and
+/// a half, so one refusal says nothing about the store behind the route.
+pub async fn send_idempotent_with_retry<F>(make: F) -> Result<reqwest::Response, reqwest::Error>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+{
+    let mut attempt = 1u8;
+    loop {
+        let response = make().send().await?;
+        if attempt >= IDEMPOTENT_READ_ATTEMPTS || !is_retryable_lookup_status(response.status()) {
+            return Ok(response);
+        }
+        attempt += 1;
+        sleep(idempotent_retry_delay(
+            response.headers().get(reqwest::header::RETRY_AFTER),
+        ))
+        .await;
+    }
+}
+
 pub async fn lookup_doi_with_retry(
     http: &reqwest::Client,
     api_base: &str,
@@ -424,6 +456,19 @@ mod tests {
     use super::format_reverse_lookup_payload;
     use super::is_retryable_lookup_status;
     use reqwest::StatusCode;
+
+    #[test]
+    fn idempotent_retry_delay_is_capped() {
+        let long = reqwest::header::HeaderValue::from_static("120");
+        assert_eq!(
+            super::idempotent_retry_delay(Some(&long)),
+            std::time::Duration::from_secs(5)
+        );
+        assert_eq!(
+            super::idempotent_retry_delay(None),
+            std::time::Duration::from_secs(2)
+        );
+    }
 
     #[test]
     fn resolve_payload_does_not_repeat_the_chosen_paper() {
