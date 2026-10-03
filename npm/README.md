@@ -195,17 +195,13 @@ Use OokCite from a chat product without installing anything. Add this address, c
 https://ookcite-api.turtletech.us/mcp
 ```
 
-The hosted endpoint does not take an API key. Each user signs in, and the
-client sends the short-lived access token it received:
+The chat then sends a short-lived access token:
 
 ```text
 Authorization: Bearer <access token>
 ```
 
-Lookups count against that signed-in account. A pasted API key is rejected.
-The transport is stateless Streamable HTTP: one POST, JSON in and JSON out.
-Select Streamable HTTP and OAuth. Do not select the legacy SSE transport,
-an API key, or "No authentication".
+Lookups count against that signed-in account. A pasted API key is rejected. The transport is stateless Streamable HTTP: one POST, JSON in and JSON out. Select Streamable HTTP and sign-in (OAuth). Do not select the legacy SSE transport, an API key, or "No authentication".
 
 eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 
@@ -234,7 +230,8 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 
 - Prefer **batch** tools (`verify_references`, `batch_format`, `batch_add_to_collection`,
   `import_bibliography`) over many single-citation calls.
-- Collection mutations require `OOKCITE_API_KEY`. Destructive tools
+- Collection mutations require the signed-in account, or `OOKCITE_API_KEY` on a
+  copy you run yourself. Destructive tools
   (`delete_collection`, `remove_from_collection`, `unshare_collection`) are
   annotated for clients that honor MCP tool hints.
 - The server writes diagnostics to **stderr** only on the MCP path; stdout is
@@ -258,7 +255,7 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 | Tool                | Purpose                                       |
 | ------------------- | --------------------------------------------- |
 | `format_citation`   | Format a DOI in any of 2900+ CSL styles (no API key for a single citation) |
-| `verify_references` | Batch-check a list of DOIs                    |
+| `verify_references` | Batch-check DOIs, and any bibliographic claim passed with them |
 | `batch_format`      | Format multiple citations at once             |
 | `search_styles`     | Find CSL style IDs by name                    |
 | `list_styles`       | Page through the full CSL style list          |
@@ -281,9 +278,9 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 ### Collections (requires sign-in)
 
 Collections are a signed-in feature. The hosted server uses the account from
-sign-in. A copy you run yourself uses `OOKCITE_API_KEY`.
-A small plaintext `import_bibliography` with no `collection` is the exception:
-it returns `.bib` under the anonymous cap.
+sign-in. A copy you run yourself uses `OOKCITE_API_KEY`. A small plaintext
+`import_bibliography` with no `collection` is the exception: it returns `.bib`
+under the anonymous cap.
 
 | Tool                       | Purpose                                  |
 | -------------------------- | ---------------------------------------- |
