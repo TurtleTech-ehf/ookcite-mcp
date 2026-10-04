@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.6.4 - 2026-10-04
+#### Bugfixes
+- (**mcp**) report a 429 with Retry-After instead of a miss - (04248ea) - Rohit Goswami
+- (**cli**) setup --help does not write client config - (644bd66) - Rohit Goswami
+
+- - -
 ## v0.6.3 - 2026-10-04
 #### Bugfixes
 - (**mcp**) retry reference checks and batch collection adds through a 503 - (f5db978) - Rohit Goswami
