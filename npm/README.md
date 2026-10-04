@@ -206,18 +206,25 @@ connector. Choose sign-in. Submit the connector by that URL, and submit the
 `plugins/ookcite` folder as the plugin bundle. Installing from the
 marketplace does not submit either listing.
 
-The authorization server named by the protected-resource metadata must let
-the directory client register a public client. Dynamic registration applies
-when discovery publishes `registration_endpoint`. A client-id metadata
-document applies when discovery publishes
+A remote connector does not have to support dynamic client registration.
+A pre-registered client id is accepted: the directory can hold a confidential
+client you create, or the person connecting can enter a client id and leave
+the secret blank for a public client. Dynamic registration is used when
+discovery publishes `registration_endpoint`. A client-id metadata document
+is used only when discovery publishes
 `client_id_metadata_document_supported` set to true and includes `none` in
-`token_endpoint_auth_methods_supported`. The issuer publishes S256 PKCE and
-neither registration signal. Accept the directory's hosted callback and
-port-agnostic loopback redirects on `http://localhost/callback` and
-`http://127.0.0.1/callback`. The protected-resource `resource` value must
-be the MCP URL, including `/mcp`. Set `OOKCITE_MCP_RESOURCE` to that URL.
-The token audience stays `OOKCITE_MCP_OIDC_AUDIENCE`. Access tokens must
-satisfy `exp - iat` <= 3600 or the resource server rejects them.
+`token_endpoint_auth_methods_supported`. If neither is advertised, the
+directory client does not register itself. This issuer publishes S256 PKCE,
+no registration endpoint, and only `client_secret_basic` and
+`client_secret_post`, which is a confidential client. A public client
+created in advance advertises `none` and is the pre-registered path that
+does not add a registration endpoint. It must accept the directory's hosted
+callback exactly, and loopback redirects on `localhost` and `127.0.0.1` at
+any port. The protected-resource `resource` value must be the MCP URL,
+including `/mcp`. Set `OOKCITE_MCP_RESOURCE` to that URL only on a build
+whose discovery address keeps the well-known path on the origin. The token
+audience stays `OOKCITE_MCP_OIDC_AUDIENCE`. Access tokens must satisfy
+`exp - iat` <= 3600 or the resource server rejects them.
 
 ## Remote MCP
 
