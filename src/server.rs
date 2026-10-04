@@ -1,9 +1,9 @@
 //! MCP server: tool router, HTTP client, and handlers.
 
 use crate::batch_limits::{
-    batch_add_shortfall_line, collect_dois_from_collection_body, format_member_valid_lines,
-    format_usage_report, plan_metered_batch, read_only_concurrency, BatchLookupItem,
-    DoiResponseCache, MeQuota,
+    BatchLookupItem, DoiResponseCache, MeQuota, batch_add_shortfall_line,
+    collect_dois_from_collection_body, format_member_valid_lines, format_usage_report,
+    plan_metered_batch, read_only_concurrency,
 };
 use crate::bibliographic::{format_validate_doi, format_verify_line};
 use crate::collection_entries::{
@@ -12,17 +12,18 @@ use crate::collection_entries::{
     normalize_doi_token, resolve_entry_id_in_collection,
 };
 use crate::constants::{
-    api_base_url, build_api_client, rate_limit_hint, setup_help_block,
     MIN_CONFIDENT_REVERSE_LOOKUP_SCORE, MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
+    api_base_url, build_api_client, rate_limit_hint, setup_help_block,
 };
 use crate::http_error::{
-    classify_collection_create_failure, classify_lookup_doi_failure, error_detail,
+    classify_collection_create_failure, classify_lookup_doi_failure, error_detail, failure_text,
+    is_promoted_status, prefixed_failure, severe_lookup_message, upstream_failure_report,
 };
 use crate::inbound_auth::{self, apply_bearer};
 use crate::plaintext::{
-    attach_original_query, citation_units_from_parse_payload, collection_entry_metadata,
-    detect_bibliography_kind, export_kind, optional_collection_name, render_bibtex_entries,
-    split_plaintext_citations, BibliographyKind, ExportKind,
+    BibliographyKind, ExportKind, attach_original_query, citation_units_from_parse_payload,
+    collection_entry_metadata, detect_bibliography_kind, export_kind, optional_collection_name,
+    render_bibtex_entries, split_plaintext_citations,
 };
 use crate::policy::{self, block_mutate};
 use crate::resolve_helpers::{
@@ -31,15 +32,16 @@ use crate::resolve_helpers::{
     resolver_answer_agrees_with_ranking, reverse_lookup_resolve_body, send_reverse_with_one_retry,
 };
 use crate::tool_args::*;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use ookcite_mcp::endpoints::{self, Endpoint};
+use rmcp::ServerHandler;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::service::RequestContext;
-use rmcp::ServerHandler;
 use rmcp::{
+    RoleServer,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_router, RoleServer,
+    tool, tool_router,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -75,7 +77,10 @@ impl Server {
         if !inbound_auth::has_api_key() {
             return None;
         }
-        let resp = self.request(endpoints::ME, &[]).send().await.ok()?;
+        let resp = self
+            .send_read(|| self.request(endpoints::ME, &[]))
+            .await
+            .ok()?;
         if !resp.status().is_success() {
             return None;
         }
@@ -114,8 +119,7 @@ impl Server {
                 continue;
             }
             let Ok(cr) = self
-                .request(endpoints::COLLECTION_GET, &[("id", id)])
-                .send()
+                .send_read(|| self.request(endpoints::COLLECTION_GET, &[("id", id)]))
                 .await
             else {
                 continue;
@@ -183,14 +187,26 @@ impl Server {
             .map(|item| {
                 let server = self.clone();
                 let doi = item.text.clone();
-                async move { server.lookup_doi_json_cached(&doi).await.ok() }
+                async move { server.lookup_doi_json_cached(&doi).await }
             })
             .collect();
         // `buffered`, not `buffer_unordered`: `group_cite` numbers these
         // entries by position and `generate_citation_keys` returns one key
         // per position, so completion order is the user's numbering.
         let looked: Vec<_> = stream::iter(futs).buffered(conc).collect::<Vec<_>>().await;
-        entries.extend(looked.into_iter().flatten());
+        let mut failures = Vec::new();
+        for result in looked {
+            match result {
+                Ok(meta) => entries.push(meta),
+                Err(error) => failures.push(error),
+            }
+        }
+        // A throttle or a restart has to stay visible. Dropping it here
+        // made group_cite and key generation report a miss, or a grouped
+        // marker, for a call the server refused.
+        if let Some(message) = severe_lookup_message(&failures) {
+            return Err(message);
+        }
         Ok(entries)
     }
 
@@ -204,7 +220,9 @@ impl Server {
         let mut out = policy::policy_summary_lines();
         out.push(format!("API base: {}", self.api_base));
 
-        let health = self.request(endpoints::HEALTH, &[]).send().await;
+        let health = self
+            .send_read(|| self.request(endpoints::HEALTH, &[]))
+            .await;
         match health {
             Ok(resp) if resp.status().is_success() => {
                 let data: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -223,7 +241,7 @@ impl Server {
         }
 
         if inbound_auth::has_api_key() {
-            match self.request(endpoints::ME, &[]).send().await {
+            match self.send_read(|| self.request(endpoints::ME, &[])).await {
                 Ok(resp) if resp.status().is_success() => {
                     let data: serde_json::Value = resp.json().await.unwrap_or_default();
                     let plan = data["plan"].as_str().unwrap_or("?");
@@ -275,6 +293,16 @@ impl Server {
         apply_bearer(builder)
     }
 
+    /// A read, or a write the collection store treats as a duplicate.
+    /// Three attempts, `Retry-After` capped at 5s. One 503 during a
+    /// restart is not an answer.
+    async fn send_read<F>(&self, make: F) -> Result<reqwest::Response, reqwest::Error>
+    where
+        F: Fn() -> reqwest::RequestBuilder,
+    {
+        crate::resolve_helpers::send_idempotent_with_retry(make).await
+    }
+
     #[tool(
         name = "search_styles",
         description = "Search for available CSL citation styles by name. Returns a list of matching style IDs to use in formatting tools. Call this when the user names a style (\"IEEE\", \"Chicago\", a journal's house style) and you need its exact ID before calling format_citation or batch_format.",
@@ -286,9 +314,10 @@ impl Server {
     )]
     async fn search_styles(&self, Parameters(args): Parameters<StyleSearchArgs>) -> String {
         let r = self
-            .request(endpoints::STYLES_SEARCH, &[])
-            .query(&[("q", args.query.as_str())])
-            .send()
+            .send_read(|| {
+                self.request(endpoints::STYLES_SEARCH, &[])
+                    .query(&[("q", args.query.as_str())])
+            })
             .await;
         match r {
             Ok(resp) if resp.status().is_success() => {
@@ -305,7 +334,8 @@ impl Server {
                     out.join("\n")
                 }
             }
-            _ => "Style search failed".into(),
+            Ok(resp) => failure_text(resp, "Style search failed").await,
+            Err(error) => format!("Style search failed: {error}"),
         }
     }
 
@@ -328,9 +358,10 @@ impl Server {
     )]
     async fn lookup_isbn(&self, Parameters(args): Parameters<IsbnArgs>) -> String {
         let r = self
-            .request(endpoints::LOOKUP_ISBN, &[])
-            .json(&serde_json::json!({"isbn": args.isbn}))
-            .send()
+            .send_read(|| {
+                self.request(endpoints::LOOKUP_ISBN, &[])
+                    .json(&serde_json::json!({ "isbn": args.isbn }))
+            })
             .await;
         match r {
             Ok(resp) if resp.status().is_success() => {
@@ -397,20 +428,16 @@ impl Server {
                 if !args.use_live_queries
                     && local_match.top_score < MIN_CONFIDENT_REVERSE_LOOKUP_SCORE =>
             {
-                let live_body = reverse_lookup_resolve_body(&args, true);
-                let live = self
-                    .request(endpoints::RESOLVE, &[])
-                    .json(&live_body)
-                    .send()
-                    .await;
-                match classify_reverse_lookup_response(live).await {
+                match self.live_reverse_lookup(&args).await {
                     Ok(Some(live_match))
                         if live_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE =>
                     {
                         live_match.output
                     }
                     Ok(Some(_)) | Ok(None) => "No confident matches found".into(),
-                    Err(_) => local_match.output,
+                    // A live 429 or 5xx is the answer. The weak local hit
+                    // must not hide it.
+                    Err(message) => return message,
                 }
             }
             Ok(Some(local_match)) if args.use_live_queries => {
@@ -419,37 +446,37 @@ impl Server {
                 if local_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE {
                     local_match.output
                 } else {
-                    let live_body = reverse_lookup_resolve_body(&args, true);
-                    let live = self
-                        .request(endpoints::RESOLVE, &[])
-                        .json(&live_body)
-                        .send()
-                        .await;
-                    match classify_reverse_lookup_response(live).await {
+                    match self.live_reverse_lookup(&args).await {
                         Ok(Some(live_match)) => live_match.output,
                         Ok(None) => local_match.output,
-                        Err(_) => local_match.output,
+                        Err(message) => return message,
                     }
                 }
             }
             Ok(Some(local_match)) => local_match.output,
-            Ok(None) if !args.use_live_queries => {
-                let live_body = reverse_lookup_resolve_body(&args, true);
-                let live = self
-                    .request(endpoints::RESOLVE, &[])
-                    .json(&live_body)
-                    .send()
-                    .await;
-                match classify_reverse_lookup_response(live).await {
-                    Ok(Some(live_match)) => live_match.output,
-                    Ok(None) => "No matches found".into(),
-                    Err(message) => return message,
-                }
-            }
+            Ok(None) if !args.use_live_queries => match self.live_reverse_lookup(&args).await {
+                Ok(Some(live_match)) => live_match.output,
+                Ok(None) => "No matches found".into(),
+                Err(message) => return message,
+            },
             Ok(None) => "No matches found".into(),
             Err(message) => return message,
         };
         attach_original_query(&args.text, &body)
+    }
+
+    /// Live `/resolve` after a reverse miss or a weak local hit.
+    /// This read uses the shared three-attempt schedule. A failure here
+    /// is returned to the caller; it is not replaced by the weak hit.
+    async fn live_reverse_lookup(
+        &self,
+        args: &crate::tool_args::ReverseArgs,
+    ) -> Result<Option<crate::resolve_helpers::ReverseLookupMatch>, String> {
+        let live_body = reverse_lookup_resolve_body(args, true);
+        let live = self
+            .send_read(|| self.request(endpoints::RESOLVE, &[]).json(&live_body))
+            .await;
+        classify_reverse_lookup_response(live).await
     }
 
     #[tool(
@@ -463,9 +490,10 @@ impl Server {
     )]
     async fn parse_citations(&self, Parameters(args): Parameters<ParseCitationsArgs>) -> String {
         let r = self
-            .request(endpoints::PARSE_CITATIONS, &[])
-            .json(&serde_json::json!({"text": args.text}))
-            .send()
+            .send_read(|| {
+                self.request(endpoints::PARSE_CITATIONS, &[])
+                    .json(&serde_json::json!({ "text": args.text }))
+            })
             .await;
         match r {
             Ok(resp) if resp.status().is_success() => {
@@ -538,11 +566,12 @@ impl Server {
     )]
     async fn debug_resolve(&self, Parameters(args): Parameters<DebugResolveArgs>) -> String {
         let r = self
-            .request(endpoints::RESOLVE_DEBUG, &[])
-            .json(&serde_json::json!({
-                "input": {"kind": "text", "text": args.text}
-            }))
-            .send()
+            .send_read(|| {
+                self.request(endpoints::RESOLVE_DEBUG, &[])
+                    .json(&serde_json::json!({
+                        "input": {"kind": "text", "text": args.text}
+                    }))
+            })
             .await;
         match r {
             Ok(resp) if resp.status().is_success() => {
@@ -664,31 +693,20 @@ impl Server {
         )
     )]
     async fn format_citation(&self, Parameters(args): Parameters<FormatArgs>) -> String {
-        let lookup = self
-            .request(endpoints::LOOKUP_DOI, &[])
-            .json(&serde_json::json!({"doi": args.doi}))
-            .send()
-            .await;
-        let meta: serde_json::Value = match lookup {
-            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-            Ok(r) if r.status().as_u16() == 429 => {
-                return format!(
-                    "RATE LIMITED: {}\n{}",
-                    error_detail(r).await,
-                    rate_limit_hint()
-                );
-            }
-            Ok(r) if r.status().as_u16() == 403 => {
-                return format!("ACCESS DENIED: {}", error_detail(r).await);
-            }
-            Ok(_) => return format!("DOI {} not found", args.doi),
-            Err(e) => return format!("ERROR: {e}"),
+        let meta = match self.lookup_doi_json_cached(&args.doi).await {
+            Ok(meta) => meta,
+            Err(error) => return error,
         };
 
         let fmt = self
-            .request(endpoints::FORMAT, &[])
-            .json(&serde_json::json!({"entries": [meta], "style": args.style, "locale": "en-US"}))
-            .send()
+            .send_read(|| {
+                self.request(endpoints::FORMAT, &[])
+                    .json(&serde_json::json!({
+                        "entries": [meta.clone()],
+                        "style": args.style,
+                        "locale": "en-US"
+                    }))
+            })
             .await;
         match fmt {
             Ok(r) if r.status().is_success() => {
@@ -701,7 +719,8 @@ impl Server {
                     .unwrap_or("");
                 format!("In-text: {intext}\nReference: {plain}")
             }
-            _ => "Format failed".into(),
+            Ok(r) => failure_text(r, "Format failed").await,
+            Err(error) => format!("Format failed: {error}"),
         }
     }
 
@@ -726,13 +745,14 @@ impl Server {
 
         let indices: Vec<usize> = (0..entries.len()).collect();
         let r = self
-            .request(endpoints::FORMAT_GROUP_CITE, &[])
-            .json(&serde_json::json!({
-                "entries": entries,
-                "indices": indices,
-                "style": args.style
-            }))
-            .send()
+            .send_read(|| {
+                self.request(endpoints::FORMAT_GROUP_CITE, &[])
+                    .json(&serde_json::json!({
+                        "entries": &entries,
+                        "indices": &indices,
+                        "style": args.style
+                    }))
+            })
             .await;
 
         match r {
@@ -741,7 +761,8 @@ impl Server {
                 let plain = result["plain"].as_str().unwrap_or("");
                 format!("Grouped Citation: {plain}")
             }
-            _ => "Group citation failed".into(),
+            Ok(resp) => failure_text(resp, "Group citation failed").await,
+            Err(error) => format!("Group citation failed: {error}"),
         }
     }
 
@@ -864,16 +885,16 @@ impl Server {
                             .await
                             .map_err(|error| format!("[{position}] {error}"));
                     }
-                    if let Some(meta) = server
+                    match server
                         .resolve_query_to_metadata(&text, use_live_queries)
                         .await
                     {
-                        Ok(meta)
-                    } else {
-                        Err(format!(
+                        Ok(Some(meta)) => Ok(meta),
+                        Ok(None) => Err(format!(
                             "[{position}] Not found: {}",
                             &text[..text.len().min(60)]
-                        ))
+                        )),
+                        Err(error) => Err(format!("[{position}] {error}")),
                     }
                 }
             })
@@ -893,14 +914,20 @@ impl Server {
                 Err(e) => errors.push(e),
             }
         }
+        errors.sort_by_key(|error| crate::http_error::failure_rank(error));
 
         if entries.is_empty() {
             return format!("No citations resolved.\n{}", errors.join("\n"));
         }
         let fmt = self
-            .request(endpoints::FORMAT, &[])
-            .json(&serde_json::json!({"entries": entries, "style": args.style, "locale": "en-US"}))
-            .send()
+            .send_read(|| {
+                self.request(endpoints::FORMAT, &[])
+                    .json(&serde_json::json!({
+                        "entries": &entries,
+                        "style": args.style,
+                        "locale": "en-US"
+                    }))
+            })
             .await;
         match fmt {
             Ok(r) if r.status().is_success() => {
@@ -919,7 +946,7 @@ impl Server {
                 }
                 out.join("\n")
             }
-            Ok(r) => format!("Batch format failed: HTTP {}", r.status()),
+            Ok(r) => failure_text(r, "Batch format failed").await,
             Err(e) => format!("Batch format failed: {e}"),
         }
     }
@@ -973,10 +1000,10 @@ impl Server {
             }
             Ok(r) if r.status().as_u16() == 401 => inbound_auth::auth_required_text().into(),
             Ok(r) if r.status().as_u16() == 503 => format!(
-                "Collections are unavailable after 3 attempts ({}). The API answers 503 on every route while it restarts; retry in a minute before treating this as a storage fault.",
+                "TEMPORARY ERROR: Collections are unavailable after 3 attempts ({}). The API answers 503 on every route while it restarts; retry in a minute before treating this as a storage fault.",
                 error_detail(r).await
             ),
-            Ok(r) => format!("Failed to list collections: {}", error_detail(r).await),
+            Ok(r) => prefixed_failure(r, "Failed to list collections").await,
             Err(e) => format!("Failed to list collections: {e}"),
         }
     }
@@ -1003,18 +1030,16 @@ impl Server {
         let metadata = {
             let q = args.query.trim();
             if q.starts_with("10.") {
-                match self
-                    .resolve_query_to_metadata(q, args.use_live_queries)
-                    .await
-                {
-                    Some(metadata) => metadata,
-                    None => return format!("Could not resolve: {}", args.query),
+                match self.metadata_for_query(q, args.use_live_queries).await {
+                    Ok(metadata) => metadata,
+                    Err(error) => return error,
                 }
             } else {
                 let resolve = self
-                    .request(endpoints::RESOLVE, &[])
-                    .json(&resolve_text_body(q, args.use_live_queries))
-                    .send()
+                    .send_read(|| {
+                        self.request(endpoints::RESOLVE, &[])
+                            .json(&resolve_text_body(q, args.use_live_queries))
+                    })
                     .await;
                 match resolve {
                     Ok(r) if r.status().is_success() => {
@@ -1027,29 +1052,23 @@ impl Server {
                             if !candidates.is_empty() {
                                 return format_resolve_candidates(&args.query, candidates);
                             }
-                            match self
-                                .resolve_query_to_metadata(q, args.use_live_queries)
-                                .await
-                            {
-                                Some(metadata) => metadata,
-                                None => return format!("Could not resolve: {}", args.query),
+                            match self.metadata_for_query(q, args.use_live_queries).await {
+                                Ok(metadata) => metadata,
+                                Err(error) => return error,
                             }
                         } else {
-                            match self
-                                .resolve_query_to_metadata(q, args.use_live_queries)
-                                .await
-                            {
-                                Some(metadata) => metadata,
-                                None => return format!("Could not resolve: {}", args.query),
+                            match self.metadata_for_query(q, args.use_live_queries).await {
+                                Ok(metadata) => metadata,
+                                Err(error) => return error,
                             }
                         }
                     }
-                    _ => match self
-                        .resolve_query_to_metadata(q, args.use_live_queries)
-                        .await
-                    {
-                        Some(metadata) => metadata,
-                        None => return format!("Could not resolve: {}", args.query),
+                    Ok(r) if is_promoted_status(r.status()) => {
+                        return failure_text(r, "Could not resolve").await;
+                    }
+                    _ => match self.metadata_for_query(q, args.use_live_queries).await {
+                        Ok(metadata) => metadata,
+                        Err(error) => return error,
                     },
                 }
             }
@@ -1065,7 +1084,7 @@ impl Server {
                 let title = metadata["title"].as_str().unwrap_or("(untitled)");
                 format!("Added to {}: {title}", args.collection)
             }
-            Ok(r) => format!("Failed to add entry: {}", error_detail(r).await),
+            Ok(r) => prefixed_failure(r, "Failed to add entry").await,
             Err(e) => format!("Failed to add entry: {e}"),
         }
     }
@@ -1091,24 +1110,26 @@ impl Server {
         match export_kind(&args.format, &args.style) {
             ExportKind::Bibtex => {
                 let r = self
-                    .request(endpoints::COLLECTION_EXPORT_BIB, &[("id", &col_id)])
-                    .send()
+                    .send_read(|| {
+                        self.request(endpoints::COLLECTION_EXPORT_BIB, &[("id", &col_id)])
+                    })
                     .await;
                 match r {
                     Ok(r) if r.status().is_success() => {
                         r.text().await.unwrap_or_else(|_| "Export failed.".into())
                     }
-                    _ => "Failed to export collection.".into(),
+                    Ok(r) => failure_text(r, "Failed to export collection").await,
+                    Err(error) => format!("Failed to export collection: {error}"),
                 }
             }
             ExportKind::Csl { style } => {
                 let r = self
-                    .request(endpoints::COLLECTION_GET, &[("id", &col_id)])
-                    .send()
+                    .send_read(|| self.request(endpoints::COLLECTION_GET, &[("id", &col_id)]))
                     .await;
                 let collection: serde_json::Value = match r {
                     Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-                    _ => return "Failed to load collection.".into(),
+                    Ok(r) => return failure_text(r, "Failed to load collection").await,
+                    Err(error) => return format!("Failed to load collection: {error}"),
                 };
                 let entries: Vec<serde_json::Value> = collection
                     .get("entries")
@@ -1145,12 +1166,12 @@ impl Server {
         };
 
         let r = self
-            .request(endpoints::COLLECTION_GET, &[("id", &col_id)])
-            .send()
+            .send_read(|| self.request(endpoints::COLLECTION_GET, &[("id", &col_id)]))
             .await;
         let collection: serde_json::Value = match r {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-            _ => return "Failed to load collection.".into(),
+            Ok(r) => return failure_text(r, "Failed to load collection").await,
+            Err(error) => return format!("Failed to load collection: {error}"),
         };
 
         let query_lower = args.query.to_lowercase();
@@ -1209,16 +1230,14 @@ impl Server {
         col_id: &str,
     ) -> Result<Vec<serde_json::Value>, String> {
         let r = self
-            .request(endpoints::COLLECTION_GET, &[("id", col_id)])
-            .send()
+            .send_read(|| self.request(endpoints::COLLECTION_GET, &[("id", col_id)]))
             .await;
         let collection: serde_json::Value = match r {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
             Ok(r) => {
-                return Err(format!(
-                    "Failed to load collection for entry lookup: {}",
-                    error_detail(r).await
-                ));
+                return Err(
+                    prefixed_failure(r, "Failed to load collection for entry lookup").await,
+                );
             }
             Err(e) => return Err(format!("Failed to load collection for entry lookup: {e}")),
         };
@@ -1275,10 +1294,7 @@ impl Server {
                     return Err(inbound_auth::auth_required_text().into());
                 }
                 Ok(r) => {
-                    return Err(format!(
-                        "Failed to list collections: {}",
-                        error_detail(r).await
-                    ));
+                    return Err(prefixed_failure(r, "Failed to list collections").await);
                 }
                 Err(e) => return Err(format!("Failed to list collections: {e}")),
             };
@@ -1318,71 +1334,114 @@ impl Server {
         }
     }
 
+    /// `Ok(None)` is a genuine miss. A throttle, a timeout, or a restart
+    /// is `Err`, so a batch cannot report that citation as "Not found".
     async fn resolve_query_to_metadata(
         &self,
         query: &str,
         use_live_queries: bool,
-    ) -> Option<serde_json::Value> {
+    ) -> Result<Option<serde_json::Value>, String> {
         let q = query.trim();
         if q.starts_with("10.") {
             // A DOI lookup only reads. The same three-attempt schedule as a
             // collection list keeps a restart from dropping the citation
             // before a batch add is posted.
             let r = lookup_doi_with_retry(&self.http, &self.api_base, q).await;
-            match r {
-                Ok(r) if r.status().is_success() => {
-                    Some(r.json::<serde_json::Value>().await.unwrap_or_default())
-                }
-                _ => None,
+            return match r {
+                Ok(r) if r.status().is_success() => Ok(Some(
+                    r.json::<serde_json::Value>().await.unwrap_or_default(),
+                )),
+                Ok(r) if r.status().as_u16() == 404 => Ok(None),
+                Ok(r) => Err(classify_lookup_doi_failure(r, q).await),
+                Err(error) => Err(format!("ERROR {q} : {error}")),
+            };
+        }
+
+        let mut failures = Vec::new();
+        let resolve = crate::resolve_helpers::send_idempotent_with_retry(|| {
+            self.request(endpoints::RESOLVE, &[])
+                .json(&resolve_text_body(q, use_live_queries))
+        })
+        .await;
+        let resolved = match resolve {
+            Ok(r) if r.status().is_success() => {
+                let payload: serde_json::Value = r.json().await.unwrap_or_default();
+                resolve_payload_metadata(&payload)
             }
-        } else {
-            let resolve = crate::resolve_helpers::send_idempotent_with_retry(|| {
-                self.request(endpoints::RESOLVE, &[])
-                    .json(&resolve_text_body(q, use_live_queries))
+            Ok(r) if r.status().as_u16() == 404 => None,
+            Ok(r) => {
+                failures.push(failure_text(r, "Resolve failed").await);
+                None
+            }
+            Err(error) => {
+                failures.push(format!("Resolve failed: {error}"));
+                None
+            }
+        };
+
+        // /api/v1/reverse ranks the local corpus; it is not a live
+        // upstream provider, so it runs whatever use_live_queries
+        // says. Gating it behind that flag made the default path skip
+        // the one ranker that had the paper, and citations came back
+        // "Not found" for papers the corpus ranks well.
+        let ranked: Vec<serde_json::Value> =
+            match crate::resolve_helpers::send_idempotent_with_retry(|| {
+                self.request(endpoints::REVERSE, &[])
+                    .json(&serde_json::json!({ "text": q }))
             })
-            .await;
-            let resolved = match resolve {
-                Ok(r) if r.status().is_success() => {
-                    let payload: serde_json::Value = r.json().await.unwrap_or_default();
-                    resolve_payload_metadata(&payload)
+            .await
+            {
+                Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+                Ok(r) if r.status().as_u16() == 404 => Vec::new(),
+                Ok(r) => {
+                    failures.push(failure_text(r, "Reverse failed").await);
+                    Vec::new()
                 }
-                _ => None,
+                Err(error) => {
+                    failures.push(format!("Reverse failed: {error}"));
+                    Vec::new()
+                }
             };
 
-            // /api/v1/reverse ranks the local corpus; it is not a live
-            // upstream provider, so it runs whatever use_live_queries
-            // says. Gating it behind that flag made the default path skip
-            // the one ranker that had the paper, and citations came back
-            // "Not found" for papers the corpus ranks well.
-            let ranked: Vec<serde_json::Value> =
-                match crate::resolve_helpers::send_idempotent_with_retry(|| {
-                    self.request(endpoints::REVERSE, &[])
-                        .json(&serde_json::json!({ "text": q }))
-                })
-                .await
-                {
-                    Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-                    _ => Vec::new(),
-                };
-
-            if let Some(metadata) = resolved {
-                if resolver_answer_agrees_with_ranking(&metadata, &ranked) {
-                    return Some(metadata);
-                }
-                eprintln!(
-                    "ookcite-mcp: resolver answer for {q:?} is absent from the ranked candidates; taking the ranking"
-                );
+        if let Some(metadata) = resolved {
+            if resolver_answer_agrees_with_ranking(&metadata, &ranked) {
+                return Ok(Some(metadata));
             }
+            eprintln!(
+                "ookcite-mcp: resolver answer for {q:?} is absent from the ranked candidates; taking the ranking"
+            );
+        }
 
-            ranked.first().and_then(|r| r.get("metadata")).cloned()
+        if let Some(metadata) = ranked.first().and_then(|row| row.get("metadata")).cloned() {
+            return Ok(Some(metadata));
+        }
+        if failures.is_empty() {
+            Ok(None)
+        } else {
+            Err(severe_lookup_message(&failures).unwrap_or_else(|| failures.join("\n")))
+        }
+    }
+
+    async fn metadata_for_query(
+        &self,
+        query: &str,
+        use_live_queries: bool,
+    ) -> Result<serde_json::Value, String> {
+        match self
+            .resolve_query_to_metadata(query, use_live_queries)
+            .await?
+        {
+            Some(metadata) => Ok(metadata),
+            None => Err(format!("Could not resolve: {query}")),
         }
     }
 
     async fn plaintext_citation_units(&self, text: &str) -> Vec<String> {
         let r = self
-            .request(endpoints::PARSE_CITATIONS, &[])
-            .json(&serde_json::json!({"text": text}))
-            .send()
+            .send_read(|| {
+                self.request(endpoints::PARSE_CITATIONS, &[])
+                    .json(&serde_json::json!({ "text": text }))
+            })
             .await;
         let from_api = match r {
             Ok(resp) if resp.status().is_success() => {
@@ -1410,11 +1469,12 @@ impl Server {
                 let position = item.index + 1;
                 async move {
                     match server.resolve_query_to_metadata(&query, false).await {
-                        Some(m) => Ok(m),
-                        None => Err(format!(
+                        Ok(Some(metadata)) => Ok(metadata),
+                        Ok(None) => Err(format!(
                             "[{position}] Could not resolve: {}",
                             &query[..query.len().min(60)]
                         )),
+                        Err(error) => Err(format!("[{position}] {error}")),
                     }
                 }
             })
@@ -1431,6 +1491,7 @@ impl Server {
                 Err(e) => errors.push(e),
             }
         }
+        errors.sort_by_key(|error| crate::http_error::failure_rank(error));
         (entries, errors)
     }
 
@@ -1440,13 +1501,14 @@ impl Server {
         style: &str,
     ) -> Result<String, String> {
         let fmt = self
-            .request(endpoints::FORMAT, &[])
-            .json(&serde_json::json!({
-                "entries": entries,
-                "style": style,
-                "locale": "en-US"
-            }))
-            .send()
+            .send_read(|| {
+                self.request(endpoints::FORMAT, &[])
+                    .json(&serde_json::json!({
+                        "entries": entries,
+                        "style": style,
+                        "locale": "en-US"
+                    }))
+            })
             .await;
         match fmt {
             Ok(r) if r.status().is_success() => {
@@ -1467,7 +1529,7 @@ impl Server {
                 }
                 Err("Format returned no bibliography text.".into())
             }
-            Ok(r) => Err(format!("Format failed: {}", error_detail(r).await)),
+            Ok(r) => Err(failure_text(r, "Format failed").await),
             Err(e) => Err(format!("Format failed: {e}")),
         }
     }
@@ -1524,9 +1586,10 @@ impl Server {
                 Err(e) => return format!("{e}\n\n{out}"),
             };
             let r = self
-                .request(endpoints::COLLECTION_ENTRIES_BATCH, &[("id", &col_id)])
-                .json(&serde_json::json!({"entries": entries}))
-                .send()
+                .send_read(|| {
+                    self.request(endpoints::COLLECTION_ENTRIES_BATCH, &[("id", &col_id)])
+                        .json(&serde_json::json!({ "entries": &entries }))
+                })
                 .await;
             let saved = match r {
                 Ok(r) if r.status().is_success() => {
@@ -1536,7 +1599,7 @@ impl Server {
                     format!("Imported into '{name}': {added} added, {dupes} duplicates skipped")
                 }
                 Ok(r) if r.status().as_u16() == 401 => inbound_auth::auth_required_text().into(),
-                Ok(r) => format!("Import failed: {}", error_detail(r).await),
+                Ok(r) => failure_text(r, "Import failed").await,
                 Err(e) => format!("Import failed: {e}"),
             };
             out = format!("{saved}\n\n{out}");
@@ -1562,7 +1625,9 @@ impl Server {
         &self,
         #[allow(unused)] Parameters(_args): Parameters<HealthCheckArgs>,
     ) -> String {
-        let r = self.request(endpoints::HEALTH, &[]).send().await;
+        let r = self
+            .send_read(|| self.request(endpoints::HEALTH, &[]))
+            .await;
         match r {
             Ok(resp) if resp.status().is_success() => {
                 let data: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -1573,6 +1638,27 @@ impl Server {
                     let hits = cache["hits"].as_u64().unwrap_or(0);
                     let misses = cache["misses"].as_u64().unwrap_or(0);
                     out.push_str(&format!("\nCache: {hits} hits, {misses} misses"));
+                }
+                // /api/health can read ok while the collection store is
+                // refusing. A signed-in probe says so. Anonymous health
+                // stays the process check it already was.
+                if inbound_auth::has_api_key() {
+                    match self
+                        .send_read(|| self.request(endpoints::COLLECTIONS_LIST, &[]))
+                        .await
+                    {
+                        Ok(collections) if collections.status().is_success() => {
+                            out.push_str("\nCollections: reachable");
+                        }
+                        Ok(collections) if collections.status().as_u16() == 401 => {}
+                        Ok(collections) => {
+                            let status = collections.status();
+                            out.push_str(&format!("\nCollections: HTTP {status}"));
+                        }
+                        Err(error) => {
+                            out.push_str(&format!("\nCollections: unreachable ({error})"));
+                        }
+                    }
                 }
                 out
             }
@@ -1660,7 +1746,7 @@ impl Server {
                 format!("Imported into '{collection}': {added} added, {dupes} duplicates skipped")
             }
             Ok(r) if r.status().as_u16() == 401 => inbound_auth::auth_required_text().into(),
-            Ok(r) => format!("Import failed: {}", error_detail(r).await),
+            Ok(r) => failure_text(r, "Import failed").await,
             Err(e) => format!("Import failed: {e}"),
         }
     }
@@ -1680,17 +1766,19 @@ impl Server {
             Err(e) => return e,
         };
 
-        let Some(metadata) = self
-            .resolve_query_to_metadata(&args.query, args.use_live_queries)
+        let metadata = match self
+            .metadata_for_query(&args.query, args.use_live_queries)
             .await
-        else {
-            return format!("Could not resolve: {}", args.query);
+        {
+            Ok(metadata) => metadata,
+            Err(error) => return error,
         };
 
         let r = self
-            .request(endpoints::COLLECTION_CHECK_DUPLICATES, &[("id", &col_id)])
-            .json(&serde_json::json!({"metadata": metadata}))
-            .send()
+            .send_read(|| {
+                self.request(endpoints::COLLECTION_CHECK_DUPLICATES, &[("id", &col_id)])
+                    .json(&serde_json::json!({ "metadata": &metadata }))
+            })
             .await;
         match r {
             Ok(r) if r.status().is_success() => {
@@ -1710,7 +1798,8 @@ impl Server {
                     out.join("\n")
                 }
             }
-            _ => "Duplicate check failed.".into(),
+            Ok(r) => failure_text(r, "Duplicate check failed").await,
+            Err(error) => format!("Duplicate check failed: {error}"),
         }
     }
 
@@ -1744,14 +1833,14 @@ impl Server {
                 let query = query.clone();
                 async move {
                     let q = query.trim();
-                    let meta = server.resolve_query_to_metadata(q, use_live_queries).await;
-                    match meta {
-                        Some(m) => Ok(m),
-                        None => Err(format!(
+                    match server.resolve_query_to_metadata(q, use_live_queries).await {
+                        Ok(Some(metadata)) => Ok(metadata),
+                        Ok(None) => Err(format!(
                             "[{}] Could not resolve: {}",
                             i + 1,
                             &query[..query.len().min(60)]
                         )),
+                        Err(error) => Err(format!("[{}] {error}", i + 1)),
                     }
                 }
             })
@@ -1772,6 +1861,7 @@ impl Server {
                 Err(e) => errors.push(e),
             }
         }
+        errors.sort_by_key(|error| crate::http_error::failure_rank(error));
 
         if entries.is_empty() {
             return format!("No citations resolved.\n{}", errors.join("\n"));
@@ -1806,7 +1896,7 @@ impl Server {
                 }
                 out
             }
-            Ok(r) => format!("Batch add failed: {}", error_detail(r).await),
+            Ok(r) => prefixed_failure(r, "Batch add failed").await,
             Err(e) => format!("Batch add failed: {e}"),
         }
     }
@@ -1842,7 +1932,7 @@ impl Server {
             Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
                 format!("Deleted collection '{}'.", args.collection)
             }
-            Ok(r) => format!("Failed to delete collection: {}", error_detail(r).await),
+            Ok(r) => prefixed_failure(r, "Failed to delete collection").await,
             Err(e) => format!("Failed to delete collection: {e}"),
         }
     }
@@ -1890,7 +1980,8 @@ impl Server {
             Ok(r) if r.status().is_success() => {
                 format!("Updated collection '{}'.", args.collection)
             }
-            _ => "Failed to update collection.".into(),
+            Ok(r) => prefixed_failure(r, "Failed to update collection").await,
+            Err(e) => format!("Failed to update collection: {e}"),
         }
     }
 
@@ -1946,7 +2037,7 @@ impl Server {
                     )
                 }
             }
-            Ok(r) => format!("Failed to remove entry: {}", error_detail(r).await),
+            Ok(r) => prefixed_failure(r, "Failed to remove entry").await,
             Err(e) => format!("Failed to remove entry: {e}"),
         }
     }
@@ -1978,7 +2069,8 @@ impl Server {
             Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
                 format!("Updated tags on '{}'.", args.collection)
             }
-            _ => "Failed to update tags.".into(),
+            Ok(r) => prefixed_failure(r, "Failed to update tags").await,
+            Err(e) => format!("Failed to update tags: {e}"),
         }
     }
 
@@ -2012,7 +2104,8 @@ impl Server {
             Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
                 format!("Reordered entries in '{}'.", args.collection)
             }
-            _ => "Failed to reorder collection.".into(),
+            Ok(r) => prefixed_failure(r, "Failed to reorder collection").await,
+            Err(e) => format!("Failed to reorder collection: {e}"),
         }
     }
 
@@ -2046,7 +2139,8 @@ impl Server {
                 let share_url = data["url"].as_str().unwrap_or("?");
                 format!("Shared '{}': {share_url}", args.collection)
             }
-            _ => "Failed to share collection.".into(),
+            Ok(r) => prefixed_failure(r, "Failed to share collection").await,
+            Err(e) => format!("Failed to share collection: {e}"),
         }
     }
 
@@ -2079,7 +2173,8 @@ impl Server {
             Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
                 format!("Unshared '{}'.", args.collection)
             }
-            _ => "Failed to unshare collection.".into(),
+            Ok(r) => prefixed_failure(r, "Failed to unshare collection").await,
+            Err(e) => format!("Failed to unshare collection: {e}"),
         }
     }
 
@@ -2111,7 +2206,8 @@ impl Server {
             .await
             {
                 Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-                _ => return "Failed to list collections.".into(),
+                Ok(r) => return prefixed_failure(r, "Failed to list collections").await,
+                Err(e) => return format!("Failed to list collections: {e}"),
             };
 
         let mut resolved = Vec::new();
@@ -2122,15 +2218,20 @@ impl Server {
             // Fetch full collection with entries
             let id = col["id"].as_str().unwrap_or("");
             let r = self
-                .request(endpoints::COLLECTION_GET, &[("id", id)])
-                .send()
+                .send_read(|| self.request(endpoints::COLLECTION_GET, &[("id", id)]))
                 .await;
             match r {
                 Ok(r) if r.status().is_success() => {
                     let full: serde_json::Value = r.json().await.unwrap_or_default();
                     resolved.push(full);
                 }
-                _ => return format!("Failed to load collection '{name}'."),
+                Ok(r) => {
+                    return format!(
+                        "Failed to load collection '{name}': {}",
+                        failure_text(r, "request failed").await
+                    );
+                }
+                Err(e) => return format!("Failed to load collection '{name}': {e}"),
             }
         }
 
@@ -2147,7 +2248,7 @@ impl Server {
                 let dupes = data["duplicates_skipped"].as_u64().unwrap_or(0);
                 format!("Merged: {merged} entries, {created} new, {dupes} duplicates skipped")
             }
-            Ok(r) => format!("Merge failed: {}", error_detail(r).await),
+            Ok(r) => prefixed_failure(r, "Merge failed").await,
             Err(e) => format!("Merge failed: {e}"),
         }
     }
@@ -2192,7 +2293,7 @@ impl Server {
                     args.source, args.target
                 )
             }
-            Ok(r) => format!("Batch move failed: {}", error_detail(r).await),
+            Ok(r) => prefixed_failure(r, "Batch move failed").await,
             Err(e) => format!("Batch move failed: {e}"),
         }
     }
@@ -2208,8 +2309,7 @@ impl Server {
     )]
     async fn view_shared(&self, Parameters(args): Parameters<ViewSharedArgs>) -> String {
         let r = self
-            .request(endpoints::SHARED_GET, &[("token", &args.share_token)])
-            .send()
+            .send_read(|| self.request(endpoints::SHARED_GET, &[("token", &args.share_token)]))
             .await;
         match r {
             Ok(r) if r.status().is_success() => {
@@ -2245,7 +2345,8 @@ impl Server {
             Ok(r) if r.status().as_u16() == 404 => {
                 "Shared collection not found or link expired.".into()
             }
-            _ => "Failed to load shared collection.".into(),
+            Ok(r) => failure_text(r, "Failed to load shared collection").await,
+            Err(e) => format!("Failed to load shared collection: {e}"),
         }
     }
 
@@ -2274,9 +2375,10 @@ impl Server {
         }
 
         let r = self
-            .request(endpoints::CITATION_KEYS, &[])
-            .json(&serde_json::json!({"entries": entries}))
-            .send()
+            .send_read(|| {
+                self.request(endpoints::CITATION_KEYS, &[])
+                    .json(&serde_json::json!({"entries": &entries}))
+            })
             .await;
         match r {
             Ok(r) if r.status().is_success() => {
@@ -2296,7 +2398,7 @@ impl Server {
                     keys
                 }
             }
-            Ok(r) => format!("Citation key generation failed: {}", error_detail(r).await),
+            Ok(r) => failure_text(r, "Citation key generation failed").await,
             Err(e) => format!("Citation key generation failed: {e}"),
         }
     }
@@ -2312,9 +2414,10 @@ impl Server {
     )]
     async fn expand_journal(&self, Parameters(args): Parameters<ExpandJournalArgs>) -> String {
         let r = self
-            .request(endpoints::JOURNAL_EXPAND, &[])
-            .json(&serde_json::json!({"abbreviation": args.abbreviation}))
-            .send()
+            .send_read(|| {
+                self.request(endpoints::JOURNAL_EXPAND, &[])
+                    .json(&serde_json::json!({"abbreviation": &args.abbreviation}))
+            })
             .await;
         match r {
             Ok(r) if r.status().is_success() => {
@@ -2327,7 +2430,7 @@ impl Server {
                     format!("No expansion found for '{}'", args.abbreviation)
                 }
             }
-            Ok(r) => format!("Journal expansion failed: {}", error_detail(r).await),
+            Ok(r) => failure_text(r, "Journal expansion failed").await,
             Err(e) => format!("Journal expansion failed: {e}"),
         }
     }
@@ -2344,12 +2447,15 @@ impl Server {
         )
     )]
     async fn usage(&self, Parameters(_args): Parameters<UsageArgs>) -> String {
-        match self.request(endpoints::ME_USAGE, &[]).send().await {
+        match self
+            .send_read(|| self.request(endpoints::ME_USAGE, &[]))
+            .await
+        {
             Ok(r) if r.status().is_success() => {
                 let data: serde_json::Value = r.json().await.unwrap_or_default();
                 format_usage_report(&data)
             }
-            Ok(r) => format!("Failed to read usage: {}", error_detail(r).await),
+            Ok(r) => failure_text(r, "Failed to read usage").await,
             Err(e) => format!("Failed to read usage: {e}"),
         }
     }
@@ -2367,9 +2473,10 @@ impl Server {
         let offset = args.offset.to_string();
         let limit = args.limit.to_string();
         let r = self
-            .request(endpoints::STYLES_LIST, &[])
-            .query(&[("offset", offset.as_str()), ("limit", limit.as_str())])
-            .send()
+            .send_read(|| {
+                self.request(endpoints::STYLES_LIST, &[])
+                    .query(&[("offset", offset.as_str()), ("limit", limit.as_str())])
+            })
             .await;
         match r {
             Ok(r) if r.status().is_success() => {
@@ -2391,7 +2498,7 @@ impl Server {
                 ));
                 out.join("\n")
             }
-            Ok(r) => format!("Failed to list styles: {}", error_detail(r).await),
+            Ok(r) => failure_text(r, "Failed to list styles").await,
             Err(e) => format!("Failed to list styles: {e}"),
         }
     }
@@ -2417,23 +2524,14 @@ impl Server {
         }
         let body = batch_resolve_request_body(&args.citations, args.use_live_queries);
         let r = self
-            .request(endpoints::RESOLVE_BATCH, &[])
-            .json(&body)
-            .send()
+            .send_read(|| self.request(endpoints::RESOLVE_BATCH, &[]).json(&body))
             .await;
         match r {
             Ok(r) if r.status().is_success() => {
                 let payload: serde_json::Value = r.json().await.unwrap_or_default();
                 format_batch_resolve_results(&args.citations, &payload).join("\n")
             }
-            Ok(r) if r.status().as_u16() == 429 => {
-                format!(
-                    "RATE LIMITED: {}\n{}",
-                    error_detail(r).await,
-                    rate_limit_hint()
-                )
-            }
-            Ok(r) => format!("Batch resolve failed: {}", error_detail(r).await),
+            Ok(r) => failure_text(r, "Batch resolve failed").await,
             Err(e) => format!("Batch resolve failed: {e}"),
         }
     }
@@ -2452,12 +2550,13 @@ impl Server {
         Parameters(args): Parameters<NormalizeBibliographyArgs>,
     ) -> String {
         let r = self
-            .request(endpoints::BIBLIOGRAPHY_NORMALIZE, &[])
-            .json(&serde_json::json!({
-                "content": args.content,
-                "format": args.format,
-            }))
-            .send()
+            .send_read(|| {
+                self.request(endpoints::BIBLIOGRAPHY_NORMALIZE, &[])
+                    .json(&serde_json::json!({
+                        "content": &args.content,
+                        "format": &args.format,
+                    }))
+            })
             .await;
         match r {
             Ok(r) if r.status().is_success() => {
@@ -2466,7 +2565,7 @@ impl Server {
                 let content = data["content"].as_str().unwrap_or("");
                 format!("Normalized {count} entries.\n\n{content}")
             }
-            Ok(r) => format!("Normalization failed: {}", error_detail(r).await),
+            Ok(r) => failure_text(r, "Normalization failed").await,
             Err(e) => format!("Normalization failed: {e}"),
         }
     }
@@ -2510,14 +2609,7 @@ impl Server {
                 let data: serde_json::Value = r.json().await.unwrap_or_default();
                 format_enhanced_search(&data)
             }
-            Ok(r) if r.status().as_u16() == 429 => {
-                format!(
-                    "RATE LIMITED: {}\n{}",
-                    error_detail(r).await,
-                    rate_limit_hint()
-                )
-            }
-            Ok(r) => format!("Enhanced search failed: {}", error_detail(r).await),
+            Ok(r) => failure_text(r, "Enhanced search failed").await,
             Err(e) => format!("Enhanced search failed: {e}"),
         }
     }
@@ -2585,7 +2677,7 @@ impl Server {
             Ok(r) if r.status().as_u16() == 503 => {
                 "ORCID author index is not configured on this server.".into()
             }
-            Ok(r) => format!("ORCID search failed: {}", error_detail(r).await),
+            Ok(r) => failure_text(r, "ORCID search failed").await,
             Err(e) => format!("ORCID search failed: {e}"),
         }
     }
@@ -2619,7 +2711,7 @@ impl Server {
             Ok(r) if r.status().as_u16() == 503 => {
                 "ORCID author index is not configured on this server.".into()
             }
-            Ok(r) => format!("ORCID profile lookup failed: {}", error_detail(r).await),
+            Ok(r) => failure_text(r, "ORCID profile lookup failed").await,
             Err(e) => format!("ORCID profile lookup failed: {e}"),
         }
     }
@@ -2672,7 +2764,7 @@ impl Server {
             Ok(r) if r.status().as_u16() == 503 => {
                 "The index that receives ingested works is not available on this server.".into()
             }
-            Ok(r) => format!("ORCID ingest failed: {}", error_detail(r).await),
+            Ok(r) => failure_text(r, "ORCID ingest failed").await,
             Err(e) => format!("ORCID ingest failed: {e}"),
         }
     }
@@ -2738,7 +2830,7 @@ impl Server {
                     format!("Updated entry {eid} in '{}': {title}", args.collection)
                 }
             }
-            Ok(r) => format!("Failed to update entry metadata: {}", error_detail(r).await),
+            Ok(r) => prefixed_failure(r, "Failed to update entry metadata").await,
             Err(e) => format!("Failed to update entry metadata: {e}"),
         }
     }
@@ -2801,7 +2893,7 @@ impl Server {
                     )
                 }
             }
-            Ok(r) => format!("Failed to merge entries: {}", error_detail(r).await),
+            Ok(r) => prefixed_failure(r, "Failed to merge entries").await,
             Err(e) => format!("Failed to merge entries: {e}"),
         }
     }
@@ -2930,6 +3022,31 @@ fn format_enhanced_search(data: &serde_json::Value) -> String {
     out.join("\n")
 }
 
+fn tool_result_text(result: &CallToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|item| item.as_text().map(|text| text.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A throttle, a timeout, or a restart is a tool error. The text stays,
+/// and the structured object carries the status and `Retry-After`.
+fn promote_upstream_failure(result: &mut CallToolResult) {
+    let text = tool_result_text(result);
+    let Some(report) = upstream_failure_report(&text) else {
+        return;
+    };
+    result.is_error = Some(true);
+    result.structured_content = Some(serde_json::json!({
+        "kind": report.kind,
+        "http_status": report.http_status,
+        "message": text,
+        "retry_after": report.retry_after,
+    }));
+}
+
 impl ServerHandler for Server {
     async fn call_tool(
         &self,
@@ -2941,10 +3058,14 @@ impl ServerHandler for Server {
             .get::<http::request::Parts>()
             .map(|parts| inbound_auth::inbound_api_key(&parts.headers));
         let tcc = ToolCallContext::new(self, request, context);
-        match http_key {
+        let called = match http_key {
             Some(key) => inbound_auth::with_http_bearer(key, self.tool_router.call(tcc)).await,
             None => self.tool_router.call(tcc).await,
-        }
+        };
+        called.map(|mut result| {
+            promote_upstream_failure(&mut result);
+            result
+        })
     }
 
     async fn list_tools(
@@ -3012,9 +3133,9 @@ mod tests {
     use crate::constants::version_output;
     use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{
-        default_style, BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs,
-        OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs,
-        VerifyArgs,
+        BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs, OrcidProfileArgs,
+        OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs, VerifyArgs,
+        default_style,
     };
 
     /// Serializes OOKCITE_API_KEY mutations across parallel tokio tests.
@@ -5081,6 +5202,7 @@ mod tests {
         let metadata = s
             .resolve_query_to_metadata("Wright 1931 genetics shifting balance", false)
             .await
+            .expect("resolve")
             .expect("metadata");
 
         assert_eq!(metadata["doi"].as_str(), Some("10.1093/genetics/16.2.97"));
@@ -5125,6 +5247,7 @@ mod tests {
         let metadata = s
             .resolve_query_to_metadata("Wright 1931 genetics shifting balance", false)
             .await
+            .expect("resolve")
             .expect("metadata");
 
         assert_eq!(metadata["doi"].as_str(), Some("10.1093/genetics/16.2.97"));
@@ -6075,5 +6198,364 @@ mod tests {
             }))
             .await;
         assert_eq!(out, "No ORCID profile found for 0000-0002-2393-8056.");
+    }
+
+    fn structured_keys(result: &CallToolResult) -> usize {
+        result
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.as_object())
+            .map(|object| object.len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn promote_marks_a_rate_limit_and_keeps_the_delay() {
+        let text = "RATE LIMITED 10.2/cap : 429 Too Many Requests: Daily limit (Retry-After: 75)\nCheck remaining quota";
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        promote_upstream_failure(&mut result);
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured_keys(&result), 4);
+        assert_eq!(structured["kind"], "rate_limited");
+        assert_eq!(structured["http_status"], 429);
+        assert_eq!(structured["retry_after"], "75");
+        assert_eq!(structured["message"], text);
+    }
+
+    #[test]
+    fn promote_keeps_an_http_date_and_a_malformed_delay() {
+        let date = "TIMEOUT: 504 Gateway Timeout (Retry-After: Wed, 21 Oct 2015 07:28:00 GMT)";
+        let mut dated = CallToolResult::success(vec![Content::text(date)]);
+        promote_upstream_failure(&mut dated);
+        let structured = dated.structured_content.as_ref().unwrap();
+        assert_eq!(structured["kind"], "timeout");
+        assert_eq!(structured["http_status"], 504);
+        assert_eq!(structured["retry_after"], "Wed, 21 Oct 2015 07:28:00 GMT");
+        assert_eq!(structured_keys(&dated), 4);
+
+        let mut malformed = CallToolResult::success(vec![Content::text(
+            "TEMPORARY ERROR: 503 Service Unavailable (Retry-After: not-a-delay)",
+        )]);
+        promote_upstream_failure(&mut malformed);
+        let structured = malformed.structured_content.as_ref().unwrap();
+        assert_eq!(structured["kind"], "temporary_error");
+        assert_eq!(structured["http_status"], 503);
+        assert_eq!(structured["retry_after"], "not-a-delay");
+        assert_eq!(structured_keys(&malformed), 4);
+    }
+
+    #[test]
+    fn promote_leaves_a_miss_and_records_an_absent_delay_as_null() {
+        let mut miss = CallToolResult::success(vec![Content::text("Not found")]);
+        promote_upstream_failure(&mut miss);
+        assert_eq!(miss.is_error, Some(false));
+        assert!(miss.structured_content.is_none());
+
+        let mut absent = CallToolResult::success(vec![Content::text(
+            "RATE LIMITED: 429 Too Many Requests: Daily limit reached",
+        )]);
+        promote_upstream_failure(&mut absent);
+        let structured = absent.structured_content.as_ref().unwrap();
+        assert!(structured["retry_after"].is_null());
+        assert_eq!(structured_keys(&absent), 4);
+    }
+
+    #[tokio::test]
+    async fn resolve_query_reports_a_rate_limit_instead_of_a_miss() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "12")
+                    .set_body_string("Daily limit reached"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let err = test_server(&mock.uri())
+            .resolve_query_to_metadata("Wright 1931 genetics shifting balance", false)
+            .await
+            .expect_err("rate limit");
+        assert!(err.contains("RATE LIMITED"), "{err}");
+        assert!(err.contains("Daily limit reached"), "{err}");
+        assert!(err.contains("(Retry-After: 12)"), "{err}");
+        assert!(!err.contains("Could not resolve"), "{err}");
+        assert!(!err.contains("Not found"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn group_cite_reports_a_lookup_rate_limit() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "9")
+                    .set_body_string("Daily limit reached"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .group_cite(Parameters(GroupCiteArgs {
+                dois: vec!["10.1038/group-cap".into()],
+                style: "apa".into(),
+            }))
+            .await;
+        assert!(result.contains("RATE LIMITED"), "{result}");
+        assert!(result.contains("(Retry-After: 9)"), "{result}");
+        assert!(!result.contains("Group citation failed"), "{result}");
+        assert!(!result.contains("Failed to resolve"), "{result}");
+    }
+
+    async fn mount_weak_local_reverse(mock: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "metadata": {
+                        "title": "Resource allocation based on redundancy models for high availability cloud",
+                        "doi": "10.1007/s00607-019-00728-1",
+                        "journal": "Computing"
+                    },
+                    "score": 2.0
+                }
+            ])))
+            .expect(1)
+            .mount(mock)
+            .await;
+    }
+
+    fn live_rate_limit(seconds: &str) -> ResponseTemplate {
+        ResponseTemplate::new(429)
+            .insert_header("retry-after", seconds)
+            .set_body_string("Live lookup quota exhausted")
+    }
+
+    #[tokio::test]
+    async fn reverse_lookup_keeps_a_live_rate_limit_over_a_weak_hit() {
+        let mock = MockServer::start().await;
+        mount_weak_local_reverse(&mock).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(live_rate_limit("31"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "Attention Is All You Need Vaswani 2017".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: false,
+            }))
+            .await;
+        assert!(result.contains("RATE LIMITED"), "{result}");
+        assert!(result.contains("Live lookup quota exhausted"), "{result}");
+        assert!(result.contains("(Retry-After: 31)"), "{result}");
+        assert!(
+            !result.contains("Resource allocation based on redundancy models"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reverse_lookup_reports_a_live_rate_limit_when_local_is_empty() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(live_rate_limit("32"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "A paper the corpus does not hold".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: false,
+            }))
+            .await;
+        assert!(result.contains("RATE LIMITED"), "{result}");
+        assert!(result.contains("Live lookup quota exhausted"), "{result}");
+        assert!(result.contains("(Retry-After: 32)"), "{result}");
+        assert!(!result.contains("No matches"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn reverse_lookup_reports_a_live_rate_limit_when_live_is_forced() {
+        let mock = MockServer::start().await;
+        mount_weak_local_reverse(&mock).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(live_rate_limit("33"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "Attention Is All You Need Vaswani 2017".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: true,
+            }))
+            .await;
+        assert!(result.contains("RATE LIMITED"), "{result}");
+        assert!(result.contains("Live lookup quota exhausted"), "{result}");
+        assert!(result.contains("(Retry-After: 33)"), "{result}");
+        assert!(
+            !result.contains("Resource allocation based on redundancy models"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_plaintext_outlasts_a_restart_window() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_test");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan": "academic",
+                "lookups_remaining": 50,
+                "lookups_limit": 60
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/parse-citations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "citations": [{"cleaned_text": "10.1038/restart-import"}]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/restart-import",
+                "title": "Stored Once",
+                "authors": [{"family": "Ada", "given": "A."}],
+                "date": {"year": 2020}
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-import", "name": "femtolab", "entry_count": 1}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/col-import/entries/batch"))
+            .respond_with(ResponseTemplate::new(503).insert_header("retry-after", "0"))
+            .up_to_n_times(2)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/col-import/entries/batch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "added": 1,
+                "duplicates_skipped": 0
+            })))
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .import_bibliography(Parameters(ImportBibliographyArgs {
+                collection: Some("femtolab".into()),
+                content: "10.1038/restart-import".into(),
+                format: "plaintext".into(),
+                style: None,
+            }))
+            .await;
+        assert!(
+            result.contains("Imported into 'femtolab': 1 added"),
+            "{result}"
+        );
+        assert!(!result.contains("Import failed"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn health_check_reports_collections_down_when_a_key_is_set() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_test");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "version": "0.1.0"
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("retry-after", "0")
+                    .set_body_string("storage down"),
+            )
+            .expect(3)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .health_check(Parameters(HealthCheckArgs {}))
+            .await;
+        assert!(result.contains("Status: ok"), "{result}");
+        assert!(result.contains("Collections: HTTP 503"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn health_check_omits_collections_without_a_key() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "version": "0.1.0"
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .health_check(Parameters(HealthCheckArgs {}))
+            .await;
+        assert!(result.contains("Status: ok"), "{result}");
+        assert!(!result.contains("Collections:"), "{result}");
     }
 }
