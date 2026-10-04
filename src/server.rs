@@ -1,9 +1,9 @@
 //! MCP server: tool router, HTTP client, and handlers.
 
 use crate::batch_limits::{
-    batch_add_shortfall_line, collect_dois_from_collection_body, format_member_valid_lines,
-    format_usage_report, plan_metered_batch, read_only_concurrency, BatchLookupItem,
-    DoiResponseCache, MeQuota,
+    BatchLookupItem, DoiResponseCache, MeQuota, batch_add_shortfall_line,
+    collect_dois_from_collection_body, format_member_valid_lines, format_usage_report,
+    plan_metered_batch, read_only_concurrency,
 };
 use crate::bibliographic::{format_validate_doi, format_verify_line};
 use crate::collection_entries::{
@@ -12,8 +12,8 @@ use crate::collection_entries::{
     normalize_doi_token, resolve_entry_id_in_collection,
 };
 use crate::constants::{
-    api_base_url, build_api_client, rate_limit_hint, setup_help_block,
     MIN_CONFIDENT_REVERSE_LOOKUP_SCORE, MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
+    api_base_url, build_api_client, rate_limit_hint, setup_help_block,
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail, failure_text,
@@ -21,9 +21,9 @@ use crate::http_error::{
 };
 use crate::inbound_auth::{self, apply_bearer};
 use crate::plaintext::{
-    attach_original_query, citation_units_from_parse_payload, collection_entry_metadata,
-    detect_bibliography_kind, export_kind, optional_collection_name, render_bibtex_entries,
-    split_plaintext_citations, BibliographyKind, ExportKind,
+    BibliographyKind, ExportKind, attach_original_query, citation_units_from_parse_payload,
+    collection_entry_metadata, detect_bibliography_kind, export_kind, optional_collection_name,
+    render_bibtex_entries, split_plaintext_citations,
 };
 use crate::policy::{self, block_mutate};
 use crate::resolve_helpers::{
@@ -32,15 +32,16 @@ use crate::resolve_helpers::{
     resolver_answer_agrees_with_ranking, reverse_lookup_resolve_body, send_reverse_with_one_retry,
 };
 use crate::tool_args::*;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use ookcite_mcp::endpoints::{self, Endpoint};
+use rmcp::ServerHandler;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::service::RequestContext;
-use rmcp::ServerHandler;
 use rmcp::{
+    RoleServer,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_router, RoleServer,
+    tool, tool_router,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -3051,7 +3052,7 @@ impl ServerHandler for Server {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
         let http_key = context
             .extensions
             .get::<http::request::Parts>()
@@ -3061,53 +3062,62 @@ impl ServerHandler for Server {
             Some(key) => inbound_auth::with_http_bearer(key, self.tool_router.call(tcc)).await,
             None => self.tool_router.call(tcc).await,
         };
-        called.map(|mut result| {
-            promote_upstream_failure(&mut result);
-            result
+        called.map(|response| match response {
+            CallToolResponse::Complete(mut result) => {
+                promote_upstream_failure(&mut result);
+                CallToolResponse::Complete(result)
+            }
+            other => other,
         })
     }
 
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        Ok(ListToolsResult::with_all_items(self.tool_router.list_all()))
+        let mut listed = ListToolsResult::with_all_items(self.tool_router.list_all());
+        // `2026-07-28` requires ttlMs and cacheScope on a list result. The tool
+        // list is generated with the binary, so a cached copy is already stale.
+        if context
+            .protocol_version()
+            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28)
+        {
+            listed = listed.with_ttl_ms(0).with_cache_scope(CacheScope::Public);
+        }
+        Ok(listed)
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
         self.tool_router.get(name).cloned()
     }
 
-    fn get_info(&self) -> ServerInfo {
-        let mut caps = ServerCapabilities::default();
-        caps.tools = Some(ToolsCapability { list_changed: None });
-        let mut info = ServerInfo::new(caps);
-        info.server_info.name = "ookcite-mcp".into();
-        info.server_info.version = env!("CARGO_PKG_VERSION").into();
-        // Scope, and the two things a client cannot infer from the tool list:
-        // what this server does not do, and how to choose between the tools it
-        // offers. Per-tool trigger conditions live in each tool's own
-        // description, which is what a client reads when choosing one; listing
-        // them here as well duplicated the whole tool list into every request.
-        info.instructions = Some(
-            "OokCite resolves and formats citation METADATA: it returns structured fields (title, \
-             authors, year, journal, DOI) and formatted bibliography entries. It does NOT fetch PDFs, \
-             full-text articles, or paper content, so do not reach for it to read a paper. \
-             Resolve citation metadata through these tools rather than from memory or a web search: a \
-             DOI that looks plausible is not evidence the work exists, and validate_doi is what \
-             separates the two. A DOI that exists can still be a different paper: pass year, journal, \
-             volume, and pages with the claim fields, and treat MISMATCH as a failed check. \
-             Prefer the batch tools over repeated single calls -- verify_references, batch_format, \
-             batch_add_to_collection, and import_bibliography each take a whole set in one request. \
-             format_citation and a small plaintext import_bibliography (no collection) need no API key. \
-             Collection tools need OOKCITE_API_KEY; merge_collections, batch_move_entries, \
-             generate_citation_keys, and expand_journal additionally need an academic or business plan. \
-             Tools annotated as destructive change or revoke data permanently -- confirm which \
-             collection or entry is meant before calling one."
-                .into(),
-        );
-        info
+    fn get_info(&self) -> ServerConfig {
+        // `ProtocolVersion::LATEST` is `2026-07-28`, which has no initialize
+        // handshake. Negotiation still echoes a supported older version when
+        // the client opens with one.
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "ookcite-mcp",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_instructions(
+                "OokCite resolves and formats citation METADATA: it returns structured fields (title, \
+                 authors, year, journal, DOI) and formatted bibliography entries. It does NOT fetch PDFs, \
+                 full-text articles, or paper content, so do not reach for it to read a paper. \
+                 Resolve citation metadata through these tools rather than from memory or a web search: a \
+                 DOI that looks plausible is not evidence the work exists, and validate_doi is what \
+                 separates the two. A DOI that exists can still be a different paper: pass year, journal, \
+                 volume, and pages with the claim fields, and treat MISMATCH as a failed check. \
+                 Prefer the batch tools over repeated single calls -- verify_references, batch_format, \
+                 batch_add_to_collection, and import_bibliography each take a whole set in one request. \
+                 format_citation and a small plaintext import_bibliography (no collection) need no API key. \
+                 Collection tools need OOKCITE_API_KEY; merge_collections, batch_move_entries, \
+                 generate_citation_keys, and expand_journal additionally need an academic or business plan. \
+                 Tools annotated as destructive change or revoke data permanently -- confirm which \
+                 collection or entry is meant before calling one.",
+            )
     }
 }
 
@@ -3132,9 +3142,9 @@ mod tests {
     use crate::constants::version_output;
     use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{
-        default_style, BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs,
-        OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs,
-        VerifyArgs,
+        BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs, OrcidProfileArgs,
+        OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs, VerifyArgs,
+        default_style,
     };
 
     /// Serializes OOKCITE_API_KEY mutations across parallel tokio tests.
@@ -3453,6 +3463,8 @@ mod tests {
             "destructive-tool caution must survive"
         );
         assert_eq!(info.server_info.name, "ookcite-mcp");
+        assert_eq!(info.protocol_version.as_str(), "2026-07-28");
+        assert!(info.capabilities.tools.is_some());
     }
 
     /// The instructions field rides in every request. Enumerating each tool's
@@ -6211,7 +6223,7 @@ mod tests {
     #[test]
     fn promote_marks_a_rate_limit_and_keeps_the_delay() {
         let text = "RATE LIMITED 10.2/cap : 429 Too Many Requests: Daily limit (Retry-After: 75)\nCheck remaining quota";
-        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
         promote_upstream_failure(&mut result);
         assert_eq!(result.is_error, Some(true));
         let structured = result.structured_content.as_ref().unwrap();
@@ -6225,7 +6237,7 @@ mod tests {
     #[test]
     fn promote_keeps_an_http_date_and_a_malformed_delay() {
         let date = "TIMEOUT: 504 Gateway Timeout (Retry-After: Wed, 21 Oct 2015 07:28:00 GMT)";
-        let mut dated = CallToolResult::success(vec![Content::text(date)]);
+        let mut dated = CallToolResult::success(vec![ContentBlock::text(date)]);
         promote_upstream_failure(&mut dated);
         let structured = dated.structured_content.as_ref().unwrap();
         assert_eq!(structured["kind"], "timeout");
@@ -6233,7 +6245,7 @@ mod tests {
         assert_eq!(structured["retry_after"], "Wed, 21 Oct 2015 07:28:00 GMT");
         assert_eq!(structured_keys(&dated), 4);
 
-        let mut malformed = CallToolResult::success(vec![Content::text(
+        let mut malformed = CallToolResult::success(vec![ContentBlock::text(
             "TEMPORARY ERROR: 503 Service Unavailable (Retry-After: not-a-delay)",
         )]);
         promote_upstream_failure(&mut malformed);
@@ -6246,12 +6258,12 @@ mod tests {
 
     #[test]
     fn promote_leaves_a_miss_and_records_an_absent_delay_as_null() {
-        let mut miss = CallToolResult::success(vec![Content::text("Not found")]);
+        let mut miss = CallToolResult::success(vec![ContentBlock::text("Not found")]);
         promote_upstream_failure(&mut miss);
         assert_eq!(miss.is_error, Some(false));
         assert!(miss.structured_content.is_none());
 
-        let mut absent = CallToolResult::success(vec![Content::text(
+        let mut absent = CallToolResult::success(vec![ContentBlock::text(
             "RATE LIMITED: 429 Too Many Requests: Daily limit reached",
         )]);
         promote_upstream_failure(&mut absent);
