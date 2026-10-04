@@ -207,24 +207,14 @@ connector. Choose sign-in. Submit the connector by that URL, and submit the
 marketplace does not submit either listing.
 
 A remote connector does not have to support dynamic client registration.
-A pre-registered client id is accepted: the directory can hold a confidential
-client you create, or the person connecting can enter a client id and leave
-the secret blank for a public client. Dynamic registration is used when
-discovery publishes `registration_endpoint`. A client-id metadata document
-is used only when discovery publishes
-`client_id_metadata_document_supported` set to true and includes `none` in
-`token_endpoint_auth_methods_supported`. If neither is advertised, the
-directory client does not register itself. This issuer publishes S256 PKCE,
-no registration endpoint, and only `client_secret_basic` and
-`client_secret_post`, which is a confidential client. A public client
-created in advance advertises `none` and is the pre-registered path that
-does not add a registration endpoint. It must accept the directory's hosted
+The plugin sends the pre-registered public client id `ookcite-remote`, so
+the code client does not call a registration endpoint. Discovery for that
+client publishes S256 PKCE and no `registration_endpoint`. The protected
+resource lists that client's issuer first, and its `resource` field is
+`https://ookcite-api.turtletech.us/mcp`. The client accepts the directory
 callback exactly, and loopback redirects on `localhost` and `127.0.0.1` at
-any port. The protected-resource `resource` value must be the MCP URL,
-including `/mcp`. Set `OOKCITE_MCP_RESOURCE` to that URL only on a build
-whose discovery address keeps the well-known path on the origin. The token
-audience stays `OOKCITE_MCP_OIDC_AUDIENCE`. Access tokens must satisfy
-`exp - iat` <= 3600 or the resource server rejects them.
+any port. Access tokens must satisfy `exp - iat` <= 3600 or the resource
+server rejects them.
 
 ## Remote MCP
 

@@ -16,7 +16,10 @@
   "mcpServers": {
     "ookcite": {
       "type": "http",
-      "url": "https://ookcite-api.turtletech.us/mcp"
+      "url": "https://ookcite-api.turtletech.us/mcp",
+      "oauth": {
+        "clientId": "ookcite-remote"
+      }
     }
   }
 }
