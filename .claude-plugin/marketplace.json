@@ -1,0 +1,16 @@
+{
+  "name": "ookcite",
+  "description": "OokCite citation checks, formatting, and collections.",
+  "owner": {
+    "name": "TurtleTech ehf",
+    "email": "hello@turtletech.us"
+  },
+  "plugins": [
+    {
+      "name": "ookcite",
+      "source": "./plugins/ookcite",
+      "description": "Verify DOIs, format bibliographies, and export citation collections.",
+      "version": "0.6.4"
+    }
+  ]
+}
