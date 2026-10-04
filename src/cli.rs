@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use ookcite_mcp::endpoints;
 
-use crate::constants::API;
+use crate::constants::{API, ANON_DAILY_LOOKUPS};
 
 pub async fn load_configured_auth() -> anyhow::Result<bool> {
     use ookcite_mcp::credentials::{load_credential, CredentialConfig, SystemKeyring};
@@ -23,7 +23,7 @@ pub async fn validate_auth() {
         Ok(k) if !k.is_empty() => k,
         _ => {
             eprintln!(
-                "ookcite-mcp: anonymous mode (20 lookups/day). \
+                "ookcite-mcp: anonymous mode ({ANON_DAILY_LOOKUPS} lookups/day). \
                  Set OOKCITE_API_KEY for more."
             );
             return;

@@ -9,7 +9,7 @@ use ookcite_mcp::credentials::{
 };
 use ookcite_mcp::endpoints;
 
-use crate::constants::{API, VERSION};
+use crate::constants::{API, ANON_DAILY_LOOKUPS, VERSION};
 
 fn setup_banner() -> String {
     format!("OokCite MCP v{VERSION} -- Setup\n")
@@ -426,7 +426,7 @@ pub async fn run(args: &[String]) {
             }
         }
     } else {
-        println!("No API key provided (anonymous mode: 20 lookups/day).");
+        println!("No API key provided (anonymous mode: {ANON_DAILY_LOOKUPS} lookups/day).");
         println!(
             "  Get a key at https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp"
         );

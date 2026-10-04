@@ -64,11 +64,16 @@ fn public_quota_claims_match_the_runtime_contract() {
             .collect::<Vec<_>>()
     };
 
+    let anon = declared_u32(constants, "ANON_DAILY_LOOKUPS").to_string();
+    let free = declared_u32(constants, "FREE_DAILY_LOOKUPS").to_string();
     assert_eq!(
         plan_row("Anonymous"),
-        ["Anonymous", "Free", "20", "--", "0", "--"]
+        ["Anonymous", "Free", anon.as_str(), "--", "0", "--"]
     );
-    assert_eq!(plan_row("Free"), ["Free", "Free", "60", "--", "4", "200"]);
+    assert_eq!(
+        plan_row("Free"),
+        ["Free", "Free", free.as_str(), "--", "4", "200"]
+    );
     assert_eq!(
         plan_row("Academic"),
         ["Academic", "EUR 4/mo", "20,000", "10,000", "10", "1,000"]
@@ -131,11 +136,24 @@ fn public_quota_claims_match_the_runtime_contract() {
             "{free} is not plan-gated but its description claims a plan"
         );
     }
-    assert!(readme.contains("free account (60 lookups/day)"));
-    assert!(cli.contains("anonymous mode (20 lookups/day)"));
-    assert!(setup.contains("anonymous mode: 20 lookups/day"));
-    assert!(constants.contains("IP daily limit ~20"));
-    assert!(batch_limits.contains("~20/day anonymous"));
+    let anon = declared_u32(constants, "ANON_DAILY_LOOKUPS");
+    let free = declared_u32(constants, "FREE_DAILY_LOOKUPS");
+    assert!(readme.contains(&format!("free account ({free} lookups/day)")));
+    assert!(readme.contains(&format!("{anon} lookups/day")));
+    assert_eq!(plan_row("Anonymous")[2], anon.to_string());
+    assert_eq!(plan_row("Free")[2], free.to_string());
+    assert!(cli.contains("{ANON_DAILY_LOOKUPS} lookups/day"));
+    assert!(setup.contains("{ANON_DAILY_LOOKUPS} lookups/day"));
+    assert!(constants.contains(&format!("pub const ANON_DAILY_LOOKUPS: u32 = {anon};")));
+    assert!(constants.contains(&format!("pub const FREE_DAILY_LOOKUPS: u32 = {free};")));
+    assert!(constants.contains("{ANON_DAILY_LOOKUPS} lookups/day"));
+    assert!(constants.contains("{FREE_DAILY_LOOKUPS}/day"));
+    assert!(batch_limits.contains("{FREE_DAILY_LOOKUPS}/day"));
+    assert!(batch_limits.contains("~{ANON_DAILY_LOOKUPS}/day anonymous"));
+    assert!(!cli.contains("20 lookups/day"));
+    assert!(!setup.contains("20 lookups/day"));
+    assert!(!constants.contains("20 lookups/day"));
+    assert!(!batch_limits.contains("60/day"));
 
     for required in [
         "setup --connect",
@@ -158,6 +176,18 @@ fn public_quota_claims_match_the_runtime_contract() {
 
 /// Pull one tool's `description = "..."` out of a whitespace-flattened
 /// `server.rs`, so the plan-gate assertions read the same text a client does.
+fn declared_u32(src: &str, name: &str) -> u32 {
+    let marker = format!("pub const {name}: u32 = ");
+    let rest = src
+        .split(&marker)
+        .nth(1)
+        .unwrap_or_else(|| panic!("{name} is not declared"));
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("{name} is not an integer"))
+}
+
 fn tool_description(flat: &str, tool: &str) -> Option<String> {
     let anchor = format!("name = \"{tool}\", description = \"");
     let start = flat.find(&anchor)? + anchor.len();
