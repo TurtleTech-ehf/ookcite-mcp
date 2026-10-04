@@ -12,5 +12,11 @@
   "repository": "https://github.com/TurtleTech-ehf/ookcite-mcp",
   "license": "MIT",
   "keywords": ["citations", "doi", "bibtex", "bibliography"],
-  "documentationUrl": "https://ookcite.turtletech.us"
+  "documentationUrl": "https://ookcite.turtletech.us",
+  "mcpServers": {
+    "ookcite": {
+      "type": "http",
+      "url": "https://ookcite-api.turtletech.us/mcp"
+    }
+  }
 }
