@@ -1,9 +1,9 @@
 //! MCP server: tool router, HTTP client, and handlers.
 
 use crate::batch_limits::{
-    BatchLookupItem, DoiResponseCache, MeQuota, batch_add_shortfall_line,
-    collect_dois_from_collection_body, format_member_valid_lines, format_usage_report,
-    plan_metered_batch, read_only_concurrency,
+    batch_add_shortfall_line, collect_dois_from_collection_body, format_member_valid_lines,
+    format_usage_report, plan_metered_batch, read_only_concurrency, BatchLookupItem,
+    DoiResponseCache, MeQuota,
 };
 use crate::bibliographic::{format_validate_doi, format_verify_line};
 use crate::collection_entries::{
@@ -12,8 +12,8 @@ use crate::collection_entries::{
     normalize_doi_token, resolve_entry_id_in_collection,
 };
 use crate::constants::{
-    MIN_CONFIDENT_REVERSE_LOOKUP_SCORE, MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
     api_base_url, build_api_client, rate_limit_hint, setup_help_block,
+    MIN_CONFIDENT_REVERSE_LOOKUP_SCORE, MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail, failure_text,
@@ -21,9 +21,9 @@ use crate::http_error::{
 };
 use crate::inbound_auth::{self, apply_bearer};
 use crate::plaintext::{
-    BibliographyKind, ExportKind, attach_original_query, citation_units_from_parse_payload,
-    collection_entry_metadata, detect_bibliography_kind, export_kind, optional_collection_name,
-    render_bibtex_entries, split_plaintext_citations,
+    attach_original_query, citation_units_from_parse_payload, collection_entry_metadata,
+    detect_bibliography_kind, export_kind, optional_collection_name, render_bibtex_entries,
+    split_plaintext_citations, BibliographyKind, ExportKind,
 };
 use crate::policy::{self, block_mutate};
 use crate::resolve_helpers::{
@@ -32,16 +32,15 @@ use crate::resolve_helpers::{
     resolver_answer_agrees_with_ranking, reverse_lookup_resolve_body, send_reverse_with_one_retry,
 };
 use crate::tool_args::*;
-use futures::{StreamExt, stream};
+use futures::{stream, StreamExt};
 use ookcite_mcp::endpoints::{self, Endpoint};
-use rmcp::ServerHandler;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::service::RequestContext;
+use rmcp::ServerHandler;
 use rmcp::{
-    RoleServer,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_router,
+    tool, tool_router, RoleServer,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -3133,9 +3132,9 @@ mod tests {
     use crate::constants::version_output;
     use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{
-        BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs, OrcidProfileArgs,
-        OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs, VerifyArgs,
-        default_style,
+        default_style, BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs,
+        OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs,
+        VerifyArgs,
     };
 
     /// Serializes OOKCITE_API_KEY mutations across parallel tokio tests.

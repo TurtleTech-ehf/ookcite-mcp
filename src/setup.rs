@@ -1,7 +1,7 @@
 use ookcite_mcp::connect::{
-    ConnectMode, DashboardClient, LoopbackListener, StartBrowserRequest, StartDeviceRequest,
-    SystemBrowser, finalize_installation, generate_pkce, open_browser_or_device,
-    poll_device_until_authorized, random_journey_id, random_token,
+    finalize_installation, generate_pkce, open_browser_or_device, poll_device_until_authorized,
+    random_journey_id, random_token, ConnectMode, DashboardClient, LoopbackListener,
+    StartBrowserRequest, StartDeviceRequest, SystemBrowser,
 };
 use ookcite_mcp::credentials::{
     CredentialReference, CredentialSink, PlatformCredentialSink, ProtectedFileSink,
