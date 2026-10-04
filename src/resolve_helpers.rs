@@ -1,6 +1,6 @@
 //! Reverse-lookup and free-text resolve helpers.
 
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 use crate::constants::rate_limit_hint;
 use crate::http_error::error_detail;
@@ -396,20 +396,21 @@ pub async fn send_reverse_with_one_retry(
         .await
 }
 
-/// Attempts an idempotent read gets before its 502/503/504 is reported.
+/// Attempts a repeatable request gets before its 502/503/504 is reported.
 const IDEMPOTENT_READ_ATTEMPTS: u8 = 3;
 /// Longest wait between two attempts, whatever `Retry-After` asks for.
 const IDEMPOTENT_RETRY_CAP: Duration = Duration::from_secs(5);
 
-/// Delay before the next attempt of an idempotent read.
+/// Delay before the next attempt of a repeatable request.
 pub fn idempotent_retry_delay(retry_after: Option<&reqwest::header::HeaderValue>) -> Duration {
     reverse_retry_delay(retry_after).min(IDEMPOTENT_RETRY_CAP)
 }
 
-/// Send an idempotent read, again after a gateway or unavailable status.
+/// Send a request that is safe to repeat, again after 502/503/504.
 ///
 /// A restart of the API answers every route with 503 for about a minute and
 /// a half, so one refusal says nothing about the store behind the route.
+/// Callers pass a read, or a write the server itself treats as a duplicate.
 pub async fn send_idempotent_with_retry<F>(make: F) -> Result<reqwest::Response, reqwest::Error>
 where
     F: Fn() -> reqwest::RequestBuilder,
@@ -428,27 +429,20 @@ where
     }
 }
 
+/// POST `/lookup/doi` with the same three attempts and `Retry-After` cap
+/// as [`send_idempotent_with_retry`].
 pub async fn lookup_doi_with_retry(
     http: &reqwest::Client,
     api_base: &str,
     doi: &str,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    let mut attempt = 0u8;
-    loop {
-        let response = crate::inbound_auth::apply_bearer(
+    send_idempotent_with_retry(|| {
+        crate::inbound_auth::apply_bearer(
             http.post(endpoints::LOOKUP_DOI.url(api_base, &[]))
                 .json(&serde_json::json!({ "doi": doi })),
         )
-        .send()
-        .await?;
-        let status = response.status();
-        if attempt < 2 && is_retryable_lookup_status(status) {
-            attempt += 1;
-            sleep(Duration::from_millis(150 * u64::from(attempt))).await;
-            continue;
-        }
-        return Ok(response);
-    }
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -536,9 +530,10 @@ mod tests {
         }]);
         let out = format_reverse_lookup_payload(&payload).expect("formatted");
         assert!(out.output.contains("[confidence:95]"));
-        assert!(out
-            .output
-            .contains("title: Stimulated Optical Radiation in Ruby"));
+        assert!(
+            out.output
+                .contains("title: Stimulated Optical Radiation in Ruby")
+        );
         assert!(!out.output.contains("[score:"));
     }
 

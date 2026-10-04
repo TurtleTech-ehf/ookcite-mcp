@@ -1,9 +1,9 @@
 //! MCP server: tool router, HTTP client, and handlers.
 
 use crate::batch_limits::{
-    batch_add_shortfall_line, collect_dois_from_collection_body, format_member_valid_lines,
-    format_usage_report, plan_metered_batch, read_only_concurrency, BatchLookupItem,
-    DoiResponseCache, MeQuota,
+    BatchLookupItem, DoiResponseCache, MeQuota, batch_add_shortfall_line,
+    collect_dois_from_collection_body, format_member_valid_lines, format_usage_report,
+    plan_metered_batch, read_only_concurrency,
 };
 use crate::bibliographic::{format_validate_doi, format_verify_line};
 use crate::collection_entries::{
@@ -12,17 +12,17 @@ use crate::collection_entries::{
     normalize_doi_token, resolve_entry_id_in_collection,
 };
 use crate::constants::{
-    api_base_url, build_api_client, rate_limit_hint, setup_help_block,
     MIN_CONFIDENT_REVERSE_LOOKUP_SCORE, MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
+    api_base_url, build_api_client, rate_limit_hint, setup_help_block,
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail,
 };
 use crate::inbound_auth::{self, apply_bearer};
 use crate::plaintext::{
-    attach_original_query, citation_units_from_parse_payload, collection_entry_metadata,
-    detect_bibliography_kind, export_kind, optional_collection_name, render_bibtex_entries,
-    split_plaintext_citations, BibliographyKind, ExportKind,
+    BibliographyKind, ExportKind, attach_original_query, citation_units_from_parse_payload,
+    collection_entry_metadata, detect_bibliography_kind, export_kind, optional_collection_name,
+    render_bibtex_entries, split_plaintext_citations,
 };
 use crate::policy::{self, block_mutate};
 use crate::resolve_helpers::{
@@ -31,15 +31,16 @@ use crate::resolve_helpers::{
     resolver_answer_agrees_with_ranking, reverse_lookup_resolve_body, send_reverse_with_one_retry,
 };
 use crate::tool_args::*;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use ookcite_mcp::endpoints::{self, Endpoint};
+use rmcp::ServerHandler;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::service::RequestContext;
-use rmcp::ServerHandler;
 use rmcp::{
+    RoleServer,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_router, RoleServer,
+    tool, tool_router,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -1325,11 +1326,10 @@ impl Server {
     ) -> Option<serde_json::Value> {
         let q = query.trim();
         if q.starts_with("10.") {
-            let r = self
-                .request(endpoints::LOOKUP_DOI, &[])
-                .json(&serde_json::json!({"doi": q}))
-                .send()
-                .await;
+            // A DOI lookup only reads. The same three-attempt schedule as a
+            // collection list keeps a restart from dropping the citation
+            // before a batch add is posted.
+            let r = lookup_doi_with_retry(&self.http, &self.api_base, q).await;
             match r {
                 Ok(r) if r.status().is_success() => {
                     Some(r.json::<serde_json::Value>().await.unwrap_or_default())
@@ -1337,11 +1337,11 @@ impl Server {
                 _ => None,
             }
         } else {
-            let resolve = self
-                .request(endpoints::RESOLVE, &[])
-                .json(&resolve_text_body(q, use_live_queries))
-                .send()
-                .await;
+            let resolve = crate::resolve_helpers::send_idempotent_with_retry(|| {
+                self.request(endpoints::RESOLVE, &[])
+                    .json(&resolve_text_body(q, use_live_queries))
+            })
+            .await;
             let resolved = match resolve {
                 Ok(r) if r.status().is_success() => {
                     let payload: serde_json::Value = r.json().await.unwrap_or_default();
@@ -1355,15 +1355,16 @@ impl Server {
             // says. Gating it behind that flag made the default path skip
             // the one ranker that had the paper, and citations came back
             // "Not found" for papers the corpus ranks well.
-            let ranked: Vec<serde_json::Value> = match self
-                .request(endpoints::REVERSE, &[])
-                .json(&serde_json::json!({"text": q}))
-                .send()
+            let ranked: Vec<serde_json::Value> =
+                match crate::resolve_helpers::send_idempotent_with_retry(|| {
+                    self.request(endpoints::REVERSE, &[])
+                        .json(&serde_json::json!({ "text": q }))
+                })
                 .await
-            {
-                Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-                _ => Vec::new(),
-            };
+                {
+                    Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+                    _ => Vec::new(),
+                };
 
             if let Some(metadata) = resolved {
                 if resolver_answer_agrees_with_ranking(&metadata, &ranked) {
@@ -1777,11 +1778,15 @@ impl Server {
             return format!("No citations resolved.\n{}", errors.join("\n"));
         }
 
-        let r = self
-            .request(endpoints::COLLECTION_ENTRIES_BATCH, &[("id", &col_id)])
-            .json(&serde_json::json!({"entries": entries}))
-            .send()
-            .await;
+        // Safe to repeat. The collection store skips an item whose DOI,
+        // ISBN, or title-author-year identity is already stored, and each
+        // save replaces the whole collection object, so a second POST of
+        // this body does not insert that reference again.
+        let r = crate::resolve_helpers::send_idempotent_with_retry(|| {
+            self.request(endpoints::COLLECTION_ENTRIES_BATCH, &[("id", &col_id)])
+                .json(&serde_json::json!({ "entries": &entries }))
+        })
+        .await;
         match r {
             Ok(r) if r.status().is_success() => {
                 let data: serde_json::Value = r.json().await.unwrap_or_default();
@@ -3008,9 +3013,9 @@ mod tests {
     use crate::constants::version_output;
     use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{
-        default_style, BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs,
-        OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs,
-        VerifyArgs,
+        BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs, OrcidProfileArgs,
+        OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs, VerifyArgs,
+        default_style,
     };
 
     /// Serializes OOKCITE_API_KEY mutations across parallel tokio tests.
@@ -3731,6 +3736,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/v1/lookup/doi"))
             .respond_with(ResponseTemplate::new(422).set_body_string("malformed doi payload"))
+            .expect(1)
             .mount(&mock)
             .await;
 
@@ -3751,9 +3757,13 @@ mod tests {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/lookup/doi"))
-            .respond_with(ResponseTemplate::new(503).set_body_string(
-                "Lookup service temporarily unavailable. Please try again shortly.",
-            ))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("retry-after", "0")
+                    .set_body_string(
+                        "Lookup service temporarily unavailable. Please try again shortly.",
+                    ),
+            )
             .mount(&mock)
             .await;
 
@@ -4251,6 +4261,259 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verify_references_outlasts_a_restart_window() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(503).insert_header("retry-after", "0"))
+            .up_to_n_times(2)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/restart-window",
+                "title": "Recovered After Restart"
+            })))
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec!["10.1038/restart-window".into()],
+                ..Default::default()
+            }))
+            .await;
+        assert!(
+            result.contains("VALID 10.1038/restart-window : Recovered After Restart"),
+            "{result}"
+        );
+        assert!(!result.contains("TEMPORARY ERROR"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn verify_references_reports_a_503_after_three_attempts() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("retry-after", "0")
+                    .set_body_string("Lookup service temporarily unavailable."),
+            )
+            .expect(3)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec!["10.1038/still-down".into()],
+                ..Default::default()
+            }))
+            .await;
+        assert!(
+            result.contains("TEMPORARY ERROR 10.1038/still-down"),
+            "{result}"
+        );
+        assert!(
+            result.contains("Lookup service temporarily unavailable."),
+            "{result}"
+        );
+        assert!(!result.contains("VALID"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn batch_add_to_collection_outlasts_a_restart_window() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-restart", "name": "femtolab", "entry_count": 30}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/restart-batch",
+                "title": "Stored Once"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/col-restart/entries/batch"))
+            .respond_with(ResponseTemplate::new(503).insert_header("retry-after", "0"))
+            .up_to_n_times(2)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/col-restart/entries/batch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "added": 1,
+                "duplicates_skipped": 0
+            })))
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .batch_add_to_collection(Parameters(BatchAddArgs {
+                collection: "femtolab".into(),
+                queries: vec!["10.1038/restart-batch".into()],
+                use_live_queries: false,
+            }))
+            .await;
+        assert!(result.contains("Added 1 to 'femtolab'"), "{result}");
+        assert!(!result.contains("Batch add failed"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn batch_add_to_collection_reports_a_503_after_three_attempts() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-restart", "name": "femtolab", "entry_count": 30}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/still-down",
+                "title": "Not Stored"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/col-restart/entries/batch"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("retry-after", "0")
+                    .set_body_string("upstream restarting"),
+            )
+            .expect(3)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .batch_add_to_collection(Parameters(BatchAddArgs {
+                collection: "femtolab".into(),
+                queries: vec!["10.1038/still-down".into()],
+                use_live_queries: false,
+            }))
+            .await;
+        assert!(result.contains("Batch add failed"), "{result}");
+        assert!(result.contains("upstream restarting"), "{result}");
+        assert!(!result.contains("Added 1"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn batch_add_to_collection_retries_a_transient_doi_lookup() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-restart", "name": "femtolab", "entry_count": 30}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(503).insert_header("retry-after", "0"))
+            .up_to_n_times(2)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/lookup-restart",
+                "title": "Looked Up After Restart"
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/col-restart/entries/batch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "added": 1,
+                "duplicates_skipped": 0
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .batch_add_to_collection(Parameters(BatchAddArgs {
+                collection: "femtolab".into(),
+                queries: vec!["10.1038/lookup-restart".into()],
+                use_live_queries: false,
+            }))
+            .await;
+        assert!(result.contains("Added 1 to 'femtolab'"), "{result}");
+        assert!(!result.contains("Could not resolve"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn batch_add_to_collection_retries_a_transient_resolve() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-restart", "name": "femtolab", "entry_count": 30}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(503).insert_header("retry-after", "0"))
+            .up_to_n_times(2)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "paper": {
+                    "title": "Shifting Balance in Evolution",
+                    "doi": "10.1093/genetics/16.2.97"
+                }
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/col-restart/entries/batch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "added": 1,
+                "duplicates_skipped": 0
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .batch_add_to_collection(Parameters(BatchAddArgs {
+                collection: "femtolab".into(),
+                queries: vec!["Wright 1931 genetics shifting balance".into()],
+                use_live_queries: false,
+            }))
+            .await;
+        assert!(result.contains("Added 1 to 'femtolab'"), "{result}");
+        assert!(!result.contains("Could not resolve"), "{result}");
+    }
+
+    #[tokio::test]
     async fn test_resolve_collection_id_found() {
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
@@ -4668,6 +4931,7 @@ mod tests {
             .and(body_string_contains("10.1038/retry"))
             .respond_with(
                 ResponseTemplate::new(503)
+                    .insert_header("retry-after", "0")
                     .set_body_string("Lookup service temporarily unavailable."),
             )
             .up_to_n_times(1)
@@ -4704,6 +4968,7 @@ mod tests {
                 ResponseTemplate::new(429)
                     .set_body_string("Daily limit reached (60/day). Resets in 5h."),
             )
+            .expect(1)
             .mount(&mock)
             .await;
 
@@ -4774,6 +5039,7 @@ mod tests {
             .and(body_string_contains("10.1038/slow"))
             .respond_with(
                 ResponseTemplate::new(503)
+                    .insert_header("retry-after", "0")
                     .set_body_string("Lookup service temporarily unavailable."),
             )
             .mount(&mock)
