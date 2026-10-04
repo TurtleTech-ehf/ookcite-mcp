@@ -2,6 +2,11 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.6.5 - 2026-10-04
+#### Features
+- (**mcp**) speak protocol revision 2026-07-28 - (c4a0cc0) - Rohit Goswami
+
+- - -
 ## v0.6.4 - 2026-10-04
 #### Bugfixes
 - (**mcp**) report a 429 with Retry-After instead of a miss - (04248ea) - Rohit Goswami
