@@ -1,7 +1,7 @@
 use ookcite_mcp::connect::{
-    finalize_installation, generate_pkce, open_browser_or_device, poll_device_until_authorized,
-    random_journey_id, random_token, ConnectMode, DashboardClient, LoopbackListener,
-    StartBrowserRequest, StartDeviceRequest, SystemBrowser,
+    ConnectMode, DashboardClient, LoopbackListener, StartBrowserRequest, StartDeviceRequest,
+    SystemBrowser, finalize_installation, generate_pkce, open_browser_or_device,
+    poll_device_until_authorized, random_journey_id, random_token,
 };
 use ookcite_mcp::credentials::{
     CredentialReference, CredentialSink, PlatformCredentialSink, ProtectedFileSink,
@@ -63,11 +63,15 @@ fn print_manual_config(api_key: Option<&str>) {
     println!("\n--- Manual MCP configuration ---");
     println!("  Locate the MCP configuration in your client's documentation.");
     println!("  Merge this entry under mcpServers:");
-    println!("  {{\n    \"mcpServers\": {{\n      \"ookcite\": {{\n        \"command\": \"npx\",\n        \"args\": [\"-y\", \"@turtletech/ookcite-mcp\"],\n        \"env\": {{\n{key_line}\n        }}\n      }}\n    }}\n  }}");
+    println!(
+        "  {{\n    \"mcpServers\": {{\n      \"ookcite\": {{\n        \"command\": \"npx\",\n        \"args\": [\"-y\", \"@turtletech/ookcite-mcp\"],\n        \"env\": {{\n{key_line}\n        }}\n      }}\n    }}\n  }}"
+    );
 
     println!("\nEnv knobs (all clients):");
     println!("  OOKCITE_API_KEY          optional; collections + higher rate limits");
-    println!("  OOKCITE_API              optional; override API base (default ookcite-api.turtletech.us)");
+    println!(
+        "  OOKCITE_API              optional; override API base (default ookcite-api.turtletech.us)"
+    );
     println!(
         "  OOKCITE_STARTUP_PROBES=1 optional; extra auth/update checks on stderr at MCP launch"
     );
@@ -351,7 +355,35 @@ async fn run_connect(options: ConnectOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn requests_help(args: &[String]) -> bool {
+    args.iter()
+        .any(|argument| argument == "--help" || argument == "-h")
+}
+
+fn setup_usage() -> String {
+    "\
+Usage: ookcite-mcp setup [options]
+
+  --key KEY                 Configure detected clients with this API key
+  --connect                 Sign in and store a credential reference
+  --device                  Use a device code instead of a browser callback
+  --store-command CMD       Save the credential with this command
+  --retrieve-command CMD    Read the credential with this command
+  --credential-file PATH    Save the credential in this file
+  --replace-credential      Replace a credential that is already stored
+  --replace-config          Replace an OokCite client entry that already exists
+  -h, --help                Show this help and exit
+"
+    .to_string()
+}
+
 pub async fn run(args: &[String]) {
+    // Help has to win before key checks and add-mcp. Those write client
+    // configuration, and a request for usage is not a request to do that.
+    if requests_help(args) {
+        println!("{}", setup_usage());
+        return;
+    }
     println!("{}", setup_banner());
 
     match parse_connect_options(args) {
@@ -423,6 +455,33 @@ pub async fn run(args: &[String]) {
 mod tests {
     use super::*;
     use ookcite_mcp::credentials::CredentialReference;
+
+    #[tokio::test]
+    async fn setup_help_returns_without_writing_client_config() {
+        assert!(requests_help(&[
+            "ookcite-mcp".into(),
+            "setup".into(),
+            "--help".into()
+        ]));
+        assert!(requests_help(&["-h".into()]));
+        assert!(!requests_help(&[
+            "ookcite-mcp".into(),
+            "setup".into(),
+            "--key".into(),
+            "ookc_example".into()
+        ]));
+        assert!(!requests_help(&[
+            "ookcite-mcp".into(),
+            "setup".into(),
+            "--connect".into()
+        ]));
+        let usage = setup_usage();
+        assert!(usage.contains("--key"));
+        assert!(usage.contains("--connect"));
+        assert!(usage.contains("--help"));
+        // `run` returns on this path before add-mcp and before any dashboard call.
+        run(&["ookcite-mcp".into(), "setup".into(), "--help".into()]).await;
+    }
 
     #[test]
     fn setup_banner_includes_current_version() {
