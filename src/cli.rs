@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use ookcite_mcp::endpoints;
 
-use crate::constants::{API, ANON_DAILY_LOOKUPS};
+use crate::constants::{ANON_DAILY_LOOKUPS, API};
 
 pub async fn load_configured_auth() -> anyhow::Result<bool> {
     use ookcite_mcp::credentials::{load_credential, CredentialConfig, SystemKeyring};

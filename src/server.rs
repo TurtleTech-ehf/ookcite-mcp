@@ -3793,13 +3793,10 @@ mod tests {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/lookup/doi"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .set_body_string(format!(
-                        "Daily limit reached ({}/day). Resets in 3h 45m.",
-                        crate::constants::FREE_DAILY_LOOKUPS
-                    )),
-            )
+            .respond_with(ResponseTemplate::new(429).set_body_string(format!(
+                "Daily limit reached ({}/day). Resets in 3h 45m.",
+                crate::constants::FREE_DAILY_LOOKUPS
+            )))
             .mount(&mock)
             .await;
 
@@ -5097,13 +5094,10 @@ mod tests {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/lookup/doi"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .set_body_string(format!(
-                        "Daily limit reached ({}/day). Resets in 5h.",
-                        crate::constants::FREE_DAILY_LOOKUPS
-                    )),
-            )
+            .respond_with(ResponseTemplate::new(429).set_body_string(format!(
+                "Daily limit reached ({}/day). Resets in 5h.",
+                crate::constants::FREE_DAILY_LOOKUPS
+            )))
             .expect(1)
             .mount(&mock)
             .await;
@@ -5686,13 +5680,10 @@ mod tests {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/lookup/doi"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .set_body_string(format!(
-                        "Daily limit reached ({}/day). Resets in 5h.",
-                        crate::constants::FREE_DAILY_LOOKUPS
-                    )),
-            )
+            .respond_with(ResponseTemplate::new(429).set_body_string(format!(
+                "Daily limit reached ({}/day). Resets in 5h.",
+                crate::constants::FREE_DAILY_LOOKUPS
+            )))
             .mount(&mock)
             .await;
 

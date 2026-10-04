@@ -9,7 +9,7 @@ use ookcite_mcp::credentials::{
 };
 use ookcite_mcp::endpoints;
 
-use crate::constants::{API, ANON_DAILY_LOOKUPS, VERSION};
+use crate::constants::{ANON_DAILY_LOOKUPS, API, VERSION};
 
 fn setup_banner() -> String {
     format!("OokCite MCP v{VERSION} -- Setup\n")
