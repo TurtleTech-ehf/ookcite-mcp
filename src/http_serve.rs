@@ -9,15 +9,15 @@
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::{Request, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio_util::sync::CancellationToken;
 
-use crate::inbound_auth::{inbound_api_key, Gate, GateDeny, HttpAuthMode};
+use crate::inbound_auth::{Gate, GateDeny, HttpAuthMode, inbound_api_key};
 use crate::oidc_resource::{OidcPolicy, OidcVerifier};
 use crate::server::Server;
 
@@ -259,6 +259,7 @@ mod tests {
             policy: OidcPolicy {
                 issuer: "https://id.example".into(),
                 audience: "https://api.example".into(),
+                extra: Vec::new(),
                 scope: "openid".into(),
                 resource: "https://api.example".into(),
             },
@@ -291,10 +292,12 @@ mod tests {
         let (url, cancel) = spawn(HttpAuthMode::Bearer).await;
         let response = client().post(&url).body(INIT_BODY).send().await.unwrap();
         assert_eq!(response.status(), 401);
-        assert!(response
-            .headers()
-            .get(reqwest::header::WWW_AUTHENTICATE)
-            .is_some());
+        assert!(
+            response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .is_some()
+        );
         cancel.cancel();
     }
 
