@@ -1,6 +1,6 @@
 //! Reverse-lookup and free-text resolve helpers.
 
-use tokio::time::{Duration, sleep};
+use tokio::time::{sleep, Duration};
 
 use crate::constants::rate_limit_hint;
 use crate::http_error::error_detail;
@@ -530,10 +530,9 @@ mod tests {
         }]);
         let out = format_reverse_lookup_payload(&payload).expect("formatted");
         assert!(out.output.contains("[confidence:95]"));
-        assert!(
-            out.output
-                .contains("title: Stimulated Optical Radiation in Ruby")
-        );
+        assert!(out
+            .output
+            .contains("title: Stimulated Optical Radiation in Ruby"));
         assert!(!out.output.contains("[score:"));
     }
 
