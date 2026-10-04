@@ -1,6 +1,6 @@
 [package]
 name = "ookcite-mcp"
-version = "0.6.4"
+version = "0.6.5"
 edition = "2021"
 license = "MIT"
 description = "MCP server for OokCite citation validation and formatting"
@@ -11,7 +11,7 @@ keywords = ["mcp", "citations", "doi", "bibtex", "academic"]
 categories = ["command-line-utilities", "science"]
 
 [dependencies]
-rmcp = { version = "1.2", features = ["server", "transport-io", "macros", "transport-streamable-http-server"] }
+rmcp = { version = "3.5", features = ["server", "transport-io", "macros", "transport-streamable-http-server"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 http = "1"
 tokio-util = "0.7"

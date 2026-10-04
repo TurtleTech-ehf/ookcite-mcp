@@ -1,20 +1,23 @@
-//! Stateless Streamable HTTP (MCP 2025-11-25) for remote clients.
+//! Stateless Streamable HTTP for remote clients.
 //!
-//! One POST per call, JSON in and JSON out, no session. The legacy HTTP+SSE
-//! transport is not served. The hosted endpoint requires a short-lived
-//! sign-in token. An API key is only for a copy you run yourself.
+//! The current protocol revision is `2026-07-28`. That revision carries the
+//! version on each request and has no initialize handshake. A client that
+//! still opens with initialize is answered by the SDK, from `2024-11-05`
+//! through `2025-11-25`. One POST per call, JSON in and JSON out, no session.
+//! The legacy HTTP+SSE transport is not served. The hosted endpoint requires
+//! a short-lived sign-in token. An API key is only for a copy you run yourself.
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::{Request, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio_util::sync::CancellationToken;
 
-use crate::inbound_auth::{inbound_api_key, Gate, GateDeny, HttpAuthMode};
+use crate::inbound_auth::{Gate, GateDeny, HttpAuthMode, inbound_api_key};
 use crate::oidc_resource::{OidcPolicy, OidcVerifier};
 use crate::server::Server;
 
@@ -36,7 +39,7 @@ struct App {
 impl App {
     fn new(gate: Gate, cancel: CancellationToken, oauth: Option<OauthState>) -> Self {
         let config = StreamableHttpServerConfig::default()
-            .with_stateful_mode(false)
+            .with_legacy_session_mode(false)
             .with_json_response(true)
             .with_sse_keep_alive(None)
             .with_cancellation_token(cancel);
@@ -288,10 +291,12 @@ mod tests {
         let (url, cancel) = spawn(HttpAuthMode::Bearer).await;
         let response = client().post(&url).body(INIT_BODY).send().await.unwrap();
         assert_eq!(response.status(), 401);
-        assert!(response
-            .headers()
-            .get(reqwest::header::WWW_AUTHENTICATE)
-            .is_some());
+        assert!(
+            response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .is_some()
+        );
         cancel.cancel();
     }
 
@@ -322,6 +327,11 @@ mod tests {
             "content-type {content_type}, body {body}"
         );
         assert!(body.contains("\"result\""), "{body}");
+        assert!(
+            body.contains("\"protocolVersion\":\"2025-03-26\"")
+                || body.contains("\"protocolVersion\": \"2025-03-26\""),
+            "a legacy initialize is echoed, not replaced: {body}"
+        );
         cancel.cancel();
     }
 
