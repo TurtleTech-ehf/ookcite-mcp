@@ -1,7 +1,7 @@
 {
   "name": "ookcite",
   "displayName": "OokCite",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Verify DOIs and ISBNs, format bibliographies in CSL styles, and keep a citation collection. Returns citation metadata only, not PDFs or full text.",
   "author": {
     "name": "TurtleTech ehf",

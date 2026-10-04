@@ -1,6 +1,6 @@
 {
   "name": "ookcite",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Citation metadata validation and formatting via the OokCite API. Validate DOIs, format bibliographies in 2900+ CSL styles, manage collections, and catch hallucinated references. Returns metadata only — not PDFs or full-text.",
   "author": {
     "name": "TurtleTech ehf",

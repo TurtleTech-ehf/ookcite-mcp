@@ -10,7 +10,7 @@
       "name": "ookcite",
       "source": "./plugins/ookcite",
       "description": "Verify DOIs, format bibliographies, and export citation collections.",
-      "version": "0.6.4"
+      "version": "0.6.5"
     }
   ]
 }
