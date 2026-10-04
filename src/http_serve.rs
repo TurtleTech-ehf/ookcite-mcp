@@ -38,10 +38,15 @@ struct App {
 
 impl App {
     fn new(gate: Gate, cancel: CancellationToken, oauth: Option<OauthState>) -> Self {
+        // The SDK's default host list is loopback only. The gate already
+        // decided which public names are this server, and the tool call
+        // has to use that same list or a listed name stops at the
+        // streamable layer.
         let config = StreamableHttpServerConfig::default()
             .with_legacy_session_mode(false)
             .with_json_response(true)
             .with_sse_keep_alive(None)
+            .with_allowed_hosts(gate.hosts.clone())
             .with_cancellation_token(cancel);
         let service: McpService = StreamableHttpService::new(
             || Ok(Server::new()),
@@ -334,6 +339,71 @@ mod tests {
             "a legacy initialize is echoed, not replaced: {body}"
         );
         cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_listed_public_host_reaches_initialize() {
+        let mut hosts = Gate::loopback_hosts();
+        hosts.push("ookcite-api.example".into());
+        let (addr, cancel) = spawn_gate(Gate {
+            auth: HttpAuthMode::Bearer,
+            origins: Vec::new(),
+            hosts,
+            path: "/mcp".into(),
+        })
+        .await;
+        let listed = raw_post(addr, "ookcite-api.example", INIT_BODY).await;
+        assert!(
+            listed.starts_with("HTTP/1.1 200"),
+            "public host was refused: {listed}"
+        );
+        assert!(
+            listed.contains("protocolVersion") || listed.contains("\"result\""),
+            "{listed}"
+        );
+        let other = raw_post(addr, "evil.example", INIT_BODY).await;
+        assert!(
+            other.starts_with("HTTP/1.1 403"),
+            "unlisted host was accepted: {other}"
+        );
+        assert!(
+            other.contains("Host is not in OOKCITE_MCP_ALLOWED_HOSTS"),
+            "{other}"
+        );
+        cancel.cancel();
+    }
+
+    async fn spawn_gate(gate: Gate) -> (std::net::SocketAddr, CancellationToken) {
+        let cancel = CancellationToken::new();
+        let app = App::new(gate, cancel.clone(), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = cancel.clone();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app.router())
+                .with_graceful_shutdown(async move { shutdown.cancelled().await })
+                .await;
+        });
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        (addr, cancel)
+    }
+
+    async fn raw_post(addr: std::net::SocketAddr, host: &str, body: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {host}\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream\r\nmcp-protocol-version: 2025-03-26\r\nauthorization: Bearer ookc_test\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        String::from_utf8_lossy(&buf).into_owned()
     }
 
     #[tokio::test]
