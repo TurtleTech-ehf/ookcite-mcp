@@ -2,6 +2,11 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.6.3 - 2026-10-04
+#### Bugfixes
+- (**mcp**) retry reference checks and batch collection adds through a 503 - (f5db978) - Rohit Goswami
+
+- - -
 ## v0.6.2 - 2026-09-11
 #### Features
 - (**auth**) load referenced credentials at startup - (ef1f8a1) - Rohit Goswami
