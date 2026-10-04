@@ -1,21 +1,32 @@
 //! OAuth resource server for the remote MCP endpoint.
 //!
 //! Callers sign in and send a short-lived access token. This module checks
-//! that token against the configured issuer's published keys. It does not
+//! that token against each configured issuer's published keys. It does not
 //! accept an API key, and it does not embed an issuer address.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use jsonwebtoken::jwk::JwkSet;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 
 const JWKS_TTL: Duration = Duration::from_secs(600);
+
+/// One extra authorization server, paired with the audience that server writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedClient {
+    pub issuer: String,
+    pub audience: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OidcPolicy {
     pub issuer: String,
     pub audience: String,
+    /// Further clients whose tokens are accepted and advertised.
+    pub extra: Vec<TrustedClient>,
     pub scope: String,
     pub resource: String,
 }
@@ -40,15 +51,49 @@ impl OidcPolicy {
         Ok(Self {
             issuer,
             audience,
+            extra: extra_clients()?,
             scope,
             resource,
         })
     }
 
+    pub fn authorization_servers(&self) -> Vec<String> {
+        let mut servers = Vec::new();
+        for client in &self.extra {
+            push_unique(&mut servers, &client.issuer);
+        }
+        push_unique(&mut servers, &self.issuer);
+        servers
+    }
+
+    /// Configured issuer that matches the token's `iss`, without a signature check.
+    pub fn issuer_for_token(&self, token: &str) -> Option<String> {
+        let raw = unverified_issuer(token)?;
+        let key = raw.trim_end_matches('/');
+        if self.issuer.trim_end_matches('/') == key {
+            return Some(self.issuer.trim_end_matches('/').to_string());
+        }
+        self.extra
+            .iter()
+            .find(|client| client.issuer.trim_end_matches('/') == key)
+            .map(|client| client.issuer.trim_end_matches('/').to_string())
+    }
+
+    pub fn audience_for(&self, issuer: &str) -> Option<&str> {
+        let issuer = issuer.trim_end_matches('/');
+        if self.issuer.trim_end_matches('/') == issuer {
+            return Some(self.audience.as_str());
+        }
+        self.extra
+            .iter()
+            .find(|client| client.issuer.trim_end_matches('/') == issuer)
+            .map(|client| client.audience.as_str())
+    }
+
     pub fn metadata(&self) -> serde_json::Value {
         serde_json::json!({
             "resource": self.resource,
-            "authorization_servers": [self.issuer],
+            "authorization_servers": self.authorization_servers(),
             "bearer_methods_supported": ["header"],
             "scopes_supported": [self.scope],
         })
@@ -105,9 +150,22 @@ pub(crate) enum VerifyFail {
     UnknownKey,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn verify_access_token(
     token: &str,
     policy: &OidcPolicy,
+    jwks: &JwkSet,
+) -> Result<AccessSubject, VerifyFail> {
+    let issuer = policy.issuer_for_token(token).ok_or(VerifyFail::Rejected)?;
+    let audience = policy.audience_for(&issuer).ok_or(VerifyFail::Rejected)?;
+    verify_access_token_with(token, &issuer, audience, &policy.scope, jwks)
+}
+
+fn verify_access_token_with(
+    token: &str,
+    issuer: &str,
+    audience: &str,
+    scope: &str,
     jwks: &JwkSet,
 ) -> Result<AccessSubject, VerifyFail> {
     if token.starts_with("ookc_") || token.chars().filter(|c| *c == '.').count() != 2 {
@@ -123,8 +181,8 @@ pub(crate) fn verify_access_token(
     };
     let key = DecodingKey::from_jwk(jwk).map_err(|_| VerifyFail::Rejected)?;
     let mut validation = Validation::new(header.alg);
-    validation.set_issuer(&[&policy.issuer]);
-    validation.set_audience(&[&policy.audience]);
+    validation.set_issuer(&[issuer]);
+    validation.set_audience(&[audience]);
     validation.validate_exp = true;
     validation.validate_nbf = true;
     let data =
@@ -132,7 +190,7 @@ pub(crate) fn verify_access_token(
     if data.claims.exp.saturating_sub(data.claims.iat) > 3600 {
         return Err(VerifyFail::Rejected);
     }
-    if !has_scope(data.claims.scope.as_deref(), &policy.scope) {
+    if !has_scope(data.claims.scope.as_deref(), scope) {
         return Err(VerifyFail::Rejected);
     }
     if data.claims.sub.is_empty() || data.claims.sub.len() > 256 {
@@ -166,7 +224,7 @@ fn username_ok(value: &str) -> bool {
 pub struct OidcVerifier {
     policy: OidcPolicy,
     http: reqwest::Client,
-    cache: tokio::sync::RwLock<Option<CachedJwks>>,
+    cache: tokio::sync::RwLock<HashMap<String, CachedJwks>>,
     refresh: tokio::sync::Mutex<()>,
 }
 
@@ -190,7 +248,7 @@ impl OidcVerifier {
         Ok(Self {
             policy,
             http,
-            cache: tokio::sync::RwLock::new(None),
+            cache: tokio::sync::RwLock::new(HashMap::new()),
             refresh: tokio::sync::Mutex::new(()),
         })
     }
@@ -200,14 +258,24 @@ impl OidcVerifier {
     }
 
     pub async fn verify(&self, token: &str) -> Result<AccessSubject, ()> {
-        let jwks = self.jwks().await.map_err(|_| ())?;
-        match verify_access_token(token, &self.policy, &jwks) {
-            Ok(subject) => self.with_account_name(token, subject).await,
+        let Some(issuer) = self.policy.issuer_for_token(token) else {
+            return Err(());
+        };
+        let Some(audience) = self.policy.audience_for(&issuer) else {
+            return Err(());
+        };
+        let jwks = self.jwks_for(&issuer).await.map_err(|_| ())?;
+        match verify_access_token_with(token, &issuer, audience, &self.policy.scope, &jwks) {
+            Ok(subject) => self.with_account_name(token, &issuer, subject).await,
             Err(VerifyFail::Rejected) => Err(()),
             Err(VerifyFail::UnknownKey) => {
-                let jwks = self.refresh_for_unknown_key().await.map_err(|_| ())?;
-                match verify_access_token(token, &self.policy, &jwks) {
-                    Ok(subject) => self.with_account_name(token, subject).await,
+                let jwks = self
+                    .refresh_for_unknown_key(&issuer)
+                    .await
+                    .map_err(|_| ())?;
+                match verify_access_token_with(token, &issuer, audience, &self.policy.scope, &jwks)
+                {
+                    Ok(subject) => self.with_account_name(token, &issuer, subject).await,
                     Err(_) => Err(()),
                 }
             }
@@ -217,25 +285,26 @@ impl OidcVerifier {
     async fn with_account_name(
         &self,
         token: &str,
+        issuer: &str,
         mut subject: AccessSubject,
     ) -> Result<AccessSubject, ()> {
         if subject.username != subject.subject {
             return Ok(subject);
         }
-        let name = self.account_name(token).await.map_err(|_| ())?;
+        let name = self.account_name(token, issuer).await.map_err(|_| ())?;
         subject.username = name;
         Ok(subject)
     }
 
-    async fn account_name(&self, token: &str) -> Result<String, String> {
+    async fn account_name(&self, token: &str, issuer: &str) -> Result<String, String> {
         let url = self
             .cache
             .read()
             .await
-            .as_ref()
+            .get(issuer)
             .and_then(|cached| cached.userinfo.clone())
             .ok_or_else(|| "account name endpoint is not published".to_string())?;
-        if !same_origin(&url, &self.policy.issuer) {
+        if !same_origin(&url, issuer) {
             return Err("account name endpoint is not on the issuer origin".into());
         }
         let doc = self
@@ -259,9 +328,9 @@ impl OidcVerifier {
         Ok(name)
     }
 
-    async fn refresh_for_unknown_key(&self) -> Result<JwkSet, String> {
+    async fn refresh_for_unknown_key(&self, issuer: &str) -> Result<JwkSet, String> {
         let _hold = self.refresh.lock().await;
-        if let Some(cached) = self.cache.read().await.as_ref() {
+        if let Some(cached) = self.cache.read().await.get(issuer) {
             if cached.refreshed_at.elapsed() < Duration::from_secs(30) {
                 return cached
                     .set
@@ -269,12 +338,12 @@ impl OidcVerifier {
                     .ok_or_else(|| "signing keys unavailable".into());
             }
         }
-        self.fetch_keys().await
+        self.fetch_keys(issuer).await
     }
 
-    async fn jwks(&self) -> Result<JwkSet, String> {
+    async fn jwks_for(&self, issuer: &str) -> Result<JwkSet, String> {
         let _hold = self.refresh.lock().await;
-        if let Some(cached) = self.cache.read().await.as_ref() {
+        if let Some(cached) = self.cache.read().await.get(issuer) {
             if cached.fetched.elapsed() < JWKS_TTL {
                 if let Some(set) = &cached.set {
                     return Ok(set.clone());
@@ -287,44 +356,50 @@ impl OidcVerifier {
                     .ok_or_else(|| "signing keys unavailable".into());
             }
         }
-        self.fetch_keys().await
+        self.fetch_keys(issuer).await
     }
 
-    async fn fetch_keys(&self) -> Result<JwkSet, String> {
-        let fetched = self.load_jwks().await;
+    async fn fetch_keys(&self, issuer: &str) -> Result<JwkSet, String> {
+        let fetched = self.load_jwks(issuer).await;
         let now = Instant::now();
         let mut guard = self.cache.write().await;
         match fetched {
             Ok((set, userinfo)) => {
-                *guard = Some(CachedJwks {
-                    set: Some(set.clone()),
-                    userinfo,
-                    fetched: now,
-                    refreshed_at: now,
-                });
+                guard.insert(
+                    issuer.to_string(),
+                    CachedJwks {
+                        set: Some(set.clone()),
+                        userinfo,
+                        fetched: now,
+                        refreshed_at: now,
+                    },
+                );
                 Ok(set)
             }
             Err(err) => {
-                if let Some(cached) = guard.as_mut() {
+                if let Some(cached) = guard.get_mut(issuer) {
                     cached.refreshed_at = now;
                     if let Some(set) = &cached.set {
                         return Ok(set.clone());
                     }
                 } else {
-                    *guard = Some(CachedJwks {
-                        set: None,
-                        userinfo: None,
-                        fetched: now,
-                        refreshed_at: now,
-                    });
+                    guard.insert(
+                        issuer.to_string(),
+                        CachedJwks {
+                            set: None,
+                            userinfo: None,
+                            fetched: now,
+                            refreshed_at: now,
+                        },
+                    );
                 }
                 Err(err)
             }
         }
     }
 
-    async fn load_jwks(&self) -> Result<(JwkSet, Option<String>), String> {
-        let discovery = discovery_document(&self.http, &self.policy.issuer).await?;
+    async fn load_jwks(&self, issuer: &str) -> Result<(JwkSet, Option<String>), String> {
+        let discovery = discovery_document(&self.http, issuer).await?;
         let set = self
             .http
             .get(&discovery.jwks_uri)
@@ -403,6 +478,66 @@ fn same_origin(url: &str, issuer: &str) -> bool {
         && url.port() == issuer.port()
 }
 
+fn extra_clients() -> Result<Vec<TrustedClient>, String> {
+    let issuers = std::env::var("OOKCITE_MCP_OIDC_EXTRA_ISSUERS").unwrap_or_default();
+    let audiences = std::env::var("OOKCITE_MCP_OIDC_EXTRA_AUDIENCES").unwrap_or_default();
+    let issuers = split_csv(&issuers);
+    let audiences = split_csv(&audiences);
+    if issuers.is_empty() && audiences.is_empty() {
+        return Ok(Vec::new());
+    }
+    if issuers.len() != audiences.len() {
+        return Err(
+            "OOKCITE_MCP_OIDC_EXTRA_ISSUERS and OOKCITE_MCP_OIDC_EXTRA_AUDIENCES must have the same length"
+                .into(),
+        );
+    }
+    let mut clients = Vec::with_capacity(issuers.len());
+    for (issuer, audience) in issuers.into_iter().zip(audiences) {
+        if audience.is_empty()
+            || audience
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err("OOKCITE_MCP_OIDC_EXTRA_AUDIENCES must be single tokens".into());
+        }
+        clients.push(TrustedClient {
+            issuer: require_https_url("OOKCITE_MCP_OIDC_EXTRA_ISSUERS", &issuer)?,
+            audience,
+        });
+    }
+    Ok(clients)
+}
+
+fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn push_unique(servers: &mut Vec<String>, issuer: &str) {
+    let issuer = issuer.trim_end_matches('/').to_string();
+    if !servers.iter().any(|item| item == &issuer) {
+        servers.push(issuer);
+    }
+}
+
+fn unverified_issuer(token: &str) -> Option<String> {
+    let mut parts = token.split('.');
+    let payload = parts.nth(1)?;
+    if parts.next().is_none() || parts.next().is_some() {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.get("iss")?.as_str().map(str::to_string)
+}
+
 fn required_token(name: &str) -> Result<String, String> {
     let value = std::env::var(name).map_err(|_| format!("{name} is required for OAuth"))?;
     let value = value.trim();
@@ -437,7 +572,9 @@ fn require_https_url(name: &str, value: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use base64::Engine;
-    use jsonwebtoken::{encode, EncodingKey, Header};
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use jsonwebtoken::{EncodingKey, Header, encode};
     use rsa::pkcs8::EncodePrivateKey;
     use rsa::traits::PublicKeyParts;
 
@@ -445,15 +582,24 @@ mod tests {
         OidcPolicy {
             issuer: "https://id.example".into(),
             audience: "https://api.example".into(),
+            extra: Vec::new(),
             scope: "openid".into(),
             resource: "https://api.example".into(),
         }
     }
 
-    fn jwks_and_token(aud: &str, scope: &str) -> (JwkSet, String) {
+    struct Signer {
+        jwks: JwkSet,
+        pem: String,
+    }
+
+    fn signer() -> Signer {
         let mut rng = rand::thread_rng();
         let private = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let pem = private.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap();
+        let pem = private
+            .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap()
+            .to_string();
         let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(private.n().to_bytes_be());
         let e = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(private.e().to_bytes_be());
         let jwks: JwkSet = serde_json::from_value(serde_json::json!({
@@ -467,10 +613,14 @@ mod tests {
             }]
         }))
         .unwrap();
+        Signer { jwks, pem }
+    }
+
+    fn sign(signer: &Signer, iss: &str, aud: &str, scope: &str) -> String {
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some("test".into());
         let body = serde_json::json!({
-            "iss": "https://id.example",
+            "iss": iss,
             "aud": aud,
             "sub": "user-1",
             "preferred_username": "ada",
@@ -478,30 +628,73 @@ mod tests {
             "iat": jsonwebtoken::get_current_timestamp(),
             "exp": jsonwebtoken::get_current_timestamp() + 60,
         });
-        let token = encode(
+        encode(
             &header,
             &body,
-            &EncodingKey::from_rsa_pem(pem.as_bytes()).unwrap(),
+            &EncodingKey::from_rsa_pem(signer.pem.as_bytes()).unwrap(),
         )
-        .unwrap();
-        (jwks, token)
+        .unwrap()
     }
 
     #[test]
     fn signed_token_with_audience_and_scope_is_accepted() {
-        let (jwks, token) = jwks_and_token("https://api.example", "openid profile");
-        let subject = verify_access_token(&token, &policy(), &jwks).unwrap();
+        let signer = signer();
+        let token = sign(
+            &signer,
+            "https://id.example",
+            "https://api.example",
+            "openid profile",
+        );
+        let subject = verify_access_token(&token, &policy(), &signer.jwks).unwrap();
         assert_eq!(subject.username, "ada");
         assert_eq!(subject.subject, "user-1");
     }
 
     #[test]
     fn wrong_audience_api_key_and_missing_scope_are_rejected() {
-        let (jwks, bad_aud) = jwks_and_token("https://other.example", "openid");
-        assert!(verify_access_token(&bad_aud, &policy(), &jwks).is_err());
-        let (jwks, no_scope) = jwks_and_token("https://api.example", "profile");
-        assert!(verify_access_token(&no_scope, &policy(), &jwks).is_err());
-        assert!(verify_access_token("ookc_live_key", &policy(), &jwks).is_err());
+        let signer = signer();
+        let bad_aud = sign(
+            &signer,
+            "https://id.example",
+            "https://other.example",
+            "openid",
+        );
+        assert!(verify_access_token(&bad_aud, &policy(), &signer.jwks).is_err());
+        let no_scope = sign(
+            &signer,
+            "https://id.example",
+            "https://api.example",
+            "profile",
+        );
+        assert!(verify_access_token(&no_scope, &policy(), &signer.jwks).is_err());
+        assert!(verify_access_token("ookc_live_key", &policy(), &signer.jwks).is_err());
+    }
+
+    #[test]
+    fn a_second_client_is_advertised_and_accepted_beside_the_first() {
+        let signer = signer();
+        let mut policy = policy();
+        policy.extra = vec![TrustedClient {
+            issuer: "https://id.extra".into(),
+            audience: "second-client".into(),
+        }];
+        let primary = sign(
+            &signer,
+            "https://id.example",
+            "https://api.example",
+            "openid",
+        );
+        let extra = sign(&signer, "https://id.extra", "second-client", "openid");
+        let crossed = sign(&signer, "https://id.example", "second-client", "openid");
+        let foreign = sign(&signer, "https://id.other", "second-client", "openid");
+        assert_eq!(
+            policy.metadata()["authorization_servers"],
+            serde_json::json!(["https://id.extra", "https://id.example"])
+        );
+        assert!(verify_access_token(&primary, &policy, &signer.jwks).is_ok());
+        assert!(verify_access_token(&extra, &policy, &signer.jwks).is_ok());
+        assert!(verify_access_token(&crossed, &policy, &signer.jwks).is_err());
+        assert!(verify_access_token(&foreign, &policy, &signer.jwks).is_err());
     }
 
     #[test]
@@ -530,4 +723,37 @@ mod tests {
             "resource_metadata=\"https://api.example/.well-known/oauth-protected-resource/mcp\""
         ));
     }
+
+    #[test]
+    fn from_env_reads_a_second_client() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("OOKCITE_MCP_OIDC_ISSUER", "https://id.example");
+            std::env::set_var("OOKCITE_MCP_OIDC_AUDIENCE", "api");
+            std::env::set_var("OOKCITE_MCP_RESOURCE", "https://api.example");
+            std::env::set_var(
+                "OOKCITE_MCP_OIDC_EXTRA_ISSUERS",
+                "https://id.extra/oauth2/openid/second-client",
+            );
+            std::env::set_var("OOKCITE_MCP_OIDC_EXTRA_AUDIENCES", "second-client");
+        }
+        let policy = OidcPolicy::from_env().unwrap();
+        unsafe {
+            std::env::remove_var("OOKCITE_MCP_OIDC_ISSUER");
+            std::env::remove_var("OOKCITE_MCP_OIDC_AUDIENCE");
+            std::env::remove_var("OOKCITE_MCP_RESOURCE");
+            std::env::remove_var("OOKCITE_MCP_OIDC_EXTRA_ISSUERS");
+            std::env::remove_var("OOKCITE_MCP_OIDC_EXTRA_AUDIENCES");
+        }
+        assert_eq!(policy.issuer, "https://id.example");
+        assert_eq!(policy.extra.len(), 1);
+        assert_eq!(
+            policy.extra[0].issuer,
+            "https://id.extra/oauth2/openid/second-client"
+        );
+        assert_eq!(policy.extra[0].audience, "second-client");
+        assert!(OidcPolicy::from_env().is_err());
+    }
 }
+
+
