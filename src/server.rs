@@ -3795,7 +3795,10 @@ mod tests {
             .and(path("/api/v1/lookup/doi"))
             .respond_with(
                 ResponseTemplate::new(429)
-                    .set_body_string("Daily limit reached (60/day). Resets in 3h 45m."),
+                    .set_body_string(format!(
+                        "Daily limit reached ({}/day). Resets in 3h 45m.",
+                        crate::constants::FREE_DAILY_LOOKUPS
+                    )),
             )
             .mount(&mock)
             .await;
@@ -5096,7 +5099,10 @@ mod tests {
             .and(path("/api/v1/lookup/doi"))
             .respond_with(
                 ResponseTemplate::new(429)
-                    .set_body_string("Daily limit reached (60/day). Resets in 5h."),
+                    .set_body_string(format!(
+                        "Daily limit reached ({}/day). Resets in 5h.",
+                        crate::constants::FREE_DAILY_LOOKUPS
+                    )),
             )
             .expect(1)
             .mount(&mock)
@@ -5682,7 +5688,10 @@ mod tests {
             .and(path("/api/v1/lookup/doi"))
             .respond_with(
                 ResponseTemplate::new(429)
-                    .set_body_string("Daily limit reached (60/day). Resets in 5h."),
+                    .set_body_string(format!(
+                        "Daily limit reached ({}/day). Resets in 5h.",
+                        crate::constants::FREE_DAILY_LOOKUPS
+                    )),
             )
             .mount(&mock)
             .await;

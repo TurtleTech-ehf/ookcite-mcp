@@ -23,7 +23,15 @@ pub const MUTATE_BATCH_CONCURRENCY: usize = 10;
 /// Process-local exact-DOI metadata TTL (seconds). Identity-gated on store/load.
 pub const DOI_CACHE_TTL_SECS: u64 = 600;
 
-/// Anonymous / no-key: refuse metered batches larger than this (IP daily limit ~20).
+/// Anonymous daily cap. The sold catalogue owns the number; this constant
+/// is the public crate's copy, and the catalogue crate checks it.
+pub const ANON_DAILY_LOOKUPS: u32 = 20;
+
+/// Free-account daily cap. Same source rule as [`ANON_DAILY_LOOKUPS`].
+pub const FREE_DAILY_LOOKUPS: u32 = 60;
+
+/// Anonymous / no-key: refuse metered batches larger than this.
+/// The daily cap is [`ANON_DAILY_LOOKUPS`].
 pub const ANON_BATCH_SOFT_CAP: u32 = 8;
 
 /// Inputs the synchronous `/api/v1/resolve/batch` path accepts. The async mode
@@ -55,10 +63,11 @@ pub fn rate_limit_hint() -> String {
         "Check remaining quota with the usage tool, or raise it: https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp"
             .to_string()
     } else {
-        "Anonymous cap is 20 lookups/day. A free account raises that to 60/day: \
-         sign up at https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp, then set OOKCITE_API_KEY \
-         (or run `ookcite-mcp setup --key YOUR_KEY`)."
-            .to_string()
+        format!(
+            "Anonymous cap is {ANON_DAILY_LOOKUPS} lookups/day. A free account raises that to {FREE_DAILY_LOOKUPS}/day: \
+             sign up at https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp, then set OOKCITE_API_KEY \
+             (or run `ookcite-mcp setup --key YOUR_KEY`)."
+        )
     }
 }
 
@@ -73,7 +82,7 @@ pub fn quota_soft_hint(remaining: u32, limit: u32) -> Option<String> {
         ))
     } else {
         Some(format!(
-            "Near the anonymous cap ({remaining}/{limit}). A free account is 60/day plus collections: \
+            "Near the anonymous cap ({remaining}/{limit}). A free account is {FREE_DAILY_LOOKUPS}/day plus collections: \
              https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp"
         ))
     }

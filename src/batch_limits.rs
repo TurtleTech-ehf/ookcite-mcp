@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::collection_entries::{entry_doi, looks_like_doi_token, normalize_doi_token};
-use crate::constants::{ANON_BATCH_SOFT_CAP, DOI_CACHE_TTL_SECS, READ_ONLY_BATCH_CONCURRENCY};
+use crate::constants::{
+    ANON_BATCH_SOFT_CAP, ANON_DAILY_LOOKUPS, DOI_CACHE_TTL_SECS, FREE_DAILY_LOOKUPS,
+    READ_ONLY_BATCH_CONCURRENCY,
+};
 
 /// Snapshot from `GET /api/v1/me` (subset used for preflight).
 #[derive(Debug, Clone, Default)]
@@ -154,11 +157,11 @@ pub fn plan_metered_batch(
                 need_lookup: Vec::new(),
                 members,
                 refuse_message: Some(format!(
-                    "REFUSED: anonymous / no OOKCITE_API_KEY session — refusing batch of {metered} \
+                    "REFUSED: anonymous / no OOKCITE_API_KEY session, refusing batch of {metered} \
                      metered lookups (soft cap {ANON_BATCH_SOFT_CAP}). Free accounts raise the \
-                     limit to 60/day: sign up at https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp, then set \
+                     limit to {FREE_DAILY_LOOKUPS}/day: sign up at https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp, then set \
                      OOKCITE_API_KEY. Or shrink the batch, or import into a collection and \
-                     re-verify members for free. IP daily limits still apply (~20/day anonymous)."
+                     re-verify members for free. IP daily limits still apply (~{ANON_DAILY_LOOKUPS}/day anonymous)."
                 )),
             };
         }
