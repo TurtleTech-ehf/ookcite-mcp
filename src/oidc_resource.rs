@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use jsonwebtoken::jwk::JwkSet;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 
 const JWKS_TTL: Duration = Duration::from_secs(600);
@@ -574,7 +574,7 @@ mod tests {
     use base64::Engine;
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    use jsonwebtoken::{EncodingKey, Header, encode};
+    use jsonwebtoken::{encode, EncodingKey, Header};
     use rsa::pkcs8::EncodePrivateKey;
     use rsa::traits::PublicKeyParts;
 
@@ -755,5 +755,3 @@ mod tests {
         assert!(OidcPolicy::from_env().is_err());
     }
 }
-
-
