@@ -187,6 +187,38 @@ Optional env (stdio MCP, all clients):
 | `OOKCITE_CREDENTIAL_SERVICE` | Platform credential service name (default `ookcite-mcp`) |
 | `OOKCITE_CREDENTIAL_ACCOUNT` | Platform credential account name (default `default`) |
 
+## Marketplace plugin
+
+OokCite installs two ways.
+
+From this repository, add marketplace `TurtleTech-ehf/ookcite-mcp` and
+install `ookcite@ookcite`. That registers the `ookcite` marketplace and
+enables the plugin in `plugins/ookcite`. The plugin connects to
+`https://ookcite-api.turtletech.us/mcp` and adds three skills: format a
+pasted bibliography (`/ookcite:format-bibliography`), verify references
+before submission (`/ookcite:verify-references`), and build and export a
+collection (`/ookcite:build-collection`). Sign in when asked. Formatting
+one citation and checking a short DOI list also work before sign-in, within
+the anonymous daily cap. Saving a collection requires the signed-in account.
+
+The web, desktop, and cowork apps use the same address as a directory
+connector. Choose sign-in. Submit the connector by that URL, and submit the
+`plugins/ookcite` folder as the plugin bundle. Installing from the
+marketplace does not submit either listing.
+
+The authorization server named by the protected-resource metadata must let
+the directory client register a public client. Dynamic registration applies
+when discovery publishes `registration_endpoint`. A client-id metadata
+document applies when discovery publishes
+`client_id_metadata_document_supported` set to true and includes `none` in
+`token_endpoint_auth_methods_supported`. The issuer publishes S256 PKCE and
+neither registration signal. Accept the directory's hosted callback and
+port-agnostic loopback redirects on `http://localhost/callback` and
+`http://127.0.0.1/callback`. The protected-resource `resource` value must
+be the MCP URL, including `/mcp`. Set `OOKCITE_MCP_RESOURCE` to that URL.
+The token audience stays `OOKCITE_MCP_OIDC_AUDIENCE`. Access tokens must
+satisfy `exp - iat` <= 3600 or the resource server rejects them.
+
 ## Remote MCP
 
 Use OokCite from a chat product without installing anything. Add this address, choose sign-in, and approve the login when asked:
@@ -396,7 +428,9 @@ There is no local citation database; all state lives on the API.
 | `contract/` | Age-encrypted OpenAPI snapshot + `regen.sh` |
 | `npm/` | `@turtletech/ookcite-mcp` installer/wrapper (downloads release binary) |
 | `demo/` | Asciinema recording scripts |
-| `scripts/set-version.sh` | Cocogitto pre-bump hook: `Cargo.toml` + `npm/package.json` version |
+| marketplace catalog | Lists `ookcite` from `./plugins/ookcite` |
+| `plugins/ookcite/` | Plugin manifest, hosted MCP URL, three skills |
+| `scripts/set-version.sh` | Cocogitto pre-bump hook: package, registry, and plugin versions |
 
 **Collections / entry ids:** `search_collection` and `check_duplicates` emit
 `entry_id: …` lines. `remove_from_collection` accepts that id, a bare DOI, or

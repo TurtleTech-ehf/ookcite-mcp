@@ -55,10 +55,23 @@ impl OidcPolicy {
     }
 
     pub fn metadata_url(&self) -> String {
-        format!(
-            "{}/.well-known/oauth-protected-resource",
-            self.resource.trim_end_matches('/')
-        )
+        // RFC 9728 inserts the well-known segment between the host and the
+        // resource path. A resource of https://host/mcp is discovered at
+        // https://host/.well-known/oauth-protected-resource/mcp.
+        let Ok(mut url) = reqwest::Url::parse(&self.resource) else {
+            return format!(
+                "{}/.well-known/oauth-protected-resource",
+                self.resource.trim_end_matches('/')
+            );
+        };
+        let path = url.path().trim_matches('/');
+        let well_known = if path.is_empty() {
+            "/.well-known/oauth-protected-resource".to_string()
+        } else {
+            format!("/.well-known/oauth-protected-resource/{path}")
+        };
+        url.set_path(&well_known);
+        url.to_string()
     }
 
     pub fn challenge(&self) -> String {
@@ -497,6 +510,24 @@ mod tests {
         assert_eq!(body["resource"], "https://api.example");
         assert_eq!(body["authorization_servers"][0], "https://id.example");
         assert_eq!(body["scopes_supported"][0], "openid");
-        assert!(policy().challenge().contains("resource_metadata="));
+        assert_eq!(
+            policy().metadata_url(),
+            "https://api.example/.well-known/oauth-protected-resource"
+        );
+        assert!(policy().challenge().contains(&policy().metadata_url()));
+    }
+
+    #[test]
+    fn metadata_url_puts_the_well_known_segment_between_host_and_path() {
+        let mut policy = policy();
+        policy.resource = "https://api.example/mcp".into();
+        assert_eq!(policy.metadata()["resource"], "https://api.example/mcp");
+        assert_eq!(
+            policy.metadata_url(),
+            "https://api.example/.well-known/oauth-protected-resource/mcp"
+        );
+        assert!(policy.challenge().contains(
+            "resource_metadata=\"https://api.example/.well-known/oauth-protected-resource/mcp\""
+        ));
     }
 }
