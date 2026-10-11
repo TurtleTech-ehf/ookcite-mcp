@@ -20,6 +20,7 @@ mod http_error;
 mod http_serve;
 mod inbound_auth;
 mod oidc_resource;
+mod overrides;
 mod plaintext;
 mod policy;
 mod resolve_helpers;

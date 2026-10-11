@@ -335,6 +335,12 @@ Typical workflow:
 3. Use `search_collection`, `check_duplicates`, and `export_collection` (`bib` or `csl`) while revising
 4. Treat the collection as an audit/export companion, not the only copy of your bibliography
 
+**Local overrides:** the API does not yet store every field
+`update_entry_metadata` sends, so each edit is also kept in
+`$XDG_DATA_HOME/ookcite/overrides/<collection>.json` and applied by
+`export_collection`. `eid_as=pages` places article numbers where elsarticle-num
+prints them. See [`docs/local-overrides.md`](docs/local-overrides.md).
+
 **Removing a single entry:** call `search_collection` (or `check_duplicates`) to
 see each hit as `entry_id: …` (and optionally `aliases: doi:…` when the stored id
 is opaque). Pass that `entry_id` to `remove_from_collection`, or pass the paper's
@@ -405,7 +411,8 @@ API limits, larger collections, paid utilities, merge, and batch-move.
 ## Source layout
 
 The crate is a thin MCP (stdio) wrapper around the public OokCite REST API.
-There is no local citation database; all state lives on the API.
+There is no local citation database; all state lives on the API, except the
+per-collection metadata overrides described in `docs/local-overrides.md`.
 
 | Path | Role |
 |------|------|
@@ -418,6 +425,8 @@ There is no local citation database; all state lives on the API.
 | `src/http_error.rs` | `error_detail` and HTTP status classification for client-facing strings |
 | `src/collection_entries.rs` | Collection entry ids, bare DOI / `doi:` alias resolution, search lines |
 | `src/plaintext.rs` | Pasted-list split and local `.bib` render |
+| `src/bib_export.rs` | Collection BibTeX from provider records, stored fields, and text cleanup |
+| `src/overrides.rs` | Local per-collection metadata overrides applied on export |
 | `src/resolve_helpers.rs` | Reverse-lookup and free-text resolve payload helpers |
 | `src/endpoints.rs` | Endpoint registry (`lib` crate surface); contract-tested |
 | `src/lib.rs` | Library root (exports `endpoints` only) |
