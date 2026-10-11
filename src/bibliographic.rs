@@ -374,7 +374,7 @@ fn norm_token(value: &str) -> String {
 fn journal_relation(claimed: &str, record: &str) -> Relation {
     let claim_key = journal_key(claimed);
     let record_key = journal_key(record);
-    if claim_key == record_key {
+    if claim_key == record_key || iso4_equivalent(claimed, record) {
         return Relation::Agree;
     }
     let claim_tokens: Vec<&str> = claim_key.split_whitespace().collect();
@@ -388,6 +388,54 @@ fn journal_relation(claimed: &str, record: &str) -> Relation {
         }
     }
     Relation::Disagree(format!("claimed {claimed}, record {record}"))
+}
+
+/// ISO 4 abbreviations and the full venue name are the same journal.
+///
+/// Token order is kept. A short token matches the long word when it is a
+/// prefix of length 3 or more, a two-letter prefix, or the single letter
+/// `j` for journal. A one-letter section label such as `B` matches only itself.
+fn iso4_equivalent(claimed: &str, record: &str) -> bool {
+    iso4_align(claimed, record) || iso4_align(record, claimed)
+}
+
+fn iso4_align(short: &str, long: &str) -> bool {
+    let claim = iso4_tokens(short);
+    let record = iso4_tokens(long);
+    if claim.is_empty() || claim.len() != record.len() {
+        return false;
+    }
+    claim
+        .iter()
+        .zip(record.iter())
+        .all(|(abbr, full)| iso4_token_match(abbr, full))
+}
+
+fn iso4_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .filter(|token| {
+            !matches!(
+                token.as_str(),
+                "the" | "of" | "and" | "a" | "an" | "for" | "in" | "on"
+            )
+        })
+        .collect()
+}
+
+fn iso4_token_match(short: &str, long: &str) -> bool {
+    if short == long {
+        return true;
+    }
+    if !long.starts_with(short) {
+        return false;
+    }
+    if short.len() >= 2 {
+        return true;
+    }
+    short == "j" && long == "journal"
 }
 
 fn journal_key(value: &str) -> String {
@@ -659,5 +707,41 @@ mod tests {
         assert!(text.starts_with("MISMATCH\n"), "{text}");
         assert!(text.contains("Pages: 8365-8377"), "{text}");
         assert!(!text.contains("VALID"), "{text}");
+    }
+
+    #[test]
+    fn iso4_abbreviations_match_the_full_journal_name() {
+        let cases = [
+            (
+                "J. Chem. Inf. Model.",
+                "Journal of Chemical Information and Modeling",
+            ),
+            ("Phys. Rev. Lett.", "Physical Review Letters"),
+            ("Comput. Phys. Commun.", "Computer Physics Communications"),
+            ("Rev. Mod. Phys.", "Reviews of Modern Physics"),
+            ("Softw. Pract. Exp.", "Software: Practice and Experience"),
+            ("Sci. Data", "Scientific Data"),
+            (
+                "Journal of Chemical Information and Modeling",
+                "J. Chem. Inf. Model.",
+            ),
+        ];
+        for (abbreviation, record) in cases {
+            let meta = json!({
+                "title": "A paper about checkpoints",
+                "authors": [{"family": "Goswami"}],
+                "date": {"year": 2020},
+                "journal": record
+            });
+            let claim = BibliographicClaim {
+                journal: Some(abbreviation.into()),
+                ..BibliographicClaim::default()
+            };
+            let line = format_verify_line("10.1/iso4", &meta, Some(&claim));
+            assert!(
+                line.starts_with("VALID "),
+                "{abbreviation} vs {record}: {line}"
+            );
+        }
     }
 }

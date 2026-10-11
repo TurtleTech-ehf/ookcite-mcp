@@ -1,0 +1,7421 @@
+{
+ "10.5281/zenodo.18753567": {
+  "datacite": {
+   "doi": "10.5281/zenodo.18753567",
+   "types": {
+    "ris": "COMP",
+    "bibtex": "misc",
+    "citeproc": "article",
+    "schemaOrg": "SoftwareSourceCode",
+    "resourceType": "",
+    "resourceTypeGeneral": "Software"
+   },
+   "titles": [
+    {
+     "title": "readcon-core: a CON/convel reader/writer with FFI bindings"
+    }
+   ],
+   "creators": [
+    {
+     "name": "Goswami, Rohit",
+     "givenName": "Rohit",
+     "familyName": "Goswami",
+     "nameType": "Personal"
+    }
+   ],
+   "publicationYear": 2026,
+   "version": "0.16.2",
+   "publisher": "Zenodo",
+   "relatedIdentifiers": [
+    {
+     "relationType": "HasVersion",
+     "relatedIdentifier": "10.5281/zenodo.20110651"
+    },
+    {
+     "relationType": "HasVersion",
+     "relatedIdentifier": "10.5281/zenodo.21959039"
+    },
+    {
+     "relationType": "HasVersion",
+     "relatedIdentifier": "10.5281/zenodo.19221315"
+    }
+   ]
+  }
+ },
+ "10.1016/j.mex.2026.103899": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Reproducible orchestration of best practices for reaction path optimization with the nudged elastic band"
+   ],
+   "container-title": [
+    "MethodsX"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "16",
+   "page": "103899",
+   "article-number": "103899",
+   "DOI": "10.1016/j.mex.2026.103899",
+   "URL": "https://doi.org/10.1016/j.mex.2026.103899",
+   "issued": {
+    "date-parts": [
+     [
+      2026,
+      6
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2026,
+      6
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Rohit",
+     "family": "Goswami",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/S2215016126001172"
+    }
+   }
+  }
+ },
+ "10.1016/j.mex.2026.103851": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Two-dimensional RMSD projections for reaction path visualization and validation"
+   ],
+   "container-title": [
+    "MethodsX"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "16",
+   "page": "103851",
+   "article-number": "103851",
+   "DOI": "10.1016/j.mex.2026.103851",
+   "URL": "https://doi.org/10.1016/j.mex.2026.103851",
+   "issued": {
+    "date-parts": [
+     [
+      2026,
+      6
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2026,
+      6
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Rohit",
+     "family": "Goswami",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/S2215016126000683"
+    }
+   }
+  }
+ },
+ "10.1021/acs.jctc.5c00866": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Efficient Implementation of Gaussian Process Regression Accelerated Saddle Point Searches with Application to Molecular Reactions"
+   ],
+   "container-title": [
+    "Journal of Chemical Theory and Computation"
+   ],
+   "publisher": "American Chemical Society (ACS)",
+   "volume": "21",
+   "issue": "16",
+   "page": "7935-7943",
+   "DOI": "10.1021/acs.jctc.5c00866",
+   "URL": "https://doi.org/10.1021/acs.jctc.5c00866",
+   "issued": {
+    "date-parts": [
+     [
+      2025,
+      8,
+      11
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2025,
+      8,
+      26
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2025,
+      8,
+      11
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Rohit",
+     "family": "Goswami",
+     "sequence": "first"
+    },
+    {
+     "given": "Maxim",
+     "family": "Masterov",
+     "sequence": "additional"
+    },
+    {
+     "given": "Satish",
+     "family": "Kamath",
+     "sequence": "additional"
+    },
+    {
+     "given": "Alejandro",
+     "family": "Peña-Torres",
+     "sequence": "additional"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.acs.org/doi/10.1021/acs.jctc.5c00866"
+    }
+   }
+  }
+ },
+ "10.1002/cphc.202500730": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Adaptive Pruning for Increased Robustness and Reduced Computational Overhead in Gaussian Process Accelerated Saddle Point Searches"
+   ],
+   "container-title": [
+    "ChemPhysChem"
+   ],
+   "publisher": "Wiley",
+   "volume": "27",
+   "issue": "4",
+   "article-number": "e202500730",
+   "DOI": "10.1002/cphc.202500730",
+   "URL": "https://doi.org/10.1002/cphc.202500730",
+   "issued": {
+    "date-parts": [
+     [
+      2026,
+      2,
+      23
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2026,
+      2,
+      25
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2026,
+      2,
+      23
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Rohit",
+     "family": "Goswami",
+     "sequence": "first"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://chemistry-europe.onlinelibrary.wiley.com/doi/10.1002/cphc.202500730"
+    }
+   }
+  }
+ },
+ "10.3389/fchem.2026.1807063": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Enhanced climbing image nudged elastic band method with Hessian eigenmode alignment"
+   ],
+   "container-title": [
+    "Frontiers in Chemistry"
+   ],
+   "publisher": "Frontiers Media SA",
+   "volume": "14",
+   "article-number": "1807063",
+   "DOI": "10.3389/fchem.2026.1807063",
+   "URL": "https://doi.org/10.3389/fchem.2026.1807063",
+   "issued": {
+    "date-parts": [
+     [
+      2026,
+      5,
+      29
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2026,
+      5,
+      29
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Rohit",
+     "family": "Goswami",
+     "sequence": "first"
+    },
+    {
+     "given": "Miha",
+     "family": "Gunde",
+     "sequence": "additional"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://www.frontiersin.org/articles/10.3389/fchem.2026.1807063/full"
+    }
+   }
+  }
+ },
+ "10.1142/9789812839664_0016": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "Nudged elastic band method for finding minimum energy paths of transitions"
+   ],
+   "container-title": [
+    "Classical and Quantum Dynamics in Condensed Phase Simulations"
+   ],
+   "publisher": "WORLD SCIENTIFIC",
+   "page": "385-404",
+   "DOI": "10.1142/9789812839664_0016",
+   "URL": "https://doi.org/10.1142/9789812839664_0016",
+   "issued": {
+    "date-parts": [
+     [
+      1998,
+      6
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1998,
+      6
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2011,
+      11,
+      21
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "HANNES",
+     "family": "JÓNSSON",
+     "sequence": "first"
+    },
+    {
+     "given": "GREG",
+     "family": "MILLS",
+     "sequence": "additional"
+    },
+    {
+     "given": "KARSTEN W.",
+     "family": "JACOBSEN",
+     "sequence": "additional"
+    }
+   ],
+   "event": {
+    "name": "Proceedings of the International School of Physics"
+   },
+   "resource": {
+    "primary": {
+     "URL": "http://www.worldscientific.com/doi/abs/10.1142/9789812839664_0016"
+    }
+   }
+  }
+ },
+ "10.1063/1.1329672": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "A climbing image nudged elastic band method for finding saddle points and minimum energy paths"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "113",
+   "issue": "22",
+   "page": "9901-9904",
+   "DOI": "10.1063/1.1329672",
+   "URL": "https://doi.org/10.1063/1.1329672",
+   "issued": {
+    "date-parts": [
+     [
+      2000,
+      12,
+      8
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2000,
+      12,
+      8
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Graeme",
+     "family": "Henkelman",
+     "sequence": "first"
+    },
+    {
+     "given": "Blas P.",
+     "family": "Uberuaga",
+     "sequence": "additional"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/113/22/9901/185050/A-climbing-image-nudged-elastic-band-method-for"
+    }
+   }
+  }
+ },
+ "10.1063/1.480097": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "A dimer method for finding saddle points on high dimensional potential surfaces using only first derivatives"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "111",
+   "issue": "15",
+   "page": "7010-7022",
+   "DOI": "10.1063/1.480097",
+   "URL": "https://doi.org/10.1063/1.480097",
+   "issued": {
+    "date-parts": [
+     [
+      1999,
+      10,
+      15
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1999,
+      10,
+      15
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Graeme",
+     "family": "Henkelman",
+     "sequence": "first"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/111/15/7010/475160/A-dimer-method-for-finding-saddle-points-on-high"
+    }
+   }
+  }
+ },
+ "10.1063/1.1415500": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Long time scale kinetic Monte Carlo simulations without lattice approximation and predefined event table"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "115",
+   "issue": "21",
+   "page": "9657-9666",
+   "DOI": "10.1063/1.1415500",
+   "URL": "https://doi.org/10.1063/1.1415500",
+   "issued": {
+    "date-parts": [
+     [
+      2001,
+      12,
+      1
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2001,
+      12,
+      1
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Graeme",
+     "family": "Henkelman",
+     "sequence": "first"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/115/21/9657/453229/Long-time-scale-kinetic-Monte-Carlo-simulations"
+    }
+   }
+  }
+ },
+ "10.1016/0022-3697(57)90059-8": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Frequency factors and isotope effects in solid state rate processes"
+   ],
+   "container-title": [
+    "Journal of Physics and Chemistry of Solids"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "3",
+   "issue": "1-2",
+   "page": "121-127",
+   "DOI": "10.1016/0022-3697(57)90059-8",
+   "URL": "https://doi.org/10.1016/0022-3697(57)90059-8",
+   "issued": {
+    "date-parts": [
+     [
+      1957,
+      1
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1957,
+      1
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "George H.",
+     "family": "Vineyard",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/0022369757900598"
+    }
+   }
+  }
+ },
+ "10.1103/revmodphys.62.251": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Reaction-rate theory: fifty years after Kramers"
+   ],
+   "container-title": [
+    "Reviews of Modern Physics"
+   ],
+   "publisher": "American Physical Society (APS)",
+   "volume": "62",
+   "issue": "2",
+   "page": "251-341",
+   "DOI": "10.1103/revmodphys.62.251",
+   "URL": "https://doi.org/10.1103/revmodphys.62.251",
+   "issued": {
+    "date-parts": [
+     [
+      1990,
+      4,
+      1
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      1990,
+      4,
+      1
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Peter",
+     "family": "Hänggi",
+     "sequence": "first"
+    },
+    {
+     "given": "Peter",
+     "family": "Talkner",
+     "sequence": "additional"
+    },
+    {
+     "given": "Michal",
+     "family": "Borkovec",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://link.aps.org/doi/10.1103/RevModPhys.62.251"
+    }
+   }
+  }
+ },
+ "10.1088/0965-0393/22/5/055002": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "EON: software for long time simulations of atomic scale systems"
+   ],
+   "container-title": [
+    "Modelling and Simulation in Materials Science and Engineering"
+   ],
+   "publisher": "IOP Publishing",
+   "volume": "22",
+   "issue": "5",
+   "page": "055002",
+   "DOI": "10.1088/0965-0393/22/5/055002",
+   "URL": "https://doi.org/10.1088/0965-0393/22/5/055002",
+   "issued": {
+    "date-parts": [
+     [
+      2014,
+      5,
+      16
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2014,
+      7,
+      1
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2014,
+      5,
+      16
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Samuel T",
+     "family": "Chill",
+     "sequence": "first"
+    },
+    {
+     "given": "Matthew",
+     "family": "Welborn",
+     "sequence": "additional"
+    },
+    {
+     "given": "Rye",
+     "family": "Terrell",
+     "sequence": "additional"
+    },
+    {
+     "given": "Liang",
+     "family": "Zhang",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jean-Claude",
+     "family": "Berthet",
+     "sequence": "additional"
+    },
+    {
+     "given": "Andreas",
+     "family": "Pedersen",
+     "sequence": "additional"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Graeme",
+     "family": "Henkelman",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://iopscience.iop.org/article/10.1088/0965-0393/22/5/055002"
+    }
+   }
+  }
+ },
+ "10.1088/1361-648x/aa680e": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "The atomic simulation environment—a Python library for working with atoms"
+   ],
+   "container-title": [
+    "Journal of Physics: Condensed Matter"
+   ],
+   "publisher": "IOP Publishing",
+   "volume": "29",
+   "issue": "27",
+   "page": "273002",
+   "DOI": "10.1088/1361-648x/aa680e",
+   "URL": "https://doi.org/10.1088/1361-648x/aa680e",
+   "issued": {
+    "date-parts": [
+     [
+      2017,
+      6,
+      7
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2017,
+      7,
+      12
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2017,
+      6,
+      7
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Ask",
+     "family": "Hjorth Larsen",
+     "sequence": "first"
+    },
+    {
+     "given": "Jens",
+     "family": "Jørgen Mortensen",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jakob",
+     "family": "Blomqvist",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ivano E",
+     "family": "Castelli",
+     "sequence": "additional"
+    },
+    {
+     "given": "Rune",
+     "family": "Christensen",
+     "sequence": "additional"
+    },
+    {
+     "given": "Marcin",
+     "family": "Dułak",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jesper",
+     "family": "Friis",
+     "sequence": "additional"
+    },
+    {
+     "given": "Michael N",
+     "family": "Groves",
+     "sequence": "additional"
+    },
+    {
+     "given": "Bjørk",
+     "family": "Hammer",
+     "sequence": "additional"
+    },
+    {
+     "given": "Cory",
+     "family": "Hargus",
+     "sequence": "additional"
+    },
+    {
+     "given": "Eric D",
+     "family": "Hermes",
+     "sequence": "additional"
+    },
+    {
+     "given": "Paul C",
+     "family": "Jennings",
+     "sequence": "additional"
+    },
+    {
+     "given": "Peter",
+     "family": "Bjerre Jensen",
+     "sequence": "additional"
+    },
+    {
+     "given": "James",
+     "family": "Kermode",
+     "sequence": "additional"
+    },
+    {
+     "given": "John R",
+     "family": "Kitchin",
+     "sequence": "additional"
+    },
+    {
+     "given": "Esben",
+     "family": "Leonhard Kolsbjerg",
+     "sequence": "additional"
+    },
+    {
+     "given": "Joseph",
+     "family": "Kubal",
+     "sequence": "additional"
+    },
+    {
+     "given": "Kristen",
+     "family": "Kaasbjerg",
+     "sequence": "additional"
+    },
+    {
+     "given": "Steen",
+     "family": "Lysgaard",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jón",
+     "family": "Bergmann Maronsson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Tristan",
+     "family": "Maxson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Thomas",
+     "family": "Olsen",
+     "sequence": "additional"
+    },
+    {
+     "given": "Lars",
+     "family": "Pastewka",
+     "sequence": "additional"
+    },
+    {
+     "given": "Andrew",
+     "family": "Peterson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Carsten",
+     "family": "Rostgaard",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jakob",
+     "family": "Schiøtz",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ole",
+     "family": "Schütt",
+     "sequence": "additional"
+    },
+    {
+     "given": "Mikkel",
+     "family": "Strange",
+     "sequence": "additional"
+    },
+    {
+     "given": "Kristian S",
+     "family": "Thygesen",
+     "sequence": "additional"
+    },
+    {
+     "given": "Tejs",
+     "family": "Vegge",
+     "sequence": "additional"
+    },
+    {
+     "given": "Lasse",
+     "family": "Vilhelmsen",
+     "sequence": "additional"
+    },
+    {
+     "given": "Michael",
+     "family": "Walter",
+     "sequence": "additional"
+    },
+    {
+     "given": "Zhenhua",
+     "family": "Zeng",
+     "sequence": "additional"
+    },
+    {
+     "given": "Karsten W",
+     "family": "Jacobsen",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://iopscience.iop.org/article/10.1088/1361-648X/aa680e"
+    }
+   }
+  }
+ },
+ "10.1016/j.cpc.2014.01.018": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "H5MD: A structured, efficient, and portable file format for molecular data"
+   ],
+   "container-title": [
+    "Computer Physics Communications"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "185",
+   "issue": "6",
+   "page": "1546-1553",
+   "DOI": "10.1016/j.cpc.2014.01.018",
+   "URL": "https://doi.org/10.1016/j.cpc.2014.01.018",
+   "issued": {
+    "date-parts": [
+     [
+      2014,
+      6
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2014,
+      6
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Pierre",
+     "family": "de Buyl",
+     "sequence": "first"
+    },
+    {
+     "given": "Peter H.",
+     "family": "Colberg",
+     "sequence": "additional"
+    },
+    {
+     "given": "Felix",
+     "family": "Höfling",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/S0010465514000447"
+    }
+   }
+  }
+ },
+ "10.1109/38.56302": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "NetCDF: an interface for scientific data access"
+   ],
+   "container-title": [
+    "IEEE Computer Graphics and Applications"
+   ],
+   "publisher": "Institute of Electrical and Electronics Engineers (IEEE)",
+   "volume": "10",
+   "issue": "4",
+   "page": "76-82",
+   "DOI": "10.1109/38.56302",
+   "URL": "https://doi.org/10.1109/38.56302",
+   "issued": {
+    "date-parts": [
+     [
+      1990,
+      7
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1990,
+      7
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "R.",
+     "family": "Rew",
+     "sequence": "first"
+    },
+    {
+     "given": "G.",
+     "family": "Davis",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "http://ieeexplore.ieee.org/document/56302/"
+    }
+   }
+  }
+ },
+ "10.1002/jcc.23495": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "An efficient and extensible format, library, and API for binary trajectory data from molecular simulations"
+   ],
+   "container-title": [
+    "Journal of Computational Chemistry"
+   ],
+   "publisher": "Wiley",
+   "volume": "35",
+   "issue": "3",
+   "page": "260-269",
+   "DOI": "10.1002/jcc.23495",
+   "URL": "https://doi.org/10.1002/jcc.23495",
+   "issued": {
+    "date-parts": [
+     [
+      2013,
+      11,
+      20
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2014,
+      1,
+      30
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2013,
+      11,
+      20
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Magnus",
+     "family": "Lundborg",
+     "sequence": "first"
+    },
+    {
+     "given": "Rossen",
+     "family": "Apostolov",
+     "sequence": "additional"
+    },
+    {
+     "given": "Daniel",
+     "family": "Spångberg",
+     "sequence": "additional"
+    },
+    {
+     "given": "Anders",
+     "family": "Gärdenäs",
+     "sequence": "additional"
+    },
+    {
+     "given": "David",
+     "family": "van der Spoel",
+     "sequence": "additional"
+    },
+    {
+     "given": "Erik",
+     "family": "Lindahl",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://onlinelibrary.wiley.com/doi/10.1002/jcc.23495"
+    }
+   }
+  }
+ },
+ "10.1016/j.cpc.2021.108171": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "LAMMPS - a flexible simulation tool for particle-based materials modeling at the atomic, meso, and continuum scales"
+   ],
+   "container-title": [
+    "Computer Physics Communications"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "271",
+   "page": "108171",
+   "article-number": "108171",
+   "DOI": "10.1016/j.cpc.2021.108171",
+   "URL": "https://doi.org/10.1016/j.cpc.2021.108171",
+   "issued": {
+    "date-parts": [
+     [
+      2022,
+      2
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2022,
+      2
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Aidan P.",
+     "family": "Thompson",
+     "sequence": "first"
+    },
+    {
+     "given": "H. Metin",
+     "family": "Aktulga",
+     "sequence": "additional"
+    },
+    {
+     "given": "Richard",
+     "family": "Berger",
+     "sequence": "additional"
+    },
+    {
+     "given": "Dan S.",
+     "family": "Bolintineanu",
+     "sequence": "additional"
+    },
+    {
+     "given": "W. Michael",
+     "family": "Brown",
+     "sequence": "additional"
+    },
+    {
+     "given": "Paul S.",
+     "family": "Crozier",
+     "sequence": "additional"
+    },
+    {
+     "given": "Pieter J.",
+     "family": "in 't Veld",
+     "sequence": "additional"
+    },
+    {
+     "given": "Axel",
+     "family": "Kohlmeyer",
+     "sequence": "additional"
+    },
+    {
+     "given": "Stan G.",
+     "family": "Moore",
+     "sequence": "additional"
+    },
+    {
+     "given": "Trung Dac",
+     "family": "Nguyen",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ray",
+     "family": "Shan",
+     "sequence": "additional"
+    },
+    {
+     "given": "Mark J.",
+     "family": "Stevens",
+     "sequence": "additional"
+    },
+    {
+     "given": "Julien",
+     "family": "Tranchida",
+     "sequence": "additional"
+    },
+    {
+     "given": "Christian",
+     "family": "Trott",
+     "sequence": "additional"
+    },
+    {
+     "given": "Steven J.",
+     "family": "Plimpton",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/S0010465521002836"
+    }
+   }
+  }
+ },
+ "10.1002/jcc.21787": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "MDAnalysis: A toolkit for the analysis of molecular dynamics simulations"
+   ],
+   "container-title": [
+    "Journal of Computational Chemistry"
+   ],
+   "publisher": "Wiley",
+   "volume": "32",
+   "issue": "10",
+   "page": "2319-2327",
+   "DOI": "10.1002/jcc.21787",
+   "URL": "https://doi.org/10.1002/jcc.21787",
+   "issued": {
+    "date-parts": [
+     [
+      2011,
+      4,
+      15
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2011,
+      7,
+      30
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2011,
+      4,
+      15
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Naveen",
+     "family": "Michaud‐Agrawal",
+     "sequence": "first"
+    },
+    {
+     "given": "Elizabeth J.",
+     "family": "Denning",
+     "sequence": "additional"
+    },
+    {
+     "given": "Thomas B.",
+     "family": "Woolf",
+     "sequence": "additional"
+    },
+    {
+     "given": "Oliver",
+     "family": "Beckstein",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://onlinelibrary.wiley.com/doi/10.1002/jcc.21787"
+    }
+   }
+  }
+ },
+ "10.25080/majora-629e541a-00e": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "MDAnalysis: A Python Package for the Rapid Analysis of Molecular Dynamics Simulations"
+   ],
+   "container-title": [
+    "Proceedings of the Python in Science Conference",
+    "Proceedings of the 15th Python in Science Conference"
+   ],
+   "publisher": "SciPy",
+   "page": "98-105",
+   "DOI": "10.25080/majora-629e541a-00e",
+   "URL": "https://doi.org/10.25080/majora-629e541a-00e",
+   "issued": {
+    "date-parts": [
+     [
+      2016
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2016
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Richard",
+     "family": "Gowers",
+     "sequence": "first"
+    },
+    {
+     "given": "Max",
+     "family": "Linke",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jonathan",
+     "family": "Barnoud",
+     "sequence": "additional"
+    },
+    {
+     "given": "Tyler",
+     "family": "Reddy",
+     "sequence": "additional"
+    },
+    {
+     "given": "Manuel",
+     "family": "Melo",
+     "sequence": "additional"
+    },
+    {
+     "given": "Sean",
+     "family": "Seyler",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jan",
+     "family": "Domański",
+     "sequence": "additional"
+    },
+    {
+     "given": "David",
+     "family": "Dotson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Sébastien",
+     "family": "Buchoux",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ian",
+     "family": "Kenney",
+     "sequence": "additional"
+    },
+    {
+     "given": "Oliver",
+     "family": "Beckstein",
+     "sequence": "additional"
+    }
+   ],
+   "event": {
+    "name": "Python in Science Conference",
+    "acronym": "SciPy"
+   },
+   "resource": {
+    "primary": {
+     "URL": "https://doi.curvenote.com/10.25080/Majora-629e541a-00e"
+    }
+   }
+  }
+ },
+ "10.5281/zenodo.1202207": {
+  "datacite": {
+   "doi": "10.5281/zenodo.1202207",
+   "types": {
+    "ris": "COMP",
+    "bibtex": "misc",
+    "citeproc": "article",
+    "schemaOrg": "SoftwareSourceCode",
+    "resourceTypeGeneral": "Software"
+   },
+   "titles": [
+    {
+     "title": "chemfiles/chemfiles: Version 0.10.4"
+    }
+   ],
+   "creators": [
+    {
+     "name": "Fraux, Guillaume",
+     "givenName": "Guillaume",
+     "familyName": "Fraux",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Kimms, Len",
+     "givenName": "Len",
+     "familyName": "Kimms",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Fine, Jonathan",
+     "givenName": "Jonathan",
+     "familyName": "Fine",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Barletta, German P.",
+     "givenName": "German P.",
+     "familyName": "Barletta",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Dimura, Mykola",
+     "givenName": "Mykola",
+     "familyName": "Dimura",
+     "nameType": "Personal"
+    },
+    {
+     "name": "FX Coudert"
+    },
+    {
+     "name": "Pelsa"
+    },
+    {
+     "name": "Levesque, Maximilien",
+     "givenName": "Maximilien",
+     "familyName": "Levesque",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Shoubhik Maiti"
+    },
+    {
+     "name": "Guionniere, Simon",
+     "givenName": "Simon",
+     "familyName": "Guionniere",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Jmintser"
+    }
+   ],
+   "publicationYear": 2023,
+   "version": "0.10.4",
+   "publisher": "Zenodo",
+   "relatedIdentifiers": [
+    {
+     "relationType": "HasVersion",
+     "relatedIdentifier": "10.5281/zenodo.1202208"
+    },
+    {
+     "relationType": "HasVersion",
+     "relatedIdentifier": "10.5281/zenodo.3490303"
+    },
+    {
+     "relationType": "HasVersion",
+     "relatedIdentifier": "10.5281/zenodo.3490304"
+    }
+   ]
+  }
+ },
+ "10.1145/93542.93557": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "How to read floating point numbers accurately"
+   ],
+   "container-title": [
+    "Proceedings of the ACM SIGPLAN 1990 conference on Programming language design and implementation  - PLDI '90"
+   ],
+   "publisher": "ACM Press",
+   "page": "92-101",
+   "DOI": "10.1145/93542.93557",
+   "URL": "https://doi.org/10.1145/93542.93557",
+   "issued": {
+    "date-parts": [
+     [
+      1990
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1990
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "William D.",
+     "family": "Clinger",
+     "sequence": "first"
+    }
+   ],
+   "event": {
+    "name": "the ACM SIGPLAN 1990 conference",
+    "acronym": "PLDI '90"
+   },
+   "resource": {
+    "primary": {
+     "URL": "http://portal.acm.org/citation.cfm?doid=93542.93557"
+    }
+   }
+  }
+ },
+ "10.1145/93542.93559": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "How to print floating-point numbers accurately"
+   ],
+   "container-title": [
+    "Proceedings of the ACM SIGPLAN 1990 conference on Programming language design and implementation  - PLDI '90"
+   ],
+   "publisher": "ACM Press",
+   "page": "112-126",
+   "DOI": "10.1145/93542.93559",
+   "URL": "https://doi.org/10.1145/93542.93559",
+   "issued": {
+    "date-parts": [
+     [
+      1990
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1990
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Guy L.",
+     "family": "Steele",
+     "sequence": "first"
+    },
+    {
+     "given": "Jon L.",
+     "family": "White",
+     "sequence": "additional"
+    }
+   ],
+   "event": {
+    "name": "the ACM SIGPLAN 1990 conference",
+    "acronym": "PLDI '90"
+   },
+   "resource": {
+    "primary": {
+     "URL": "http://portal.acm.org/citation.cfm?doid=93542.93559"
+    }
+   }
+  }
+ },
+ "10.1002/spe.2984": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Number parsing at a gigabyte per second"
+   ],
+   "container-title": [
+    "Software: Practice and Experience"
+   ],
+   "publisher": "Wiley",
+   "volume": "51",
+   "issue": "8",
+   "page": "1700-1727",
+   "DOI": "10.1002/spe.2984",
+   "URL": "https://doi.org/10.1002/spe.2984",
+   "issued": {
+    "date-parts": [
+     [
+      2021,
+      5,
+      11
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2021,
+      8
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2021,
+      5,
+      11
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Daniel",
+     "family": "Lemire",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://onlinelibrary.wiley.com/doi/10.1002/spe.2984"
+    }
+   }
+  }
+ },
+ "10.1063/1.2841941": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Optimization methods for finding minimum energy paths"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "128",
+   "issue": "13",
+   "article-number": "134106",
+   "DOI": "10.1063/1.2841941",
+   "URL": "https://doi.org/10.1063/1.2841941",
+   "issued": {
+    "date-parts": [
+     [
+      2008,
+      4,
+      2
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2008,
+      4,
+      7
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2008,
+      4,
+      2
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Daniel",
+     "family": "Sheppard",
+     "sequence": "first"
+    },
+    {
+     "given": "Rye",
+     "family": "Terrell",
+     "sequence": "additional"
+    },
+    {
+     "given": "Graeme",
+     "family": "Henkelman",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/128/13/134106/977389/Optimization-methods-for-finding-minimum-energy"
+    }
+   }
+  }
+ },
+ "10.1021/acs.jcim.0c00031": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "d-SEAMS: Deferred Structural Elucidation Analysis for Molecular Simulations"
+   ],
+   "container-title": [
+    "Journal of Chemical Information and Modeling"
+   ],
+   "publisher": "American Chemical Society (ACS)",
+   "volume": "60",
+   "issue": "4",
+   "page": "2169-2177",
+   "DOI": "10.1021/acs.jcim.0c00031",
+   "URL": "https://doi.org/10.1021/acs.jcim.0c00031",
+   "issued": {
+    "date-parts": [
+     [
+      2020,
+      3,
+      20
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2020,
+      4,
+      27
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2020,
+      3,
+      20
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Rohit",
+     "family": "Goswami",
+     "sequence": "first"
+    },
+    {
+     "given": "Amrita",
+     "family": "Goswami",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jayant K.",
+     "family": "Singh",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.acs.org/doi/10.1021/acs.jcim.0c00031"
+    }
+   }
+  }
+ },
+ "10.5281/zenodo.18529495": {
+  "datacite": {
+   "doi": "10.5281/zenodo.18529495",
+   "types": {
+    "ris": "COMP",
+    "bibtex": "misc",
+    "citeproc": "article",
+    "schemaOrg": "SoftwareSourceCode",
+    "resourceType": "",
+    "resourceTypeGeneral": "Software"
+   },
+   "titles": [
+    {
+     "title": "TheochemUI/eOn: v3.6.0"
+    }
+   ],
+   "creators": [
+    {
+     "name": "Rohit Goswami",
+     "familyName": "Rohit Goswami",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Sam Chill",
+     "familyName": "Sam Chill",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Rye Terrell",
+     "familyName": "Rye Terrell",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Graeme Henkelman",
+     "familyName": "Graeme Henkelman",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Matthew Welborn",
+     "familyName": "Matthew Welborn",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Liang Zhang",
+     "familyName": "Liang Zhang",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Andreas Pedersen",
+     "familyName": "Andreas Pedersen",
+     "nameType": "Personal"
+    },
+    {
+     "name": "t-brink",
+     "familyName": "t-brink",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Erik Edelmann",
+     "familyName": "Erik Edelmann",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Jean Claude",
+     "familyName": "Jean Claude",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Alejandro",
+     "familyName": "Alejandro",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Sung Hoon Jung",
+     "familyName": "Sung Hoon Jung",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Seyed Alireza Ghasemi",
+     "familyName": "Seyed Alireza Ghasemi",
+     "nameType": "Personal"
+    },
+    {
+     "name": "chemist29",
+     "familyName": "chemist29",
+     "nameType": "Personal"
+    },
+    {
+     "name": "satishskamath",
+     "familyName": "satishskamath",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Maxim",
+     "familyName": "Maxim",
+     "nameType": "Personal"
+    },
+    {
+     "name": "Tobias Dijkhuis",
+     "familyName": "Tobias Dijkhuis",
+     "nameType": "Personal"
+    },
+    {
+     "name": "via9a",
+     "familyName": "via9a",
+     "nameType": "Personal"
+    }
+   ],
+   "publicationYear": 2026,
+   "version": "v3.6.0",
+   "publisher": "Zenodo",
+   "relatedIdentifiers": [
+    {
+     "relationType": "HasVersion",
+     "relatedIdentifier": "10.5281/zenodo.22770480"
+    },
+    {
+     "relationType": "HasVersion",
+     "relatedIdentifier": "10.5281/zenodo.18908469"
+    },
+    {
+     "relationType": "HasVersion",
+     "relatedIdentifier": "10.5281/zenodo.21422269"
+    }
+   ]
+  }
+ },
+ "10.48550/arxiv.2510.21368": {
+  "datacite": {
+   "doi": "10.48550/arxiv.2510.21368",
+   "types": {
+    "ris": "GEN",
+    "bibtex": "misc",
+    "citeproc": "article",
+    "schemaOrg": "CreativeWork",
+    "resourceType": "Article",
+    "resourceTypeGeneral": "Preprint"
+   },
+   "titles": [
+    {
+     "title": "Efficient Exploration of Chemical Kinetics"
+    }
+   ],
+   "creators": [
+    {
+     "name": "Goswami, Rohit",
+     "givenName": "Rohit",
+     "familyName": "Goswami",
+     "nameType": "Personal"
+    }
+   ],
+   "publicationYear": 2025,
+   "version": "2",
+   "publisher": "arXiv",
+   "relatedIdentifiers": []
+  }
+ },
+ "10.1063/5.0304911": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "<tt>metatensor</tt>\n                    and\n                    <tt>metatomic</tt>\n                    : Foundational libraries for interoperable atomistic machine learning"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "164",
+   "issue": "6",
+   "article-number": "064113",
+   "DOI": "10.1063/5.0304911",
+   "URL": "https://doi.org/10.1063/5.0304911",
+   "issued": {
+    "date-parts": [
+     [
+      2026,
+      2,
+      11
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2026,
+      2,
+      14
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2026,
+      2,
+      11
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Filippo",
+     "family": "Bigi",
+     "sequence": "first"
+    },
+    {
+     "given": "Joseph W.",
+     "family": "Abbott",
+     "sequence": "additional"
+    },
+    {
+     "given": "Philip",
+     "family": "Loche",
+     "sequence": "additional"
+    },
+    {
+     "given": "Arslan",
+     "family": "Mazitov",
+     "sequence": "additional"
+    },
+    {
+     "given": "Davide",
+     "family": "Tisi",
+     "sequence": "additional"
+    },
+    {
+     "given": "Marcel F.",
+     "family": "Langer",
+     "sequence": "additional"
+    },
+    {
+     "given": "Alexander",
+     "family": "Goscinski",
+     "sequence": "additional"
+    },
+    {
+     "given": "Paolo",
+     "family": "Pegolo",
+     "sequence": "additional"
+    },
+    {
+     "given": "Sanggyu",
+     "family": "Chong",
+     "sequence": "additional"
+    },
+    {
+     "given": "Rohit",
+     "family": "Goswami",
+     "sequence": "additional"
+    },
+    {
+     "given": "Pol",
+     "family": "Febrer",
+     "sequence": "additional"
+    },
+    {
+     "given": "Sofiia",
+     "family": "Chorna",
+     "sequence": "additional"
+    },
+    {
+     "given": "Matthias",
+     "family": "Kellner",
+     "sequence": "additional"
+    },
+    {
+     "given": "Michele",
+     "family": "Ceriotti",
+     "sequence": "additional"
+    },
+    {
+     "given": "Guillaume",
+     "family": "Fraux",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/164/6/064113/3379260/metatensor-and-metatomic-Foundational-libraries"
+    }
+   }
+  }
+ },
+ "10.1038/s41467-025-65662-7": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "PET-MAD as a lightweight universal interatomic potential for advanced materials modeling"
+   ],
+   "container-title": [
+    "Nature Communications"
+   ],
+   "publisher": "Springer Science and Business Media LLC",
+   "volume": "16",
+   "issue": "1",
+   "article-number": "10653",
+   "DOI": "10.1038/s41467-025-65662-7",
+   "URL": "https://doi.org/10.1038/s41467-025-65662-7",
+   "issued": {
+    "date-parts": [
+     [
+      2025,
+      11,
+      27
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2025,
+      11,
+      27
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Arslan",
+     "family": "Mazitov",
+     "sequence": "first"
+    },
+    {
+     "given": "Filippo",
+     "family": "Bigi",
+     "sequence": "additional"
+    },
+    {
+     "given": "Matthias",
+     "family": "Kellner",
+     "sequence": "additional"
+    },
+    {
+     "given": "Paolo",
+     "family": "Pegolo",
+     "sequence": "additional"
+    },
+    {
+     "given": "Davide",
+     "family": "Tisi",
+     "sequence": "additional"
+    },
+    {
+     "given": "Guillaume",
+     "family": "Fraux",
+     "sequence": "additional"
+    },
+    {
+     "given": "Sergey",
+     "family": "Pozdnyakov",
+     "sequence": "additional"
+    },
+    {
+     "given": "Philip",
+     "family": "Loche",
+     "sequence": "additional"
+    },
+    {
+     "given": "Michele",
+     "family": "Ceriotti",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://www.nature.com/articles/s41467-025-65662-7"
+    }
+   }
+  }
+ },
+ "10.1063/1.1749604": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "The Activated Complex in Chemical Reactions"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "3",
+   "issue": "2",
+   "page": "107-115",
+   "DOI": "10.1063/1.1749604",
+   "URL": "https://doi.org/10.1063/1.1749604",
+   "issued": {
+    "date-parts": [
+     [
+      1935,
+      2,
+      1
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1935,
+      2,
+      1
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Henry",
+     "family": "Eyring",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/3/2/107/203352/The-Activated-Complex-in-Chemical-Reactions"
+    }
+   }
+  }
+ },
+ "10.1063/1.1323224": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Improved tangent estimate in the nudged elastic band method for finding minimum energy paths and saddle points"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "113",
+   "issue": "22",
+   "page": "9978-9985",
+   "DOI": "10.1063/1.1323224",
+   "URL": "https://doi.org/10.1063/1.1323224",
+   "issued": {
+    "date-parts": [
+     [
+      2000,
+      12,
+      8
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2000,
+      12,
+      8
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Graeme",
+     "family": "Henkelman",
+     "sequence": "first"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/113/22/9978/184858/Improved-tangent-estimate-in-the-nudged-elastic"
+    }
+   }
+  }
+ },
+ "10.1021/acs.jctc.1c00462": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Nudged Elastic Band Method for Molecular Reactions Using Energy-Weighted Springs Combined with Eigenvector Following"
+   ],
+   "container-title": [
+    "Journal of Chemical Theory and Computation"
+   ],
+   "publisher": "American Chemical Society (ACS)",
+   "volume": "17",
+   "issue": "8",
+   "page": "4929-4945",
+   "DOI": "10.1021/acs.jctc.1c00462",
+   "URL": "https://doi.org/10.1021/acs.jctc.1c00462",
+   "issued": {
+    "date-parts": [
+     [
+      2021,
+      7,
+      18
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2021,
+      8,
+      10
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2021,
+      7,
+      18
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Vilhjálmur",
+     "family": "Ásgeirsson",
+     "sequence": "first"
+    },
+    {
+     "given": "Benedikt Orri",
+     "family": "Birgisson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ragnar",
+     "family": "Bjornsson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ute",
+     "family": "Becker",
+     "sequence": "additional"
+    },
+    {
+     "given": "Frank",
+     "family": "Neese",
+     "sequence": "additional"
+    },
+    {
+     "given": "Christoph",
+     "family": "Riplinger",
+     "sequence": "additional"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.acs.org/doi/10.1021/acs.jctc.1c00462"
+    }
+   }
+  }
+ },
+ "10.1063/1.4878664": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Improved initial guess for minimum energy path calculations"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "140",
+   "issue": "21",
+   "article-number": "214106",
+   "DOI": "10.1063/1.4878664",
+   "URL": "https://doi.org/10.1063/1.4878664",
+   "issued": {
+    "date-parts": [
+     [
+      2014,
+      6,
+      4
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2014,
+      6,
+      7
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2014,
+      6,
+      4
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Søren",
+     "family": "Smidstrup",
+     "sequence": "first"
+    },
+    {
+     "given": "Andreas",
+     "family": "Pedersen",
+     "sequence": "additional"
+    },
+    {
+     "given": "Kurt",
+     "family": "Stokbro",
+     "sequence": "additional"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/140/21/214106/566679/Improved-initial-guess-for-minimum-energy-path"
+    }
+   }
+  }
+ },
+ "10.1103/physrevb.66.052301": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "String method for the study of rare events"
+   ],
+   "container-title": [
+    "Physical Review B"
+   ],
+   "publisher": "American Physical Society (APS)",
+   "volume": "66",
+   "issue": "5",
+   "article-number": "052301",
+   "DOI": "10.1103/physrevb.66.052301",
+   "URL": "https://doi.org/10.1103/physrevb.66.052301",
+   "issued": {
+    "date-parts": [
+     [
+      2002,
+      8,
+      12
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2002,
+      8,
+      12
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Weinan",
+     "family": "E",
+     "sequence": "first"
+    },
+    {
+     "given": "Weiqing",
+     "family": "Ren",
+     "sequence": "additional"
+    },
+    {
+     "given": "Eric",
+     "family": "Vanden-Eijnden",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://link.aps.org/doi/10.1103/PhysRevB.66.052301"
+    }
+   }
+  }
+ },
+ "10.1063/1.1691018": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "A growing string method for determining transition states: Comparison to the nudged elastic band and string methods"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "120",
+   "issue": "17",
+   "page": "7877-7886",
+   "DOI": "10.1063/1.1691018",
+   "URL": "https://doi.org/10.1063/1.1691018",
+   "issued": {
+    "date-parts": [
+     [
+      2004,
+      5,
+      1
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2004,
+      5,
+      1
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Baron",
+     "family": "Peters",
+     "sequence": "first"
+    },
+    {
+     "given": "Andreas",
+     "family": "Heyden",
+     "sequence": "additional"
+    },
+    {
+     "given": "Alexis T.",
+     "family": "Bell",
+     "sequence": "additional"
+    },
+    {
+     "given": "Arup",
+     "family": "Chakraborty",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/120/17/7877/534771/A-growing-string-method-for-determining-transition"
+    }
+   }
+  }
+ },
+ "10.1063/1.1809574": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Comparison of methods for finding saddle points without knowledge of the final states"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "121",
+   "issue": "20",
+   "page": "9776-9792",
+   "DOI": "10.1063/1.1809574",
+   "URL": "https://doi.org/10.1063/1.1809574",
+   "issued": {
+    "date-parts": [
+     [
+      2004,
+      11,
+      22
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2004,
+      11,
+      22
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "R. A.",
+     "family": "Olsen",
+     "sequence": "first"
+    },
+    {
+     "given": "G. J.",
+     "family": "Kroes",
+     "sequence": "additional"
+    },
+    {
+     "given": "G.",
+     "family": "Henkelman",
+     "sequence": "additional"
+    },
+    {
+     "given": "A.",
+     "family": "Arnaldsson",
+     "sequence": "additional"
+    },
+    {
+     "given": "H.",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/121/20/9776/532635/Comparison-of-methods-for-finding-saddle-points"
+    }
+   }
+  }
+ },
+ "10.1063/1.2104507": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Efficient methods for finding transition states in chemical reactions: Comparison of improved dimer method and partitioned rational function optimization method"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "123",
+   "issue": "22",
+   "article-number": "224101",
+   "DOI": "10.1063/1.2104507",
+   "URL": "https://doi.org/10.1063/1.2104507",
+   "issued": {
+    "date-parts": [
+     [
+      2005,
+      12,
+      8
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2005,
+      12,
+      8
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2005,
+      12,
+      12
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Andreas",
+     "family": "Heyden",
+     "sequence": "first"
+    },
+    {
+     "given": "Alexis T.",
+     "family": "Bell",
+     "sequence": "additional"
+    },
+    {
+     "given": "Frerich J.",
+     "family": "Keil",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/123/22/224101/776452/Efficient-methods-for-finding-transition-states-in"
+    }
+   }
+  }
+ },
+ "10.1063/1.2815812": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Superlinearly converging dimer method for transition state search"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "128",
+   "issue": "1",
+   "article-number": "014106",
+   "DOI": "10.1063/1.2815812",
+   "URL": "https://doi.org/10.1063/1.2815812",
+   "issued": {
+    "date-parts": [
+     [
+      2008,
+      1,
+      7
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2008,
+      1,
+      7
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2008,
+      1,
+      7
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Johannes",
+     "family": "Kästner",
+     "sequence": "first"
+    },
+    {
+     "given": "Paul",
+     "family": "Sherwood",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/128/1/014106/928095/Superlinearly-converging-dimer-method-for"
+    }
+   }
+  }
+ },
+ "10.1103/physrevlett.78.3908": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Hyperdynamics: Accelerated Molecular Dynamics of Infrequent Events"
+   ],
+   "container-title": [
+    "Physical Review Letters"
+   ],
+   "publisher": "American Physical Society (APS)",
+   "volume": "78",
+   "issue": "20",
+   "page": "3908-3911",
+   "DOI": "10.1103/physrevlett.78.3908",
+   "URL": "https://doi.org/10.1103/physrevlett.78.3908",
+   "issued": {
+    "date-parts": [
+     [
+      1997,
+      5,
+      19
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      1997,
+      5,
+      19
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Arthur F.",
+     "family": "Voter",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://link.aps.org/doi/10.1103/PhysRevLett.78.3908"
+    }
+   }
+  }
+ },
+ "10.1146/annurev.matsci.32.112601.141541": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Extending the Time Scale in Atomistic Simulation of Materials"
+   ],
+   "container-title": [
+    "Annual Review of Materials Research"
+   ],
+   "publisher": "Annual Reviews",
+   "volume": "32",
+   "issue": "1",
+   "page": "321-346",
+   "DOI": "10.1146/annurev.matsci.32.112601.141541",
+   "URL": "https://doi.org/10.1146/annurev.matsci.32.112601.141541",
+   "issued": {
+    "date-parts": [
+     [
+      2002,
+      8
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2002,
+      8
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Arthur F.",
+     "family": "Voter",
+     "sequence": "first"
+    },
+    {
+     "given": "Francesco",
+     "family": "Montalenti",
+     "sequence": "additional"
+    },
+    {
+     "given": "Timothy C.",
+     "family": "Germann",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://www.annualreviews.org/doi/10.1146/annurev.matsci.32.112601.141541"
+    }
+   }
+  }
+ },
+ "10.1007/978-1-4020-5295-8_1": {
+  "crossref": {
+   "type": "book-chapter",
+   "title": [
+    "INTRODUCTION TO THE KINETIC MONTE CARLO METHOD"
+   ],
+   "container-title": [
+    "NATO Science Series",
+    "Radiation Effects in Solids"
+   ],
+   "publisher": "Springer Netherlands",
+   "page": "1-23",
+   "DOI": "10.1007/978-1-4020-5295-8_1",
+   "URL": "https://doi.org/10.1007/978-1-4020-5295-8_1",
+   "issued": {
+    "date-parts": [
+     [
+      null
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Arthur F.",
+     "family": "Voter",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "http://link.springer.com/10.1007/978-1-4020-5295-8_1"
+    }
+   }
+  }
+ },
+ "10.1016/j.matcom.2009.02.010": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Distributed implementation of the adaptive kinetic Monte Carlo method"
+   ],
+   "container-title": [
+    "Mathematics and Computers in Simulation"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "80",
+   "issue": "7",
+   "page": "1487-1498",
+   "DOI": "10.1016/j.matcom.2009.02.010",
+   "URL": "https://doi.org/10.1016/j.matcom.2009.02.010",
+   "issued": {
+    "date-parts": [
+     [
+      2010,
+      3
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2010,
+      3
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Andreas",
+     "family": "Pedersen",
+     "sequence": "first"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/S0378475409000500"
+    }
+   }
+  }
+ },
+ "10.1146/annurev-physchem-050317-021219": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Exploring Energy Landscapes"
+   ],
+   "container-title": [
+    "Annual Review of Physical Chemistry"
+   ],
+   "publisher": "Annual Reviews",
+   "volume": "69",
+   "issue": "1",
+   "page": "401-425",
+   "DOI": "10.1146/annurev-physchem-050317-021219",
+   "URL": "https://doi.org/10.1146/annurev-physchem-050317-021219",
+   "issued": {
+    "date-parts": [
+     [
+      2018,
+      4,
+      20
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2018,
+      4,
+      20
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "David J.",
+     "family": "Wales",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://www.annualreviews.org/doi/10.1146/annurev-physchem-050317-021219"
+    }
+   }
+  }
+ },
+ "10.1021/acs.jctc.9b00692": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Nudged Elastic Band Calculations Accelerated with Gaussian Process Regression Based on Inverse Interatomic Distances"
+   ],
+   "container-title": [
+    "Journal of Chemical Theory and Computation"
+   ],
+   "publisher": "American Chemical Society (ACS)",
+   "volume": "15",
+   "issue": "12",
+   "page": "6738-6751",
+   "DOI": "10.1021/acs.jctc.9b00692",
+   "URL": "https://doi.org/10.1021/acs.jctc.9b00692",
+   "issued": {
+    "date-parts": [
+     [
+      2019,
+      10,
+      22
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2019,
+      12,
+      10
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2019,
+      10,
+      22
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Olli-Pekka",
+     "family": "Koistinen",
+     "sequence": "first"
+    },
+    {
+     "given": "Vilhjálmur",
+     "family": "Ásgeirsson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Aki",
+     "family": "Vehtari",
+     "sequence": "additional"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.acs.org/doi/10.1021/acs.jctc.9b00692"
+    }
+   }
+  }
+ },
+ "10.1021/acs.jctc.9b01038": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Minimum Mode Saddle Point Searches Using Gaussian Process Regression with Inverse-Distance Covariance Function"
+   ],
+   "container-title": [
+    "Journal of Chemical Theory and Computation"
+   ],
+   "publisher": "American Chemical Society (ACS)",
+   "volume": "16",
+   "issue": "1",
+   "page": "499-509",
+   "DOI": "10.1021/acs.jctc.9b01038",
+   "URL": "https://doi.org/10.1021/acs.jctc.9b01038",
+   "issued": {
+    "date-parts": [
+     [
+      2019,
+      12,
+      4
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2020,
+      1,
+      14
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2019,
+      12,
+      4
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Olli-Pekka",
+     "family": "Koistinen",
+     "sequence": "first"
+    },
+    {
+     "given": "Vilhjálmur",
+     "family": "Ásgeirsson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Aki",
+     "family": "Vehtari",
+     "sequence": "additional"
+    },
+    {
+     "given": "Hannes",
+     "family": "Jónsson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.acs.org/doi/10.1021/acs.jctc.9b01038"
+    }
+   }
+  }
+ },
+ "10.1063/1.4960708": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Acceleration of saddle-point searches with machine learning"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "145",
+   "issue": "7",
+   "article-number": "074106",
+   "DOI": "10.1063/1.4960708",
+   "URL": "https://doi.org/10.1063/1.4960708",
+   "issued": {
+    "date-parts": [
+     [
+      2016,
+      8,
+      16
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2016,
+      8,
+      21
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2016,
+      8,
+      16
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Andrew A.",
+     "family": "Peterson",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/145/7/074106/810392/Acceleration-of-saddle-point-searches-with-machine"
+    }
+   }
+  }
+ },
+ "10.1090/s0025-5718-1980-0572855-7": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Updating quasi-Newton matrices with limited storage"
+   ],
+   "container-title": [
+    "Mathematics of Computation"
+   ],
+   "publisher": "American Mathematical Society (AMS)",
+   "volume": "35",
+   "issue": "151",
+   "page": "773-782",
+   "DOI": "10.1090/s0025-5718-1980-0572855-7",
+   "URL": "https://doi.org/10.1090/s0025-5718-1980-0572855-7",
+   "issued": {
+    "date-parts": [
+     [
+      1980
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1980
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Jorge",
+     "family": "Nocedal",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://www.ams.org/mcom/1980-35-151/S0025-5718-1980-0572855-7/"
+    }
+   }
+  }
+ },
+ "10.1103/physrevlett.64.3143": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Surface self-diffusion on Pt(001) by an atomic exchange mechanism"
+   ],
+   "container-title": [
+    "Physical Review Letters"
+   ],
+   "publisher": "American Physical Society (APS)",
+   "volume": "64",
+   "issue": "26",
+   "page": "3143-3146",
+   "DOI": "10.1103/physrevlett.64.3143",
+   "URL": "https://doi.org/10.1103/physrevlett.64.3143",
+   "issued": {
+    "date-parts": [
+     [
+      1990,
+      6,
+      25
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      1990,
+      6,
+      25
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "G. L.",
+     "family": "Kellogg",
+     "sequence": "first"
+    },
+    {
+     "given": "Peter J.",
+     "family": "Feibelman",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://link.aps.org/doi/10.1103/PhysRevLett.64.3143"
+    }
+   }
+  }
+ },
+ "10.1063/1.1383586": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "<i>Ab initio</i> global potential, dipole, adiabatic, and relativistic correction surfaces for the HCN–HNC system"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "115",
+   "issue": "8",
+   "page": "3706-3718",
+   "DOI": "10.1063/1.1383586",
+   "URL": "https://doi.org/10.1063/1.1383586",
+   "issued": {
+    "date-parts": [
+     [
+      2001,
+      8,
+      22
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2001,
+      8,
+      22
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Tanja",
+     "family": "van Mourik",
+     "sequence": "first"
+    },
+    {
+     "given": "Gregory J.",
+     "family": "Harris",
+     "sequence": "additional"
+    },
+    {
+     "given": "Oleg L.",
+     "family": "Polyansky",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jonathan",
+     "family": "Tennyson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Attila G.",
+     "family": "Császár",
+     "sequence": "additional"
+    },
+    {
+     "given": "Peter J.",
+     "family": "Knowles",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/115/8/3706/463154/Ab-initio-global-potential-dipole-adiabatic-and"
+    }
+   }
+  }
+ },
+ "10.1021/acs.jcim.1c00567": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "IRA: A Shape Matching Approach for Recognition and Comparison of Generic Atomic Patterns"
+   ],
+   "container-title": [
+    "Journal of Chemical Information and Modeling"
+   ],
+   "publisher": "American Chemical Society (ACS)",
+   "volume": "61",
+   "issue": "11",
+   "page": "5446-5457",
+   "DOI": "10.1021/acs.jcim.1c00567",
+   "URL": "https://doi.org/10.1021/acs.jcim.1c00567",
+   "issued": {
+    "date-parts": [
+     [
+      2021,
+      10,
+      27
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2021,
+      11,
+      22
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2021,
+      10,
+      27
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Miha",
+     "family": "Gunde",
+     "sequence": "first"
+    },
+    {
+     "given": "Nicolas",
+     "family": "Salles",
+     "sequence": "additional"
+    },
+    {
+     "given": "Anne",
+     "family": "Hémeryck",
+     "sequence": "additional"
+    },
+    {
+     "given": "Layla",
+     "family": "Martin-Samos",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.acs.org/doi/10.1021/acs.jcim.1c00567"
+    }
+   }
+  }
+ },
+ "10.1107/s010876739101067x": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "The crystallographic information file (CIF): a new standard archive file for crystallography"
+   ],
+   "container-title": [
+    "Acta Crystallographica Section A Foundations of Crystallography"
+   ],
+   "publisher": "International Union of Crystallography (IUCr)",
+   "volume": "47",
+   "issue": "6",
+   "page": "655-685",
+   "DOI": "10.1107/s010876739101067x",
+   "URL": "https://doi.org/10.1107/s010876739101067x",
+   "issued": {
+    "date-parts": [
+     [
+      1991,
+      11,
+      1
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1991,
+      11,
+      1
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "S. R.",
+     "family": "Hall",
+     "sequence": "first"
+    },
+    {
+     "given": "F. H.",
+     "family": "Allen",
+     "sequence": "additional"
+    },
+    {
+     "given": "I. D.",
+     "family": "Brown",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://journals.iucr.org/paper?S010876739101067X"
+    }
+   }
+  }
+ },
+ "10.1093/nar/28.1.235": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "The Protein Data Bank"
+   ],
+   "container-title": [
+    "Nucleic Acids Research"
+   ],
+   "publisher": "Oxford University Press (OUP)",
+   "volume": "28",
+   "issue": "1",
+   "page": "235-242",
+   "DOI": "10.1093/nar/28.1.235",
+   "URL": "https://doi.org/10.1093/nar/28.1.235",
+   "issued": {
+    "date-parts": [
+     [
+      2000,
+      1,
+      1
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2000,
+      1,
+      1
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "H. M.",
+     "family": "Berman",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://academic.oup.com/nar/article-lookup/doi/10.1093/nar/28.1.235"
+    }
+   }
+  }
+ },
+ "10.1145/1966895.1966900": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "An overview of the HDF5 technology suite and its applications"
+   ],
+   "container-title": [
+    "Proceedings of the EDBT/ICDT 2011 Workshop on Array Databases"
+   ],
+   "publisher": "ACM",
+   "page": "36-47",
+   "DOI": "10.1145/1966895.1966900",
+   "URL": "https://doi.org/10.1145/1966895.1966900",
+   "issued": {
+    "date-parts": [
+     [
+      2011,
+      3,
+      25
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2011,
+      3,
+      25
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2011,
+      3,
+      25
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Mike",
+     "family": "Folk",
+     "sequence": "first"
+    },
+    {
+     "given": "Gerd",
+     "family": "Heber",
+     "sequence": "additional"
+    },
+    {
+     "given": "Quincey",
+     "family": "Koziol",
+     "sequence": "additional"
+    },
+    {
+     "given": "Elena",
+     "family": "Pourmal",
+     "sequence": "additional"
+    },
+    {
+     "given": "Dana",
+     "family": "Robinson",
+     "sequence": "additional"
+    }
+   ],
+   "event": {
+    "name": "EDBT/ICDT '11: EDBT/ICDT '11 joint conference",
+    "acronym": "EDBT/ICDT '11"
+   },
+   "resource": {
+    "primary": {
+     "URL": "https://dl.acm.org/doi/10.1145/1966895.1966900"
+    }
+   }
+  }
+ },
+ "10.25080/majora-1b6fd038-005": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "MPI-parallel Molecular Dynamics Trajectory Analysis with the H5MD Format in the MDAnalysis Python Package"
+   ],
+   "container-title": [
+    "Proceedings of the Python in Science Conference",
+    "Proceedings of the 20th Python in Science Conference"
+   ],
+   "publisher": "SciPy",
+   "page": "40-48",
+   "DOI": "10.25080/majora-1b6fd038-005",
+   "URL": "https://doi.org/10.25080/majora-1b6fd038-005",
+   "issued": {
+    "date-parts": [
+     [
+      2021
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2021
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Edis",
+     "family": "Jakupovic",
+     "sequence": "first"
+    },
+    {
+     "given": "Oliver",
+     "family": "Beckstein",
+     "sequence": "additional"
+    }
+   ],
+   "event": {
+    "name": "Python in Science Conference",
+    "acronym": "SciPy"
+   },
+   "resource": {
+    "primary": {
+     "URL": "https://doi.curvenote.com/10.25080/majora-1b6fd038-005"
+    }
+   }
+  }
+ },
+ "10.1016/j.bpj.2015.08.015": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "MDTraj: A Modern Open Library for the Analysis of Molecular Dynamics Trajectories"
+   ],
+   "container-title": [
+    "Biophysical Journal"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "109",
+   "issue": "8",
+   "page": "1528-1532",
+   "DOI": "10.1016/j.bpj.2015.08.015",
+   "URL": "https://doi.org/10.1016/j.bpj.2015.08.015",
+   "issued": {
+    "date-parts": [
+     [
+      2015,
+      10
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2015,
+      10
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Robert T.",
+     "family": "McGibbon",
+     "sequence": "first"
+    },
+    {
+     "given": "Kyle A.",
+     "family": "Beauchamp",
+     "sequence": "additional"
+    },
+    {
+     "given": "Matthew P.",
+     "family": "Harrigan",
+     "sequence": "additional"
+    },
+    {
+     "given": "Christoph",
+     "family": "Klein",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jason M.",
+     "family": "Swails",
+     "sequence": "additional"
+    },
+    {
+     "given": "Carlos X.",
+     "family": "Hernández",
+     "sequence": "additional"
+    },
+    {
+     "given": "Christian R.",
+     "family": "Schwantes",
+     "sequence": "additional"
+    },
+    {
+     "given": "Lee-Ping",
+     "family": "Wang",
+     "sequence": "additional"
+    },
+    {
+     "given": "Thomas J.",
+     "family": "Lane",
+     "sequence": "additional"
+    },
+    {
+     "given": "Vijay S.",
+     "family": "Pande",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/S0006349515008267"
+    }
+   }
+  }
+ },
+ "10.1016/j.softx.2015.06.001": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "GROMACS: High performance molecular simulations through multi-level parallelism from laptops to supercomputers"
+   ],
+   "container-title": [
+    "SoftwareX"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "1-2",
+   "page": "19-25",
+   "DOI": "10.1016/j.softx.2015.06.001",
+   "URL": "https://doi.org/10.1016/j.softx.2015.06.001",
+   "issued": {
+    "date-parts": [
+     [
+      2015,
+      9
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2015,
+      9
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Mark James",
+     "family": "Abraham",
+     "sequence": "first"
+    },
+    {
+     "given": "Teemu",
+     "family": "Murtola",
+     "sequence": "additional"
+    },
+    {
+     "given": "Roland",
+     "family": "Schulz",
+     "sequence": "additional"
+    },
+    {
+     "given": "Szilárd",
+     "family": "Páll",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jeremy C.",
+     "family": "Smith",
+     "sequence": "additional"
+    },
+    {
+     "given": "Berk",
+     "family": "Hess",
+     "sequence": "additional"
+    },
+    {
+     "given": "Erik",
+     "family": "Lindahl",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/S2352711015000059"
+    }
+   }
+  }
+ },
+ "10.1016/j.commatsci.2012.10.028": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Python Materials Genomics (pymatgen): A robust, open-source python library for materials analysis"
+   ],
+   "container-title": [
+    "Computational Materials Science"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "68",
+   "page": "314-319",
+   "DOI": "10.1016/j.commatsci.2012.10.028",
+   "URL": "https://doi.org/10.1016/j.commatsci.2012.10.028",
+   "issued": {
+    "date-parts": [
+     [
+      2013,
+      2
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2013,
+      2
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Shyue Ping",
+     "family": "Ong",
+     "sequence": "first"
+    },
+    {
+     "given": "William Davidson",
+     "family": "Richards",
+     "sequence": "additional"
+    },
+    {
+     "given": "Anubhav",
+     "family": "Jain",
+     "sequence": "additional"
+    },
+    {
+     "given": "Geoffroy",
+     "family": "Hautier",
+     "sequence": "additional"
+    },
+    {
+     "given": "Michael",
+     "family": "Kocher",
+     "sequence": "additional"
+    },
+    {
+     "given": "Shreyas",
+     "family": "Cholia",
+     "sequence": "additional"
+    },
+    {
+     "given": "Dan",
+     "family": "Gunter",
+     "sequence": "additional"
+    },
+    {
+     "given": "Vincent L.",
+     "family": "Chevrier",
+     "sequence": "additional"
+    },
+    {
+     "given": "Kristin A.",
+     "family": "Persson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Gerbrand",
+     "family": "Ceder",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/S0927025612006295"
+    }
+   }
+  }
+ },
+ "10.1103/physrevb.54.11169": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Efficient iterative schemes for\n                    <i>ab initio</i>\n                    total-energy calculations using a plane-wave basis set"
+   ],
+   "container-title": [
+    "Physical Review B"
+   ],
+   "publisher": "American Physical Society (APS)",
+   "volume": "54",
+   "issue": "16",
+   "page": "11169-11186",
+   "DOI": "10.1103/physrevb.54.11169",
+   "URL": "https://doi.org/10.1103/physrevb.54.11169",
+   "issued": {
+    "date-parts": [
+     [
+      1996,
+      10,
+      15
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      1996,
+      10,
+      15
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "G.",
+     "family": "Kresse",
+     "sequence": "first"
+    },
+    {
+     "given": "J.",
+     "family": "Furthmüller",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://link.aps.org/doi/10.1103/PhysRevB.54.11169"
+    }
+   }
+  }
+ },
+ "10.1109/5992.998641": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "An object-oriented scripting interface to a legacy electronic structure code"
+   ],
+   "container-title": [
+    "Computing in Science &amp; Engineering"
+   ],
+   "publisher": "Institute of Electrical and Electronics Engineers (IEEE)",
+   "volume": "4",
+   "issue": "3",
+   "page": "56-66",
+   "DOI": "10.1109/5992.998641",
+   "URL": "https://doi.org/10.1109/5992.998641",
+   "issued": {
+    "date-parts": [
+     [
+      2002
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2002
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "S.R.",
+     "family": "Bahn",
+     "sequence": "first"
+    },
+    {
+     "given": "K.W.",
+     "family": "Jacobsen",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "http://ieeexplore.ieee.org/document/998641/"
+    }
+   }
+  }
+ },
+ "10.1038/s41597-021-00974-z": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "OPTIMADE, an API for exchanging materials data"
+   ],
+   "container-title": [
+    "Scientific Data"
+   ],
+   "publisher": "Springer Science and Business Media LLC",
+   "volume": "8",
+   "issue": "1",
+   "article-number": "217",
+   "DOI": "10.1038/s41597-021-00974-z",
+   "URL": "https://doi.org/10.1038/s41597-021-00974-z",
+   "issued": {
+    "date-parts": [
+     [
+      2021,
+      8,
+      12
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2021,
+      8,
+      12
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Casper W.",
+     "family": "Andersen",
+     "sequence": "first"
+    },
+    {
+     "given": "Rickard",
+     "family": "Armiento",
+     "sequence": "additional"
+    },
+    {
+     "given": "Evgeny",
+     "family": "Blokhin",
+     "sequence": "additional"
+    },
+    {
+     "given": "Gareth J.",
+     "family": "Conduit",
+     "sequence": "additional"
+    },
+    {
+     "given": "Shyam",
+     "family": "Dwaraknath",
+     "sequence": "additional"
+    },
+    {
+     "given": "Matthew L.",
+     "family": "Evans",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ádám",
+     "family": "Fekete",
+     "sequence": "additional"
+    },
+    {
+     "given": "Abhijith",
+     "family": "Gopakumar",
+     "sequence": "additional"
+    },
+    {
+     "given": "Saulius",
+     "family": "Gražulis",
+     "sequence": "additional"
+    },
+    {
+     "given": "Andrius",
+     "family": "Merkys",
+     "sequence": "additional"
+    },
+    {
+     "given": "Fawzi",
+     "family": "Mohamed",
+     "sequence": "additional"
+    },
+    {
+     "given": "Corey",
+     "family": "Oses",
+     "sequence": "additional"
+    },
+    {
+     "given": "Giovanni",
+     "family": "Pizzi",
+     "sequence": "additional"
+    },
+    {
+     "given": "Gian-Marco",
+     "family": "Rignanese",
+     "sequence": "additional"
+    },
+    {
+     "given": "Markus",
+     "family": "Scheidgen",
+     "sequence": "additional"
+    },
+    {
+     "given": "Leopold",
+     "family": "Talirz",
+     "sequence": "additional"
+    },
+    {
+     "given": "Cormac",
+     "family": "Toher",
+     "sequence": "additional"
+    },
+    {
+     "given": "Donald",
+     "family": "Winston",
+     "sequence": "additional"
+    },
+    {
+     "given": "Rossella",
+     "family": "Aversa",
+     "sequence": "additional"
+    },
+    {
+     "given": "Kamal",
+     "family": "Choudhary",
+     "sequence": "additional"
+    },
+    {
+     "given": "Pauline",
+     "family": "Colinet",
+     "sequence": "additional"
+    },
+    {
+     "given": "Stefano",
+     "family": "Curtarolo",
+     "sequence": "additional"
+    },
+    {
+     "given": "Davide",
+     "family": "Di Stefano",
+     "sequence": "additional"
+    },
+    {
+     "given": "Claudia",
+     "family": "Draxl",
+     "sequence": "additional"
+    },
+    {
+     "given": "Suleyman",
+     "family": "Er",
+     "sequence": "additional"
+    },
+    {
+     "given": "Marco",
+     "family": "Esters",
+     "sequence": "additional"
+    },
+    {
+     "given": "Marco",
+     "family": "Fornari",
+     "sequence": "additional"
+    },
+    {
+     "given": "Matteo",
+     "family": "Giantomassi",
+     "sequence": "additional"
+    },
+    {
+     "given": "Marco",
+     "family": "Govoni",
+     "sequence": "additional"
+    },
+    {
+     "given": "Geoffroy",
+     "family": "Hautier",
+     "sequence": "additional"
+    },
+    {
+     "given": "Vinay",
+     "family": "Hegde",
+     "sequence": "additional"
+    },
+    {
+     "given": "Matthew K.",
+     "family": "Horton",
+     "sequence": "additional"
+    },
+    {
+     "given": "Patrick",
+     "family": "Huck",
+     "sequence": "additional"
+    },
+    {
+     "given": "Georg",
+     "family": "Huhs",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jens",
+     "family": "Hummelshøj",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ankit",
+     "family": "Kariryaa",
+     "sequence": "additional"
+    },
+    {
+     "given": "Boris",
+     "family": "Kozinsky",
+     "sequence": "additional"
+    },
+    {
+     "given": "Snehal",
+     "family": "Kumbhar",
+     "sequence": "additional"
+    },
+    {
+     "given": "Mohan",
+     "family": "Liu",
+     "sequence": "additional"
+    },
+    {
+     "given": "Nicola",
+     "family": "Marzari",
+     "sequence": "additional"
+    },
+    {
+     "given": "Andrew J.",
+     "family": "Morris",
+     "sequence": "additional"
+    },
+    {
+     "given": "Arash A.",
+     "family": "Mostofi",
+     "sequence": "additional"
+    },
+    {
+     "given": "Kristin A.",
+     "family": "Persson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Guido",
+     "family": "Petretto",
+     "sequence": "additional"
+    },
+    {
+     "given": "Thomas",
+     "family": "Purcell",
+     "sequence": "additional"
+    },
+    {
+     "given": "Francesco",
+     "family": "Ricci",
+     "sequence": "additional"
+    },
+    {
+     "given": "Frisco",
+     "family": "Rose",
+     "sequence": "additional"
+    },
+    {
+     "given": "Matthias",
+     "family": "Scheffler",
+     "sequence": "additional"
+    },
+    {
+     "given": "Daniel",
+     "family": "Speckhard",
+     "sequence": "additional"
+    },
+    {
+     "given": "Martin",
+     "family": "Uhrin",
+     "sequence": "additional"
+    },
+    {
+     "given": "Antanas",
+     "family": "Vaitkus",
+     "sequence": "additional"
+    },
+    {
+     "given": "Pierre",
+     "family": "Villars",
+     "sequence": "additional"
+    },
+    {
+     "given": "David",
+     "family": "Waroquiers",
+     "sequence": "additional"
+    },
+    {
+     "given": "Chris",
+     "family": "Wolverton",
+     "sequence": "additional"
+    },
+    {
+     "given": "Michael",
+     "family": "Wu",
+     "sequence": "additional"
+    },
+    {
+     "given": "Xiaoyu",
+     "family": "Yang",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://www.nature.com/articles/s41597-021-00974-z"
+    }
+   }
+  }
+ },
+ "10.1088/2515-7639/ab13bb": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "The NOMAD laboratory: from data sharing to artificial intelligence"
+   ],
+   "container-title": [
+    "Journal of Physics: Materials"
+   ],
+   "publisher": "IOP Publishing",
+   "volume": "2",
+   "issue": "3",
+   "page": "036001",
+   "DOI": "10.1088/2515-7639/ab13bb",
+   "URL": "https://doi.org/10.1088/2515-7639/ab13bb",
+   "issued": {
+    "date-parts": [
+     [
+      2019,
+      5,
+      13
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2019,
+      7,
+      1
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2019,
+      5,
+      13
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Claudia",
+     "family": "Draxl",
+     "sequence": "first"
+    },
+    {
+     "given": "Matthias",
+     "family": "Scheffler",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://iopscience.iop.org/article/10.1088/2515-7639/ab13bb"
+    }
+   }
+  }
+ },
+ "10.1038/sdata.2016.18": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "The FAIR Guiding Principles for scientific data management and stewardship"
+   ],
+   "container-title": [
+    "Scientific Data"
+   ],
+   "publisher": "Springer Science and Business Media LLC",
+   "volume": "3",
+   "issue": "1",
+   "article-number": "160018",
+   "DOI": "10.1038/sdata.2016.18",
+   "URL": "https://doi.org/10.1038/sdata.2016.18",
+   "issued": {
+    "date-parts": [
+     [
+      2016,
+      3,
+      15
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2016,
+      3,
+      15
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Mark D.",
+     "family": "Wilkinson",
+     "sequence": "first"
+    },
+    {
+     "given": "Michel",
+     "family": "Dumontier",
+     "sequence": "additional"
+    },
+    {
+     "given": "IJsbrand Jan",
+     "family": "Aalbersberg",
+     "sequence": "additional"
+    },
+    {
+     "given": "Gabrielle",
+     "family": "Appleton",
+     "sequence": "additional"
+    },
+    {
+     "given": "Myles",
+     "family": "Axton",
+     "sequence": "additional"
+    },
+    {
+     "given": "Arie",
+     "family": "Baak",
+     "sequence": "additional"
+    },
+    {
+     "given": "Niklas",
+     "family": "Blomberg",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jan-Willem",
+     "family": "Boiten",
+     "sequence": "additional"
+    },
+    {
+     "given": "Luiz Bonino",
+     "family": "da Silva Santos",
+     "sequence": "additional"
+    },
+    {
+     "given": "Philip E.",
+     "family": "Bourne",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jildau",
+     "family": "Bouwman",
+     "sequence": "additional"
+    },
+    {
+     "given": "Anthony J.",
+     "family": "Brookes",
+     "sequence": "additional"
+    },
+    {
+     "given": "Tim",
+     "family": "Clark",
+     "sequence": "additional"
+    },
+    {
+     "given": "Mercè",
+     "family": "Crosas",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ingrid",
+     "family": "Dillo",
+     "sequence": "additional"
+    },
+    {
+     "given": "Olivier",
+     "family": "Dumon",
+     "sequence": "additional"
+    },
+    {
+     "given": "Scott",
+     "family": "Edmunds",
+     "sequence": "additional"
+    },
+    {
+     "given": "Chris T.",
+     "family": "Evelo",
+     "sequence": "additional"
+    },
+    {
+     "given": "Richard",
+     "family": "Finkers",
+     "sequence": "additional"
+    },
+    {
+     "given": "Alejandra",
+     "family": "Gonzalez-Beltran",
+     "sequence": "additional"
+    },
+    {
+     "given": "Alasdair J.G.",
+     "family": "Gray",
+     "sequence": "additional"
+    },
+    {
+     "given": "Paul",
+     "family": "Groth",
+     "sequence": "additional"
+    },
+    {
+     "given": "Carole",
+     "family": "Goble",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jeffrey S.",
+     "family": "Grethe",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jaap",
+     "family": "Heringa",
+     "sequence": "additional"
+    },
+    {
+     "given": "Peter A.C",
+     "family": "’t Hoen",
+     "sequence": "additional"
+    },
+    {
+     "given": "Rob",
+     "family": "Hooft",
+     "sequence": "additional"
+    },
+    {
+     "given": "Tobias",
+     "family": "Kuhn",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ruben",
+     "family": "Kok",
+     "sequence": "additional"
+    },
+    {
+     "given": "Joost",
+     "family": "Kok",
+     "sequence": "additional"
+    },
+    {
+     "given": "Scott J.",
+     "family": "Lusher",
+     "sequence": "additional"
+    },
+    {
+     "given": "Maryann E.",
+     "family": "Martone",
+     "sequence": "additional"
+    },
+    {
+     "given": "Albert",
+     "family": "Mons",
+     "sequence": "additional"
+    },
+    {
+     "given": "Abel L.",
+     "family": "Packer",
+     "sequence": "additional"
+    },
+    {
+     "given": "Bengt",
+     "family": "Persson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Philippe",
+     "family": "Rocca-Serra",
+     "sequence": "additional"
+    },
+    {
+     "given": "Marco",
+     "family": "Roos",
+     "sequence": "additional"
+    },
+    {
+     "given": "Rene",
+     "family": "van Schaik",
+     "sequence": "additional"
+    },
+    {
+     "given": "Susanna-Assunta",
+     "family": "Sansone",
+     "sequence": "additional"
+    },
+    {
+     "given": "Erik",
+     "family": "Schultes",
+     "sequence": "additional"
+    },
+    {
+     "given": "Thierry",
+     "family": "Sengstag",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ted",
+     "family": "Slater",
+     "sequence": "additional"
+    },
+    {
+     "given": "George",
+     "family": "Strawn",
+     "sequence": "additional"
+    },
+    {
+     "given": "Morris A.",
+     "family": "Swertz",
+     "sequence": "additional"
+    },
+    {
+     "given": "Mark",
+     "family": "Thompson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Johan",
+     "family": "van der Lei",
+     "sequence": "additional"
+    },
+    {
+     "given": "Erik",
+     "family": "van Mulligen",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jan",
+     "family": "Velterop",
+     "sequence": "additional"
+    },
+    {
+     "given": "Andra",
+     "family": "Waagmeester",
+     "sequence": "additional"
+    },
+    {
+     "given": "Peter",
+     "family": "Wittenburg",
+     "sequence": "additional"
+    },
+    {
+     "given": "Katherine",
+     "family": "Wolstencroft",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jun",
+     "family": "Zhao",
+     "sequence": "additional"
+    },
+    {
+     "given": "Barend",
+     "family": "Mons",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://www.nature.com/articles/sdata201618"
+    }
+   }
+  }
+ },
+ "10.17487/rfc8259": {
+  "crossref": {
+   "type": "report",
+   "title": [
+    "The JavaScript Object Notation (JSON) Data Interchange Format"
+   ],
+   "publisher": "RFC Editor",
+   "DOI": "10.17487/rfc8259",
+   "URL": "https://doi.org/10.17487/rfc8259",
+   "issued": {
+    "date-parts": [
+     [
+      2017,
+      12
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2017,
+      12
+     ]
+    ]
+   },
+   "editor": [
+    {
+     "given": "T.",
+     "family": "Bray",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://www.rfc-editor.org/info/rfc8259"
+    }
+   }
+  }
+ },
+ "10.17487/rfc1952": {
+  "crossref": {
+   "type": "report",
+   "title": [
+    "GZIP file format specification version 4.3"
+   ],
+   "publisher": "RFC Editor",
+   "DOI": "10.17487/rfc1952",
+   "URL": "https://doi.org/10.17487/rfc1952",
+   "issued": {
+    "date-parts": [
+     [
+      1996,
+      5
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      1996,
+      5
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "P.",
+     "family": "Deutsch",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://www.rfc-editor.org/info/rfc1952"
+    }
+   }
+  }
+ },
+ "10.17487/rfc8878": {
+  "crossref": {
+   "type": "report",
+   "title": [
+    "Zstandard Compression and the 'application/zstd' Media Type"
+   ],
+   "publisher": "RFC Editor",
+   "DOI": "10.17487/rfc8878",
+   "URL": "https://doi.org/10.17487/rfc8878",
+   "issued": {
+    "date-parts": [
+     [
+      2021,
+      2
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2021,
+      2
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Y.",
+     "family": "Collet",
+     "sequence": "first"
+    }
+   ],
+   "editor": [
+    {
+     "given": "M.",
+     "family": "Kucherawy",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://www.rfc-editor.org/info/rfc8878"
+    }
+   }
+  }
+ },
+ "10.1145/103162.103163": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "What every computer scientist should know about floating-point arithmetic"
+   ],
+   "container-title": [
+    "ACM Computing Surveys"
+   ],
+   "publisher": "Association for Computing Machinery (ACM)",
+   "volume": "23",
+   "issue": "1",
+   "page": "5-48",
+   "DOI": "10.1145/103162.103163",
+   "URL": "https://doi.org/10.1145/103162.103163",
+   "issued": {
+    "date-parts": [
+     [
+      1991,
+      3
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1991,
+      3
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      1991,
+      3
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "David",
+     "family": "Goldberg",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://dl.acm.org/doi/10.1145/103162.103163"
+    }
+   }
+  }
+ },
+ "10.1145/231379.231397": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "Printing floating-point numbers quickly and accurately"
+   ],
+   "container-title": [
+    "Proceedings of the ACM SIGPLAN 1996 conference on Programming language design and implementation"
+   ],
+   "publisher": "ACM",
+   "page": "108-116",
+   "DOI": "10.1145/231379.231397",
+   "URL": "https://doi.org/10.1145/231379.231397",
+   "issued": {
+    "date-parts": [
+     [
+      1996,
+      5
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1996,
+      5
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      1996,
+      5
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Robert G.",
+     "family": "Burger",
+     "sequence": "first"
+    },
+    {
+     "given": "R. Kent",
+     "family": "Dybvig",
+     "sequence": "additional"
+    }
+   ],
+   "event": {
+    "name": "PLDI96: Programming Language Design and Implementation",
+    "acronym": "PLDI96"
+   },
+   "resource": {
+    "primary": {
+     "URL": "https://dl.acm.org/doi/10.1145/231379.231397"
+    }
+   }
+  }
+ },
+ "10.1145/1806596.1806623": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "Printing floating-point numbers quickly and accurately with integers"
+   ],
+   "container-title": [
+    "Proceedings of the 31st ACM SIGPLAN Conference on Programming Language Design and Implementation"
+   ],
+   "publisher": "ACM",
+   "page": "233-243",
+   "DOI": "10.1145/1806596.1806623",
+   "URL": "https://doi.org/10.1145/1806596.1806623",
+   "issued": {
+    "date-parts": [
+     [
+      2010,
+      6,
+      5
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2010,
+      6,
+      5
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2010,
+      6,
+      5
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Florian",
+     "family": "Loitsch",
+     "sequence": "first"
+    }
+   ],
+   "event": {
+    "name": "PLDI '10: ACM SIGPLAN Conference on Programming Language Design and Implementation",
+    "acronym": "PLDI '10"
+   },
+   "resource": {
+    "primary": {
+     "URL": "https://dl.acm.org/doi/10.1145/1806596.1806623"
+    }
+   }
+  }
+ },
+ "10.1145/2837614.2837654": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "Printing floating-point numbers: a faster, always correct method"
+   ],
+   "container-title": [
+    "Proceedings of the 43rd Annual ACM SIGPLAN-SIGACT Symposium on Principles of Programming Languages"
+   ],
+   "publisher": "ACM",
+   "page": "555-567",
+   "DOI": "10.1145/2837614.2837654",
+   "URL": "https://doi.org/10.1145/2837614.2837654",
+   "issued": {
+    "date-parts": [
+     [
+      2016,
+      1,
+      11
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2016,
+      1,
+      11
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2016,
+      1,
+      11
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Marc",
+     "family": "Andrysco",
+     "sequence": "first"
+    },
+    {
+     "given": "Ranjit",
+     "family": "Jhala",
+     "sequence": "additional"
+    },
+    {
+     "given": "Sorin",
+     "family": "Lerner",
+     "sequence": "additional"
+    }
+   ],
+   "event": {
+    "name": "POPL '16: The 43rd Annual ACM SIGPLAN-SIGACT Symposium on Principles of Programming Languages",
+    "acronym": "POPL '16"
+   },
+   "resource": {
+    "primary": {
+     "URL": "https://dl.acm.org/doi/10.1145/2837614.2837654"
+    }
+   }
+  }
+ },
+ "10.1145/3192366.3192369": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "Ryū: fast float-to-string conversion"
+   ],
+   "container-title": [
+    "Proceedings of the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation"
+   ],
+   "publisher": "ACM",
+   "page": "270-282",
+   "DOI": "10.1145/3192366.3192369",
+   "URL": "https://doi.org/10.1145/3192366.3192369",
+   "issued": {
+    "date-parts": [
+     [
+      2018,
+      6,
+      11
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2018,
+      6,
+      11
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2018,
+      6,
+      11
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Ulf",
+     "family": "Adams",
+     "sequence": "first"
+    }
+   ],
+   "event": {
+    "name": "PLDI '18: ACM SIGPLAN Conference on Programming Language Design and Implementation",
+    "acronym": "PLDI '18"
+   },
+   "resource": {
+    "primary": {
+     "URL": "https://dl.acm.org/doi/10.1145/3192366.3192369"
+    }
+   }
+  }
+ },
+ "10.1145/989393.989431": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "How to print floating-point numbers accurately"
+   ],
+   "container-title": [
+    "ACM SIGPLAN Notices"
+   ],
+   "publisher": "Association for Computing Machinery (ACM)",
+   "volume": "39",
+   "issue": "4",
+   "page": "372-389",
+   "DOI": "10.1145/989393.989431",
+   "URL": "https://doi.org/10.1145/989393.989431",
+   "issued": {
+    "date-parts": [
+     [
+      2004,
+      4
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2004,
+      4
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2004,
+      4
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Guy L.",
+     "family": "Steele",
+     "sequence": "first"
+    },
+    {
+     "given": "Jon L.",
+     "family": "White",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://dl.acm.org/doi/10.1145/989393.989431"
+    }
+   }
+  }
+ },
+ "10.1145/989393.989430": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "How to read floating point numbers accurately"
+   ],
+   "container-title": [
+    "ACM SIGPLAN Notices"
+   ],
+   "publisher": "Association for Computing Machinery (ACM)",
+   "volume": "39",
+   "issue": "4",
+   "page": "360-371",
+   "DOI": "10.1145/989393.989430",
+   "URL": "https://doi.org/10.1145/989393.989430",
+   "issued": {
+    "date-parts": [
+     [
+      2004,
+      4
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2004,
+      4
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2004,
+      4
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "William D.",
+     "family": "Clinger",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://dl.acm.org/doi/10.1145/989393.989430"
+    }
+   }
+  }
+ },
+ "10.1002/spe.3198": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Fast number parsing without fallback"
+   ],
+   "container-title": [
+    "Software: Practice and Experience"
+   ],
+   "publisher": "Wiley",
+   "volume": "53",
+   "issue": "7",
+   "page": "1467-1471",
+   "DOI": "10.1002/spe.3198",
+   "URL": "https://doi.org/10.1002/spe.3198",
+   "issued": {
+    "date-parts": [
+     [
+      2023,
+      3,
+      4
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2023,
+      7
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2023,
+      3,
+      4
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Noble",
+     "family": "Mushtak",
+     "sequence": "first"
+    },
+    {
+     "given": "Daniel",
+     "family": "Lemire",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://onlinelibrary.wiley.com/doi/10.1002/spe.3198"
+    }
+   }
+  }
+ },
+ "10.1007/s00778-019-00578-5": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Parsing gigabytes of JSON per second"
+   ],
+   "container-title": [
+    "The VLDB Journal"
+   ],
+   "publisher": "Springer Science and Business Media LLC",
+   "volume": "28",
+   "issue": "6",
+   "page": "941-960",
+   "DOI": "10.1007/s00778-019-00578-5",
+   "URL": "https://doi.org/10.1007/s00778-019-00578-5",
+   "issued": {
+    "date-parts": [
+     [
+      2019,
+      10,
+      11
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2019,
+      12
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2019,
+      10,
+      11
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Geoff",
+     "family": "Langdale",
+     "sequence": "first"
+    },
+    {
+     "given": "Daniel",
+     "family": "Lemire",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "http://link.springer.com/10.1007/s00778-019-00578-5"
+    }
+   }
+  }
+ },
+ "10.1137/141000671": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Julia: A Fresh Approach to Numerical Computing"
+   ],
+   "container-title": [
+    "SIAM Review"
+   ],
+   "publisher": "Society for Industrial & Applied Mathematics (SIAM)",
+   "volume": "59",
+   "issue": "1",
+   "page": "65-98",
+   "DOI": "10.1137/141000671",
+   "URL": "https://doi.org/10.1137/141000671",
+   "issued": {
+    "date-parts": [
+     [
+      2017,
+      1
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2017,
+      1
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2017,
+      2,
+      7
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Jeff",
+     "family": "Bezanson",
+     "sequence": "first"
+    },
+    {
+     "given": "Alan",
+     "family": "Edelman",
+     "sequence": "additional"
+    },
+    {
+     "given": "Stefan",
+     "family": "Karpinski",
+     "sequence": "additional"
+    },
+    {
+     "given": "Viral B.",
+     "family": "Shah",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://epubs.siam.org/doi/10.1137/141000671"
+    }
+   }
+  }
+ },
+ "10.1038/s41586-020-2649-2": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Array programming with NumPy"
+   ],
+   "container-title": [
+    "Nature"
+   ],
+   "publisher": "Springer Science and Business Media LLC",
+   "volume": "585",
+   "issue": "7825",
+   "page": "357-362",
+   "DOI": "10.1038/s41586-020-2649-2",
+   "URL": "https://doi.org/10.1038/s41586-020-2649-2",
+   "issued": {
+    "date-parts": [
+     [
+      2020,
+      9,
+      16
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2020,
+      9,
+      17
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2020,
+      9,
+      16
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Charles R.",
+     "family": "Harris",
+     "sequence": "first"
+    },
+    {
+     "given": "K. Jarrod",
+     "family": "Millman",
+     "sequence": "additional"
+    },
+    {
+     "given": "Stéfan J.",
+     "family": "van der Walt",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ralf",
+     "family": "Gommers",
+     "sequence": "additional"
+    },
+    {
+     "given": "Pauli",
+     "family": "Virtanen",
+     "sequence": "additional"
+    },
+    {
+     "given": "David",
+     "family": "Cournapeau",
+     "sequence": "additional"
+    },
+    {
+     "given": "Eric",
+     "family": "Wieser",
+     "sequence": "additional"
+    },
+    {
+     "given": "Julian",
+     "family": "Taylor",
+     "sequence": "additional"
+    },
+    {
+     "given": "Sebastian",
+     "family": "Berg",
+     "sequence": "additional"
+    },
+    {
+     "given": "Nathaniel J.",
+     "family": "Smith",
+     "sequence": "additional"
+    },
+    {
+     "given": "Robert",
+     "family": "Kern",
+     "sequence": "additional"
+    },
+    {
+     "given": "Matti",
+     "family": "Picus",
+     "sequence": "additional"
+    },
+    {
+     "given": "Stephan",
+     "family": "Hoyer",
+     "sequence": "additional"
+    },
+    {
+     "given": "Marten H.",
+     "family": "van Kerkwijk",
+     "sequence": "additional"
+    },
+    {
+     "given": "Matthew",
+     "family": "Brett",
+     "sequence": "additional"
+    },
+    {
+     "given": "Allan",
+     "family": "Haldane",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jaime Fernández",
+     "family": "del Río",
+     "sequence": "additional"
+    },
+    {
+     "given": "Mark",
+     "family": "Wiebe",
+     "sequence": "additional"
+    },
+    {
+     "given": "Pearu",
+     "family": "Peterson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Pierre",
+     "family": "Gérard-Marchant",
+     "sequence": "additional"
+    },
+    {
+     "given": "Kevin",
+     "family": "Sheppard",
+     "sequence": "additional"
+    },
+    {
+     "given": "Tyler",
+     "family": "Reddy",
+     "sequence": "additional"
+    },
+    {
+     "given": "Warren",
+     "family": "Weckesser",
+     "sequence": "additional"
+    },
+    {
+     "given": "Hameer",
+     "family": "Abbasi",
+     "sequence": "additional"
+    },
+    {
+     "given": "Christoph",
+     "family": "Gohlke",
+     "sequence": "additional"
+    },
+    {
+     "given": "Travis E.",
+     "family": "Oliphant",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://www.nature.com/articles/s41586-020-2649-2"
+    }
+   }
+  }
+ },
+ "10.1145/3158154": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "RustBelt: securing the foundations of the Rust programming language"
+   ],
+   "container-title": [
+    "Proceedings of the ACM on Programming Languages"
+   ],
+   "publisher": "Association for Computing Machinery (ACM)",
+   "volume": "2",
+   "issue": "POPL",
+   "page": "1-34",
+   "DOI": "10.1145/3158154",
+   "URL": "https://doi.org/10.1145/3158154",
+   "issued": {
+    "date-parts": [
+     [
+      2017,
+      12,
+      27
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2018,
+      1
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2017,
+      12,
+      27
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Ralf",
+     "family": "Jung",
+     "sequence": "first"
+    },
+    {
+     "given": "Jacques-Henri",
+     "family": "Jourdan",
+     "sequence": "additional"
+    },
+    {
+     "given": "Robbert",
+     "family": "Krebbers",
+     "sequence": "additional"
+    },
+    {
+     "given": "Derek",
+     "family": "Dreyer",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://dl.acm.org/doi/10.1145/3158154"
+    }
+   }
+  }
+ },
+ "10.1103/revmodphys.93.025010": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "CODATA recommended values of the fundamental physical constants: 2018"
+   ],
+   "container-title": [
+    "Reviews of Modern Physics"
+   ],
+   "publisher": "American Physical Society (APS)",
+   "volume": "93",
+   "issue": "2",
+   "article-number": "025010",
+   "DOI": "10.1103/revmodphys.93.025010",
+   "URL": "https://doi.org/10.1103/revmodphys.93.025010",
+   "issued": {
+    "date-parts": [
+     [
+      2021,
+      6,
+      30
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2021,
+      6,
+      30
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Eite",
+     "family": "Tiesinga",
+     "sequence": "first"
+    },
+    {
+     "given": "Peter J.",
+     "family": "Mohr",
+     "sequence": "additional"
+    },
+    {
+     "given": "David B.",
+     "family": "Newell",
+     "sequence": "additional"
+    },
+    {
+     "given": "Barry N.",
+     "family": "Taylor",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://link.aps.org/doi/10.1103/RevModPhys.93.025010"
+    }
+   }
+  }
+ },
+ "10.1063/1.442716": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "A computer simulation method for the calculation of equilibrium constants for the formation of physical clusters of molecules: Application to small water clusters"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "76",
+   "issue": "1",
+   "page": "637-649",
+   "DOI": "10.1063/1.442716",
+   "URL": "https://doi.org/10.1063/1.442716",
+   "issued": {
+    "date-parts": [
+     [
+      1982,
+      1,
+      1
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1982,
+      1,
+      1
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "William C.",
+     "family": "Swope",
+     "sequence": "first"
+    },
+    {
+     "given": "Hans C.",
+     "family": "Andersen",
+     "sequence": "additional"
+    },
+    {
+     "given": "Peter H.",
+     "family": "Berens",
+     "sequence": "additional"
+    },
+    {
+     "given": "Kent R.",
+     "family": "Wilson",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/76/1/637/397800/A-computer-simulation-method-for-the-calculation"
+    }
+   }
+  }
+ },
+ "10.1063/1.2408420": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Canonical sampling through velocity rescaling"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "126",
+   "issue": "1",
+   "article-number": "014101",
+   "DOI": "10.1063/1.2408420",
+   "URL": "https://doi.org/10.1063/1.2408420",
+   "issued": {
+    "date-parts": [
+     [
+      2007,
+      1,
+      3
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2007,
+      1,
+      7
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2007,
+      1,
+      3
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Giovanni",
+     "family": "Bussi",
+     "sequence": "first"
+    },
+    {
+     "given": "Davide",
+     "family": "Donadio",
+     "sequence": "additional"
+    },
+    {
+     "given": "Michele",
+     "family": "Parrinello",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/126/1/014101/186581/Canonical-sampling-through-velocity-rescaling"
+    }
+   }
+  }
+ },
+ "10.1080/01621459.1987.10478410": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Better Bootstrap Confidence Intervals"
+   ],
+   "container-title": [
+    "Journal of the American Statistical Association"
+   ],
+   "publisher": "Informa UK Limited",
+   "volume": "82",
+   "issue": "397",
+   "page": "171-185",
+   "DOI": "10.1080/01621459.1987.10478410",
+   "URL": "https://doi.org/10.1080/01621459.1987.10478410",
+   "issued": {
+    "date-parts": [
+     [
+      1987,
+      3
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1987,
+      3
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Bradley",
+     "family": "Efron",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "http://www.tandfonline.com/doi/abs/10.1080/01621459.1987.10478410"
+    }
+   }
+  }
+ },
+ "10.1145/2491894.2464160": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "Rigorous benchmarking in reasonable time"
+   ],
+   "container-title": [
+    "Proceedings of the 2013 international symposium on memory management"
+   ],
+   "publisher": "ACM",
+   "page": "63-74",
+   "DOI": "10.1145/2491894.2464160",
+   "URL": "https://doi.org/10.1145/2491894.2464160",
+   "issued": {
+    "date-parts": [
+     [
+      2013,
+      6,
+      20
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2013,
+      6,
+      20
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2013,
+      6,
+      20
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Tomas",
+     "family": "Kalibera",
+     "sequence": "first"
+    },
+    {
+     "given": "Richard",
+     "family": "Jones",
+     "sequence": "additional"
+    }
+   ],
+   "event": {
+    "name": "ISMM '13: International Symposium on Memory Management",
+    "acronym": "ISMM '13"
+   },
+   "resource": {
+    "primary": {
+     "URL": "https://dl.acm.org/doi/10.1145/2491894.2464160"
+    }
+   }
+  }
+ },
+ "10.1145/2807591.2807644": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "Scientific benchmarking of parallel computing systems"
+   ],
+   "container-title": [
+    "Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis"
+   ],
+   "publisher": "ACM",
+   "page": "1-12",
+   "DOI": "10.1145/2807591.2807644",
+   "URL": "https://doi.org/10.1145/2807591.2807644",
+   "issued": {
+    "date-parts": [
+     [
+      2015,
+      11,
+      15
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2015,
+      11,
+      15
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2015,
+      11,
+      15
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Torsten",
+     "family": "Hoefler",
+     "sequence": "first"
+    },
+    {
+     "given": "Roberto",
+     "family": "Belli",
+     "sequence": "additional"
+    }
+   ],
+   "event": {
+    "name": "SC15: The International Conference for High Performance Computing, Networking, Storage and Analysis",
+    "acronym": "SC15"
+   },
+   "resource": {
+    "primary": {
+     "URL": "https://dl.acm.org/doi/10.1145/2807591.2807644"
+    }
+   }
+  }
+ },
+ "10.1145/1508244.1508275": {
+  "crossref": {
+   "type": "proceedings-article",
+   "title": [
+    "Producing wrong data without doing anything obviously wrong!"
+   ],
+   "container-title": [
+    "Proceedings of the 14th international conference on Architectural support for programming languages and operating systems"
+   ],
+   "publisher": "ACM",
+   "page": "265-276",
+   "DOI": "10.1145/1508244.1508275",
+   "URL": "https://doi.org/10.1145/1508244.1508275",
+   "issued": {
+    "date-parts": [
+     [
+      2009,
+      3,
+      7
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2009,
+      3,
+      7
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2009,
+      3,
+      7
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Todd",
+     "family": "Mytkowicz",
+     "sequence": "first"
+    },
+    {
+     "given": "Amer",
+     "family": "Diwan",
+     "sequence": "additional"
+    },
+    {
+     "given": "Matthias",
+     "family": "Hauswirth",
+     "sequence": "additional"
+    },
+    {
+     "given": "Peter F.",
+     "family": "Sweeney",
+     "sequence": "additional"
+    }
+   ],
+   "event": {
+    "name": "ASPLOS09: Architectural Support for Programming Languages and Operating Systems",
+    "acronym": "ASPLOS09"
+   },
+   "resource": {
+    "primary": {
+     "URL": "https://dl.acm.org/doi/10.1145/1508244.1508275"
+    }
+   }
+  }
+ },
+ "10.7717/peerj-cs.86": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Software citation principles"
+   ],
+   "container-title": [
+    "PeerJ Computer Science"
+   ],
+   "publisher": "PeerJ",
+   "volume": "2",
+   "page": "e86",
+   "article-number": "e86",
+   "DOI": "10.7717/peerj-cs.86",
+   "URL": "https://doi.org/10.7717/peerj-cs.86",
+   "issued": {
+    "date-parts": [
+     [
+      2016,
+      9,
+      19
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2016,
+      9,
+      19
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Arfon M.",
+     "family": "Smith",
+     "sequence": "first"
+    },
+    {
+     "given": "Daniel S.",
+     "family": "Katz",
+     "sequence": "additional"
+    },
+    {
+     "given": "Kyle E.",
+     "family": "Niemeyer",
+     "sequence": "additional"
+    },
+    {
+     "name": "FORCE11 Software Citation Working Group",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://peerj.com/articles/cs-86"
+    }
+   }
+  }
+ },
+ "10.1109/ieeestd.2019.8766229": {
+  "crossref": {
+   "type": "standard",
+   "title": [
+    "IEEE Standard for Floating-Point Arithmetic"
+   ],
+   "publisher": "IEEE",
+   "DOI": "10.1109/ieeestd.2019.8766229",
+   "URL": "https://doi.org/10.1109/ieeestd.2019.8766229",
+   "issued": {
+    "date-parts": [
+     [
+      null
+     ]
+    ]
+   },
+   "standards-body": {
+    "name": "Microprocessor Standards Committee of the IEEE Computer Society",
+    "acronym": "IEEE"
+   },
+   "resource": {
+    "primary": {
+     "URL": "https://ieeexplore.ieee.org/document/8766229/"
+    }
+   }
+  }
+ },
+ "10.1063/1.2720838": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Simplified and improved string method for computing the minimum energy paths in barrier-crossing events"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "126",
+   "issue": "16",
+   "article-number": "164103",
+   "DOI": "10.1063/1.2720838",
+   "URL": "https://doi.org/10.1063/1.2720838",
+   "issued": {
+    "date-parts": [
+     [
+      2007,
+      4,
+      23
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2007,
+      4,
+      28
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2007,
+      4,
+      23
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Weinan",
+     "family": "E",
+     "sequence": "first"
+    },
+    {
+     "given": "Weiqing",
+     "family": "Ren",
+     "sequence": "additional"
+    },
+    {
+     "given": "Eric",
+     "family": "Vanden-Eijnden",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/126/16/164103/905415/Simplified-and-improved-string-method-for"
+    }
+   }
+  }
+ },
+ "10.1021/acsphyschemau.6c00038": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "A Tutorial Review of Bayesian Optimization with Gaussian Processes to Accelerate Stationary Point Searches"
+   ],
+   "container-title": [
+    "ACS Physical Chemistry Au"
+   ],
+   "publisher": "American Chemical Society (ACS)",
+   "volume": "6",
+   "issue": "4",
+   "page": "633-664",
+   "DOI": "10.1021/acsphyschemau.6c00038",
+   "URL": "https://doi.org/10.1021/acsphyschemau.6c00038",
+   "issued": {
+    "date-parts": [
+     [
+      2026,
+      5,
+      20
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2026,
+      7,
+      22
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2026,
+      5,
+      20
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Rohit",
+     "family": "Goswami",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.acs.org/doi/10.1021/acsphyschemau.6c00038"
+    }
+   }
+  }
+ },
+ "10.62973/21-050r1": {
+  "crossref": {
+   "type": "standard",
+   "title": [
+    "Zarr Storage Specification 2.0 Community Standard"
+   ],
+   "publisher": "Open Geospatial Consortium, Inc.",
+   "DOI": "10.62973/21-050r1",
+   "URL": "https://doi.org/10.62973/21-050r1",
+   "issued": {
+    "date-parts": [
+     [
+      null
+     ]
+    ]
+   },
+   "editor": [
+    {
+     "name": "Open Geospatial Consortium, Inc.",
+     "sequence": "first"
+    }
+   ],
+   "standards-body": {
+    "name": "Open Geospatial Consortium, Inc.",
+    "acronym": "OGC"
+   },
+   "resource": {
+    "primary": {
+     "URL": "https://docs.ogc.org/doi/21-050r1"
+    }
+   }
+  }
+ },
+ "10.1002/jcc.21287": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "CHARMM: The biomolecular simulation program"
+   ],
+   "container-title": [
+    "Journal of Computational Chemistry"
+   ],
+   "publisher": "Wiley",
+   "volume": "30",
+   "issue": "10",
+   "page": "1545-1614",
+   "DOI": "10.1002/jcc.21287",
+   "URL": "https://doi.org/10.1002/jcc.21287",
+   "issued": {
+    "date-parts": [
+     [
+      2009,
+      5,
+      14
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2009,
+      7,
+      30
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2009,
+      5,
+      14
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "B. R.",
+     "family": "Brooks",
+     "sequence": "first"
+    },
+    {
+     "given": "C. L.",
+     "family": "Brooks",
+     "sequence": "additional"
+    },
+    {
+     "given": "A. D.",
+     "family": "Mackerell",
+     "sequence": "additional"
+    },
+    {
+     "given": "L.",
+     "family": "Nilsson",
+     "sequence": "additional"
+    },
+    {
+     "given": "R. J.",
+     "family": "Petrella",
+     "sequence": "additional"
+    },
+    {
+     "given": "B.",
+     "family": "Roux",
+     "sequence": "additional"
+    },
+    {
+     "given": "Y.",
+     "family": "Won",
+     "sequence": "additional"
+    },
+    {
+     "given": "G.",
+     "family": "Archontis",
+     "sequence": "additional"
+    },
+    {
+     "given": "C.",
+     "family": "Bartels",
+     "sequence": "additional"
+    },
+    {
+     "given": "S.",
+     "family": "Boresch",
+     "sequence": "additional"
+    },
+    {
+     "given": "A.",
+     "family": "Caflisch",
+     "sequence": "additional"
+    },
+    {
+     "given": "L.",
+     "family": "Caves",
+     "sequence": "additional"
+    },
+    {
+     "given": "Q.",
+     "family": "Cui",
+     "sequence": "additional"
+    },
+    {
+     "given": "A. R.",
+     "family": "Dinner",
+     "sequence": "additional"
+    },
+    {
+     "given": "M.",
+     "family": "Feig",
+     "sequence": "additional"
+    },
+    {
+     "given": "S.",
+     "family": "Fischer",
+     "sequence": "additional"
+    },
+    {
+     "given": "J.",
+     "family": "Gao",
+     "sequence": "additional"
+    },
+    {
+     "given": "M.",
+     "family": "Hodoscek",
+     "sequence": "additional"
+    },
+    {
+     "given": "W.",
+     "family": "Im",
+     "sequence": "additional"
+    },
+    {
+     "given": "K.",
+     "family": "Kuczera",
+     "sequence": "additional"
+    },
+    {
+     "given": "T.",
+     "family": "Lazaridis",
+     "sequence": "additional"
+    },
+    {
+     "given": "J.",
+     "family": "Ma",
+     "sequence": "additional"
+    },
+    {
+     "given": "V.",
+     "family": "Ovchinnikov",
+     "sequence": "additional"
+    },
+    {
+     "given": "E.",
+     "family": "Paci",
+     "sequence": "additional"
+    },
+    {
+     "given": "R. W.",
+     "family": "Pastor",
+     "sequence": "additional"
+    },
+    {
+     "given": "C. B.",
+     "family": "Post",
+     "sequence": "additional"
+    },
+    {
+     "given": "J. Z.",
+     "family": "Pu",
+     "sequence": "additional"
+    },
+    {
+     "given": "M.",
+     "family": "Schaefer",
+     "sequence": "additional"
+    },
+    {
+     "given": "B.",
+     "family": "Tidor",
+     "sequence": "additional"
+    },
+    {
+     "given": "R. M.",
+     "family": "Venable",
+     "sequence": "additional"
+    },
+    {
+     "given": "H. L.",
+     "family": "Woodcock",
+     "sequence": "additional"
+    },
+    {
+     "given": "X.",
+     "family": "Wu",
+     "sequence": "additional"
+    },
+    {
+     "given": "W.",
+     "family": "Yang",
+     "sequence": "additional"
+    },
+    {
+     "given": "D. M.",
+     "family": "York",
+     "sequence": "additional"
+    },
+    {
+     "given": "M.",
+     "family": "Karplus",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://onlinelibrary.wiley.com/doi/10.1002/jcc.21287"
+    }
+   }
+  }
+ },
+ "10.1093/bioinformatics/16.2.159": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "STAR/mmCIF: An ontology for macromolecular structure"
+   ],
+   "container-title": [
+    "Bioinformatics"
+   ],
+   "publisher": "Oxford University Press (OUP)",
+   "volume": "16",
+   "issue": "2",
+   "page": "159-168",
+   "DOI": "10.1093/bioinformatics/16.2.159",
+   "URL": "https://doi.org/10.1093/bioinformatics/16.2.159",
+   "issued": {
+    "date-parts": [
+     [
+      2000,
+      2,
+      1
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2000,
+      2,
+      1
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2000,
+      2,
+      1
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "John D.",
+     "family": "Westbrook",
+     "sequence": "first"
+    },
+    {
+     "given": "Philip E.",
+     "family": "Bourne",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://academic.oup.com/bioinformatics/article/16/2/159/232068"
+    }
+   }
+  }
+ },
+ "10.1016/0927-0256(96)00008-0": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Efficiency of ab-initio total energy calculations for metals and semiconductors using a plane-wave basis set"
+   ],
+   "container-title": [
+    "Computational Materials Science"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "6",
+   "issue": "1",
+   "page": "15-50",
+   "DOI": "10.1016/0927-0256(96)00008-0",
+   "URL": "https://doi.org/10.1016/0927-0256(96)00008-0",
+   "issued": {
+    "date-parts": [
+     [
+      1996,
+      7
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      1996,
+      7
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "G.",
+     "family": "Kresse",
+     "sequence": "first"
+    },
+    {
+     "given": "J.",
+     "family": "Furthmüller",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/0927025696000080"
+    }
+   }
+  }
+ },
+ "10.1016/j.cpc.2015.07.012": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Atomsk: A tool for manipulating and converting atomic data files"
+   ],
+   "container-title": [
+    "Computer Physics Communications"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "197",
+   "page": "212-219",
+   "DOI": "10.1016/j.cpc.2015.07.012",
+   "URL": "https://doi.org/10.1016/j.cpc.2015.07.012",
+   "issued": {
+    "date-parts": [
+     [
+      2015,
+      12
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2015,
+      12
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Pierre",
+     "family": "Hirel",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/S0010465515002817"
+    }
+   }
+  }
+ },
+ "10.1186/1758-2946-3-33": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Open Babel: An open chemical toolbox"
+   ],
+   "container-title": [
+    "Journal of Cheminformatics"
+   ],
+   "publisher": "Springer Science and Business Media LLC",
+   "volume": "3",
+   "issue": "1",
+   "article-number": "33",
+   "DOI": "10.1186/1758-2946-3-33",
+   "URL": "https://doi.org/10.1186/1758-2946-3-33",
+   "issued": {
+    "date-parts": [
+     [
+      2011,
+      10,
+      7
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2011,
+      12
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2011,
+      10,
+      7
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Noel M",
+     "family": "O'Boyle",
+     "sequence": "first"
+    },
+    {
+     "given": "Michael",
+     "family": "Banck",
+     "sequence": "additional"
+    },
+    {
+     "given": "Craig A",
+     "family": "James",
+     "sequence": "additional"
+    },
+    {
+     "given": "Chris",
+     "family": "Morley",
+     "sequence": "additional"
+    },
+    {
+     "given": "Tim",
+     "family": "Vandermeersch",
+     "sequence": "additional"
+    },
+    {
+     "given": "Geoffrey R",
+     "family": "Hutchison",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://jcheminf.biomedcentral.com/articles/10.1186/1758-2946-3-33"
+    }
+   }
+  }
+ },
+ "10.1088/0965-0393/18/1/015012": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Visualization and analysis of atomistic simulation data with OVITO–the Open Visualization Tool"
+   ],
+   "container-title": [
+    "Modelling and Simulation in Materials Science and Engineering"
+   ],
+   "publisher": "IOP Publishing",
+   "volume": "18",
+   "issue": "1",
+   "page": "015012",
+   "DOI": "10.1088/0965-0393/18/1/015012",
+   "URL": "https://doi.org/10.1088/0965-0393/18/1/015012",
+   "issued": {
+    "date-parts": [
+     [
+      2009,
+      12,
+      15
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2010,
+      1,
+      1
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2009,
+      12,
+      15
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Alexander",
+     "family": "Stukowski",
+     "sequence": "first"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://iopscience.iop.org/article/10.1088/0965-0393/18/1/015012"
+    }
+   }
+  }
+ },
+ "10.1016/j.cpc.2018.09.020": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "i-PI 2.0: A universal force engine for advanced molecular simulations"
+   ],
+   "container-title": [
+    "Computer Physics Communications"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "236",
+   "page": "214-223",
+   "DOI": "10.1016/j.cpc.2018.09.020",
+   "URL": "https://doi.org/10.1016/j.cpc.2018.09.020",
+   "issued": {
+    "date-parts": [
+     [
+      2019,
+      3
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2019,
+      3
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Venkat",
+     "family": "Kapil",
+     "sequence": "first"
+    },
+    {
+     "given": "Mariana",
+     "family": "Rossi",
+     "sequence": "additional"
+    },
+    {
+     "given": "Ondrej",
+     "family": "Marsalek",
+     "sequence": "additional"
+    },
+    {
+     "given": "Riccardo",
+     "family": "Petraglia",
+     "sequence": "additional"
+    },
+    {
+     "given": "Yair",
+     "family": "Litman",
+     "sequence": "additional"
+    },
+    {
+     "given": "Thomas",
+     "family": "Spura",
+     "sequence": "additional"
+    },
+    {
+     "given": "Bingqing",
+     "family": "Cheng",
+     "sequence": "additional"
+    },
+    {
+     "given": "Alice",
+     "family": "Cuzzocrea",
+     "sequence": "additional"
+    },
+    {
+     "given": "Robert H.",
+     "family": "Meißner",
+     "sequence": "additional"
+    },
+    {
+     "given": "David M.",
+     "family": "Wilkins",
+     "sequence": "additional"
+    },
+    {
+     "given": "Benjamin A.",
+     "family": "Helfrecht",
+     "sequence": "additional"
+    },
+    {
+     "given": "Przemysław",
+     "family": "Juda",
+     "sequence": "additional"
+    },
+    {
+     "given": "Sébastien P.",
+     "family": "Bienvenue",
+     "sequence": "additional"
+    },
+    {
+     "given": "Wei",
+     "family": "Fang",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jan",
+     "family": "Kessler",
+     "sequence": "additional"
+    },
+    {
+     "given": "Igor",
+     "family": "Poltavsky",
+     "sequence": "additional"
+    },
+    {
+     "given": "Steven",
+     "family": "Vandenbrande",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jelle",
+     "family": "Wieme",
+     "sequence": "additional"
+    },
+    {
+     "given": "Clemence",
+     "family": "Corminboeuf",
+     "sequence": "additional"
+    },
+    {
+     "given": "Thomas D.",
+     "family": "Kühne",
+     "sequence": "additional"
+    },
+    {
+     "given": "David E.",
+     "family": "Manolopoulos",
+     "sequence": "additional"
+    },
+    {
+     "given": "Thomas E.",
+     "family": "Markland",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jeremy O.",
+     "family": "Richardson",
+     "sequence": "additional"
+    },
+    {
+     "given": "Alexandre",
+     "family": "Tkatchenko",
+     "sequence": "additional"
+    },
+    {
+     "given": "Gareth A.",
+     "family": "Tribello",
+     "sequence": "additional"
+    },
+    {
+     "given": "Veronique",
+     "family": "Van Speybroeck",
+     "sequence": "additional"
+    },
+    {
+     "given": "Michele",
+     "family": "Ceriotti",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/S0010465518303436"
+    }
+   }
+  }
+ },
+ "10.1063/5.0215869": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "i-PI 3.0: A flexible and efficient framework for advanced atomistic simulations"
+   ],
+   "container-title": [
+    "The Journal of Chemical Physics"
+   ],
+   "publisher": "AIP Publishing",
+   "volume": "161",
+   "issue": "6",
+   "article-number": "062504",
+   "DOI": "10.1063/5.0215869",
+   "URL": "https://doi.org/10.1063/5.0215869",
+   "issued": {
+    "date-parts": [
+     [
+      2024,
+      8,
+      14
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2024,
+      8,
+      14
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2024,
+      8,
+      14
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Yair",
+     "family": "Litman",
+     "sequence": "first"
+    },
+    {
+     "given": "Venkat",
+     "family": "Kapil",
+     "sequence": "additional"
+    },
+    {
+     "given": "Yotam M. Y.",
+     "family": "Feldman",
+     "sequence": "additional"
+    },
+    {
+     "given": "Davide",
+     "family": "Tisi",
+     "sequence": "additional"
+    },
+    {
+     "given": "Tomislav",
+     "family": "Begušić",
+     "sequence": "additional"
+    },
+    {
+     "given": "Karen",
+     "family": "Fidanyan",
+     "sequence": "additional"
+    },
+    {
+     "given": "Guillaume",
+     "family": "Fraux",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jacob",
+     "family": "Higer",
+     "sequence": "additional"
+    },
+    {
+     "given": "Matthias",
+     "family": "Kellner",
+     "sequence": "additional"
+    },
+    {
+     "given": "Tao E.",
+     "family": "Li",
+     "sequence": "additional"
+    },
+    {
+     "given": "Eszter S.",
+     "family": "Pós",
+     "sequence": "additional"
+    },
+    {
+     "given": "Elia",
+     "family": "Stocco",
+     "sequence": "additional"
+    },
+    {
+     "given": "George",
+     "family": "Trenins",
+     "sequence": "additional"
+    },
+    {
+     "given": "Barak",
+     "family": "Hirshberg",
+     "sequence": "additional"
+    },
+    {
+     "given": "Mariana",
+     "family": "Rossi",
+     "sequence": "additional"
+    },
+    {
+     "given": "Michele",
+     "family": "Ceriotti",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://pubs.aip.org/jcp/article/161/6/062504/3308034/i-PI-3-0-A-flexible-and-efficient-framework-for"
+    }
+   }
+  }
+ },
+ "10.1016/j.cpc.2013.10.027": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "i-PI: A Python interface for ab initio path integral molecular dynamics simulations"
+   ],
+   "container-title": [
+    "Computer Physics Communications"
+   ],
+   "publisher": "Elsevier BV",
+   "volume": "185",
+   "issue": "3",
+   "page": "1019-1026",
+   "DOI": "10.1016/j.cpc.2013.10.027",
+   "URL": "https://doi.org/10.1016/j.cpc.2013.10.027",
+   "issued": {
+    "date-parts": [
+     [
+      2014,
+      3
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2014,
+      3
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Michele",
+     "family": "Ceriotti",
+     "sequence": "first"
+    },
+    {
+     "given": "Joshua",
+     "family": "More",
+     "sequence": "additional"
+    },
+    {
+     "given": "David E.",
+     "family": "Manolopoulos",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://linkinghub.elsevier.com/retrieve/pii/S001046551300372X"
+    }
+   }
+  }
+ },
+ "10.1002/jcc.21224": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "P\n                    <scp>ACKMOL</scp>\n                    : A package for building initial configurations for molecular dynamics simulations"
+   ],
+   "container-title": [
+    "Journal of Computational Chemistry"
+   ],
+   "publisher": "Wiley",
+   "volume": "30",
+   "issue": "13",
+   "page": "2157-2164",
+   "DOI": "10.1002/jcc.21224",
+   "URL": "https://doi.org/10.1002/jcc.21224",
+   "issued": {
+    "date-parts": [
+     [
+      2009,
+      2,
+      19
+     ]
+    ]
+   },
+   "published-print": {
+    "date-parts": [
+     [
+      2009,
+      10
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2009,
+      2,
+      19
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "L.",
+     "family": "Martínez",
+     "sequence": "first"
+    },
+    {
+     "given": "R.",
+     "family": "Andrade",
+     "sequence": "additional"
+    },
+    {
+     "given": "E. G.",
+     "family": "Birgin",
+     "sequence": "additional"
+    },
+    {
+     "given": "J. M.",
+     "family": "Martínez",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://onlinelibrary.wiley.com/doi/10.1002/jcc.21224"
+    }
+   }
+  }
+ },
+ "10.5281/zenodo.23264985": {
+  "datacite": {
+   "doi": "10.5281/zenodo.23264985",
+   "types": {
+    "ris": "COMP",
+    "bibtex": "misc",
+    "citeproc": "article",
+    "schemaOrg": "SoftwareSourceCode",
+    "resourceType": "",
+    "resourceTypeGeneral": "Software"
+   },
+   "titles": [
+    {
+     "title": "readcon-core: a CON/convel reader/writer with FFI bindings"
+    }
+   ],
+   "creators": [
+    {
+     "name": "Goswami, Rohit",
+     "givenName": "Rohit",
+     "familyName": "Goswami",
+     "nameType": "Personal"
+    }
+   ],
+   "publicationYear": 2026,
+   "version": "0.16.2",
+   "publisher": "Zenodo",
+   "relatedIdentifiers": [
+    {
+     "relationType": "IsVersionOf",
+     "relatedIdentifier": "10.5281/zenodo.18753567"
+    }
+   ]
+  }
+ },
+ "10.1038/s41597-022-01710-x": {
+  "crossref": {
+   "type": "journal-article",
+   "title": [
+    "Introducing the FAIR Principles for research software"
+   ],
+   "container-title": [
+    "Scientific Data"
+   ],
+   "publisher": "Springer Science and Business Media LLC",
+   "volume": "9",
+   "issue": "1",
+   "article-number": "622",
+   "DOI": "10.1038/s41597-022-01710-x",
+   "URL": "https://doi.org/10.1038/s41597-022-01710-x",
+   "issued": {
+    "date-parts": [
+     [
+      2022,
+      10,
+      14
+     ]
+    ]
+   },
+   "published-online": {
+    "date-parts": [
+     [
+      2022,
+      10,
+      14
+     ]
+    ]
+   },
+   "author": [
+    {
+     "given": "Michelle",
+     "family": "Barker",
+     "sequence": "first"
+    },
+    {
+     "given": "Neil P.",
+     "family": "Chue Hong",
+     "sequence": "additional"
+    },
+    {
+     "given": "Daniel S.",
+     "family": "Katz",
+     "sequence": "additional"
+    },
+    {
+     "given": "Anna-Lena",
+     "family": "Lamprecht",
+     "sequence": "additional"
+    },
+    {
+     "given": "Carlos",
+     "family": "Martinez-Ortiz",
+     "sequence": "additional"
+    },
+    {
+     "given": "Fotis",
+     "family": "Psomopoulos",
+     "sequence": "additional"
+    },
+    {
+     "given": "Jennifer",
+     "family": "Harrow",
+     "sequence": "additional"
+    },
+    {
+     "given": "Leyla Jael",
+     "family": "Castro",
+     "sequence": "additional"
+    },
+    {
+     "given": "Morane",
+     "family": "Gruenpeter",
+     "sequence": "additional"
+    },
+    {
+     "given": "Paula Andrea",
+     "family": "Martinez",
+     "sequence": "additional"
+    },
+    {
+     "given": "Tom",
+     "family": "Honeyman",
+     "sequence": "additional"
+    }
+   ],
+   "resource": {
+    "primary": {
+     "URL": "https://www.nature.com/articles/s41597-022-01710-x"
+    }
+   }
+  }
+ }
+}

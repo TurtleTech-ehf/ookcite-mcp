@@ -164,9 +164,16 @@ pub struct ExportCollectionArgs {
     /// CSL style when `format` is `csl` (default: "apa")
     #[serde(default = "default_style")]
     pub style: String,
+    /// How a software record is written in BibTeX: `software` (default) or `misc` (with `howpublished`)
+    #[serde(default = "default_software_entry")]
+    pub software_entry: String,
 }
 pub fn default_export_format() -> String {
     "bib".into()
+}
+
+pub fn default_software_entry() -> String {
+    "software".into()
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -420,42 +427,69 @@ pub fn default_true() -> bool {
 
 // --- Entry-level collection edits ---
 
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct UpdateEntryMetadataArgs {
     /// Collection name holding the entry
     pub collection: String,
     /// Entry to edit: opaque entry id from search_collection, `doi:10.x/y`, or bare DOI
     pub entry_id: String,
-    /// Replacement title (omit to keep the current one)
+    /// Replacement title. An empty string deletes the field.
     #[serde(default)]
     pub title: Option<String>,
-    /// Replacement author list, one name per entry ("Goswami, Rohit" or "Rohit Goswami")
+    /// Replacement author list, one name per entry ("Goswami, Rohit" or "Rohit Goswami"). Brace an organisation: "{IEEE Computer Society}". An empty list deletes authors.
     #[serde(default)]
     pub authors: Option<Vec<String>>,
-    /// Replacement journal or container title
+    /// Replacement journal or container title. An empty string deletes the field.
     #[serde(default)]
     pub journal: Option<String>,
     /// Replacement publication year
     #[serde(default)]
     pub year: Option<i32>,
-    /// Replacement volume
+    /// Replacement volume. An empty string deletes the field.
     #[serde(default)]
     pub volume: Option<String>,
-    /// Replacement issue
+    /// Replacement issue. An empty string deletes the field.
     #[serde(default)]
     pub issue: Option<String>,
-    /// Replacement page range (e.g. "1021-1035")
+    /// Replacement page range (e.g. "1021-1035"). An empty string deletes the field.
     #[serde(default)]
     pub pages: Option<String>,
-    /// Replacement publisher
+    /// Replacement publisher. An empty string deletes the field.
     #[serde(default)]
     pub publisher: Option<String>,
-    /// Replacement DOI
+    /// Replacement DOI. An empty string deletes the field.
     #[serde(default)]
     pub doi: Option<String>,
-    /// Replacement URL
+    /// Replacement URL. An empty string deletes the field.
     #[serde(default)]
     pub url: Option<String>,
+    /// Software or standard version. An empty string deletes the field.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Article number (`eid`). An empty string deletes the field.
+    #[serde(default)]
+    pub eid: Option<String>,
+    /// Proceedings or book title. An empty string deletes the field.
+    #[serde(default)]
+    pub booktitle: Option<String>,
+    /// BibTeX or Crossref entry type (`article`, `inproceedings`, `techreport`, ...). An empty string deletes the field.
+    #[serde(default)]
+    pub entry_type: Option<String>,
+    /// Report institution, such as IETF for an RFC. An empty string deletes the field.
+    #[serde(default)]
+    pub institution: Option<String>,
+    /// Chapter number for an incollection. An empty string deletes the field.
+    #[serde(default)]
+    pub chapter: Option<String>,
+    /// Report or issue number when it is not the `issue` field. An empty string deletes the field.
+    #[serde(default)]
+    pub number: Option<String>,
+    /// Citation key to keep on export. An empty string deletes the field.
+    #[serde(default)]
+    pub citation_key: Option<String>,
+    /// Field names to remove (`affiliation`, `editor`, `issn`, `year`, ...).
+    #[serde(default)]
+    pub clear: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]

@@ -140,24 +140,55 @@ fn is_severe_lookup(text: &str) -> bool {
 /// Absent when the text is a normal answer, including a citation miss.
 pub struct UpstreamFailureReport {
     pub kind: &'static str,
-    pub http_status: u16,
+    pub http_status: Option<u16>,
     pub retry_after: Option<String>,
 }
 
 pub fn upstream_failure_report(text: &str) -> Option<UpstreamFailureReport> {
     let (kind, http_status, marker) = if text.contains("RATE LIMITED") {
-        ("rate_limited", 429, "RATE LIMITED")
+        ("rate_limited", Some(429), Some("RATE LIMITED"))
     } else if text.contains("TIMEOUT") {
-        ("timeout", 504, "TIMEOUT")
+        ("timeout", Some(504), Some("TIMEOUT"))
     } else if text.contains("TEMPORARY ERROR") {
-        ("temporary_error", 503, "TEMPORARY ERROR")
+        ("temporary_error", Some(503), Some("TEMPORARY ERROR"))
+    } else if line_has_prefix(text, "ACCESS DENIED") {
+        ("access_denied", Some(403), Some("ACCESS DENIED"))
+    } else if line_has_prefix(text, "AUTH REQUIRED") {
+        ("auth_required", Some(401), None)
+    } else if line_has_prefix(text, "CLIENT ERROR") {
+        ("client_error", Some(400), None)
+    } else if line_has_prefix(text, "UNREGISTERED") {
+        ("unregistered", None, None)
+    } else if line_has_prefix(text, "ERROR") {
+        ("error", None, None)
+    } else if line_has_prefix(text, "Failed") {
+        ("failed", None, None)
+    } else if line_has_prefix(text, "REFUSED") {
+        ("refused", None, None)
     } else {
         return None;
     };
     Some(UpstreamFailureReport {
         kind,
         http_status,
-        retry_after: retry_after_on_marked_line(text, marker),
+        retry_after: marker.and_then(|marker| retry_after_on_marked_line(text, marker)),
+    })
+}
+
+/// A verdict line may be prefixed with `[n]`. Bibliographic misses stay unmarked.
+fn line_has_prefix(text: &str, prefix: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim_start();
+        let line = match line.strip_prefix('[') {
+            Some(rest) => match rest.split_once(']') {
+                Some((index, after)) if index.chars().all(|ch| ch.is_ascii_digit()) => {
+                    after.trim_start()
+                }
+                _ => line,
+            },
+            None => line,
+        };
+        line.starts_with(prefix)
     })
 }
 
@@ -259,13 +290,34 @@ mod tests {
 Check remaining quota";
         let report = upstream_failure_report(text).unwrap();
         assert_eq!(report.kind, "rate_limited");
-        assert_eq!(report.http_status, 429);
+        assert_eq!(report.http_status, Some(429));
         assert_eq!(report.retry_after.as_deref(), Some("75"));
     }
 
     #[test]
     fn upstream_report_is_absent_for_a_miss() {
         assert!(upstream_failure_report("INVALID 10.9/missing : HTTP 404 Not Found").is_none());
+        assert!(upstream_failure_report("Not found").is_none());
+        assert!(upstream_failure_report("Could not resolve").is_none());
+        assert!(upstream_failure_report("No matches found").is_none());
+        assert!(upstream_failure_report("VALID 10.1/ok : A paper").is_none());
+        assert!(upstream_failure_report("MISMATCH 10.1/ok : A paper").is_none());
+        assert!(upstream_failure_report("INCOMPLETE 10.1/ok : A paper").is_none());
+    }
+
+    #[test]
+    fn upstream_report_marks_a_transport_error_and_an_unregistered_doi() {
+        let transport = upstream_failure_report("ERROR 10.1/x : error sending request").unwrap();
+        assert_eq!(transport.kind, "error");
+        assert_eq!(transport.http_status, None);
+        let unregistered = upstream_failure_report(
+            "UNREGISTERED 10.2307/4615733: the DOI is not registered at doi.org",
+        )
+        .unwrap();
+        assert_eq!(unregistered.kind, "unregistered");
+        assert_eq!(unregistered.http_status, None);
+        let numbered = upstream_failure_report("[2] ERROR 10.1/x : error sending request").unwrap();
+        assert_eq!(numbered.kind, "error");
     }
 
     #[tokio::test]
