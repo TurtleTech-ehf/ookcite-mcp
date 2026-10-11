@@ -70,9 +70,13 @@ pub fn format_collection_entry_line(entry: &serde_json::Value) -> String {
 
 /// Split one author string into the API's `Person` shape (`family` is required,
 /// `given` is optional). Accepts both `"Family, Given"` and `"Given Family"`;
-/// a single token becomes a bare family name.
+/// a single token becomes a bare family name. A name wrapped in braces, with
+/// or without a trailing comma, is an organisation and stays one literal.
 pub fn person_from_name(raw: &str) -> serde_json::Value {
-    let trimmed = raw.trim();
+    let trimmed = raw.trim().trim_end_matches(',').trim();
+    if let Some(name) = braced_literal(trimmed) {
+        return serde_json::json!({ "family": name, "literal": true });
+    }
     if let Some((family, given)) = trimmed.split_once(',') {
         let family = family.trim();
         let given = given.trim();
@@ -89,39 +93,93 @@ pub fn person_from_name(raw: &str) -> serde_json::Value {
     }
 }
 
+fn braced_literal(value: &str) -> Option<String> {
+    if value.starts_with('{') && value.ends_with('}') && value.len() > 2 {
+        let inner = value[1..value.len() - 1].trim();
+        if inner.is_empty() {
+            None
+        } else {
+            Some(inner.to_string())
+        }
+    } else {
+        None
+    }
+}
+
 /// Overlay the fields a caller supplied onto an entry's existing metadata.
 ///
 /// The API replaces the whole `CitationMetadata` object, and that object has
 /// required fields (`id`, `entry_type`, `title`, `authors`) a partial edit does
 /// not carry. Starting from the stored metadata keeps those intact so a caller
 /// correcting one wrong year does not blank the rest of the record.
+///
+/// An empty string, an empty author list, or a name in `clear` removes that
+/// key. The replacement object then omits it, which is how a field is deleted.
+/// A non-empty value is stored and recorded in `user_fields` so a later export
+/// keeps the edit. A cleared field is not locked.
 pub fn apply_entry_metadata_overrides(
     current: &serde_json::Value,
     args: &UpdateEntryMetadataArgs,
 ) -> serde_json::Value {
     let mut meta = current.as_object().cloned().unwrap_or_default();
 
-    let mut set_str = |key: &str, value: &Option<String>| {
-        if let Some(v) = value {
-            meta.insert(key.into(), serde_json::json!(v));
+    if let Some(names) = &args.clear {
+        for name in names {
+            let key = name.trim();
+            if key.is_empty() {
+                continue;
+            }
+            if key.eq_ignore_ascii_case("year") {
+                clear_year(&mut meta);
+            } else {
+                meta.remove(key);
+            }
+            unlock_field(&mut meta, key);
+        }
+    }
+
+    let mut assign = |key: &str, value: &Option<String>| {
+        let Some(value) = value else {
+            return;
+        };
+        if value.is_empty() {
+            meta.remove(key);
+            unlock_field(&mut meta, key);
+        } else {
+            meta.insert(key.into(), serde_json::json!(value));
+            lock_field(&mut meta, key);
         }
     };
-    set_str("title", &args.title);
-    set_str("journal", &args.journal);
-    set_str("volume", &args.volume);
-    set_str("issue", &args.issue);
-    set_str("pages", &args.pages);
-    set_str("publisher", &args.publisher);
-    set_str("doi", &args.doi);
-    set_str("url", &args.url);
+    assign("title", &args.title);
+    assign("journal", &args.journal);
+    assign("volume", &args.volume);
+    assign("issue", &args.issue);
+    assign("pages", &args.pages);
+    assign("publisher", &args.publisher);
+    assign("doi", &args.doi);
+    assign("url", &args.url);
+    assign("version", &args.version);
+    assign("eid", &args.eid);
+    assign("booktitle", &args.booktitle);
+    assign("entry_type", &args.entry_type);
+    assign("institution", &args.institution);
+    assign("chapter", &args.chapter);
+    assign("number", &args.number);
+    assign("citation_key", &args.citation_key);
 
     if let Some(names) = &args.authors {
         let people: Vec<serde_json::Value> = names
             .iter()
-            .filter(|n| !n.trim().is_empty())
-            .map(|n| person_from_name(n))
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| person_from_name(name))
             .collect();
-        meta.insert("authors".into(), serde_json::Value::Array(people));
+        if people.is_empty() {
+            meta.remove("authors");
+            unlock_field(&mut meta, "authors");
+        } else {
+            meta.insert("authors".into(), serde_json::Value::Array(people));
+            lock_field(&mut meta, "authors");
+        }
     }
     if let Some(year) = args.year {
         // `date` is a DateValue object; keep any month/day already recorded.
@@ -131,9 +189,55 @@ pub fn apply_entry_metadata_overrides(
             .unwrap_or_default();
         date.insert("year".into(), serde_json::json!(year));
         meta.insert("date".into(), serde_json::Value::Object(date));
+        lock_field(&mut meta, "year");
     }
 
     serde_json::Value::Object(meta)
+}
+
+fn clear_year(meta: &mut serde_json::Map<String, serde_json::Value>) {
+    meta.remove("year");
+    let drop_date = meta
+        .get("date")
+        .and_then(|date| date.as_object())
+        .is_some_and(|date| date.len() == 1 && date.contains_key("year"));
+    if drop_date {
+        meta.remove("date");
+        return;
+    }
+    if let Some(date) = meta.get_mut("date").and_then(|date| date.as_object_mut()) {
+        date.remove("year");
+    }
+}
+
+fn lock_field(meta: &mut serde_json::Map<String, serde_json::Value>, field: &str) {
+    let mut fields = meta
+        .get("user_fields")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if !fields.iter().any(|value| {
+        value
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(field))
+    }) {
+        fields.push(serde_json::Value::String(field.to_string()));
+    }
+    meta.insert("user_fields".into(), serde_json::Value::Array(fields));
+}
+
+fn unlock_field(meta: &mut serde_json::Map<String, serde_json::Value>, field: &str) {
+    let Some(fields) = meta
+        .get_mut("user_fields")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return;
+    };
+    fields.retain(|value| {
+        !value
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(field))
+    });
 }
 
 /// Whether any editable metadata field was supplied.
@@ -148,6 +252,18 @@ pub fn entry_metadata_overrides_present(args: &UpdateEntryMetadataArgs) -> bool 
         || args.publisher.is_some()
         || args.doi.is_some()
         || args.url.is_some()
+        || args.version.is_some()
+        || args.eid.is_some()
+        || args.booktitle.is_some()
+        || args.entry_type.is_some()
+        || args.institution.is_some()
+        || args.chapter.is_some()
+        || args.number.is_some()
+        || args.citation_key.is_some()
+        || args
+            .clear
+            .as_ref()
+            .is_some_and(|names| names.iter().any(|name| !name.trim().is_empty()))
 }
 
 /// The stored metadata object for one entry of a collection body. Matches on the

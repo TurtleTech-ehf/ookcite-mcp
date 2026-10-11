@@ -5,6 +5,7 @@ use crate::batch_limits::{
     format_usage_report, plan_metered_batch, read_only_concurrency, BatchLookupItem,
     DoiResponseCache, MeQuota,
 };
+use crate::bib_export::{self, BibOptions};
 use crate::bibliographic::{format_validate_doi, format_verify_line};
 use crate::collection_entries::{
     apply_entry_metadata_overrides, entry_doi, entry_metadata_by_id,
@@ -52,11 +53,46 @@ fn shared_doi_cache() -> &'static DoiResponseCache {
 }
 
 #[derive(Clone)]
+struct ProviderBases {
+    crossref: String,
+    datacite: String,
+    zenodo: String,
+    handles: String,
+}
+
+impl ProviderBases {
+    fn production() -> Self {
+        Self {
+            crossref: "https://api.crossref.org".into(),
+            datacite: "https://api.datacite.org".into(),
+            zenodo: "https://zenodo.org/api".into(),
+            handles: "https://doi.org/api".into(),
+        }
+    }
+
+    #[cfg(test)]
+    fn shared(base: impl Into<String>) -> Self {
+        let base = base.into().trim_end_matches('/').to_string();
+        Self {
+            crossref: base.clone(),
+            datacite: base.clone(),
+            zenodo: base.clone(),
+            handles: base,
+        }
+    }
+}
+
+const PROVIDER_USER_AGENT: &str = "ookcite-mcp (mailto:rgoswami@ieee.org)";
+
+#[derive(Clone)]
 pub struct Server {
     tool_router: ToolRouter<Self>,
     http: reqwest::Client,
     api_base: String,
     doi_cache: DoiResponseCache,
+    /// Crossref, DataCite, Zenodo, and doi.org. Absent in unit tests so they
+    /// stay on the mocked OokCite API and never call a live provider.
+    providers: Option<ProviderBases>,
 }
 
 #[tool_router]
@@ -69,6 +105,7 @@ impl Server {
             http: build_api_client(30, reqwest::header::HeaderMap::new()),
             api_base: api_base_url(),
             doi_cache: shared_doi_cache().clone(),
+            providers: Some(ProviderBases::production()),
         }
     }
 
@@ -136,16 +173,212 @@ impl Server {
         if let Some(meta) = self.doi_cache.get_valid(doi) {
             return Ok(meta);
         }
+        self.require_registered(doi).await?;
         let r = lookup_doi_with_retry(&self.http, &self.api_base, doi).await;
         match r {
             Ok(resp) if resp.status().is_success() => {
-                let meta: serde_json::Value = resp.json().await.unwrap_or_default();
+                let mut meta: serde_json::Value = resp.json().await.unwrap_or_default();
+                if self.providers.is_some() {
+                    match self.provider_record(doi).await {
+                        Ok(Some(record)) => {
+                            meta = bib_export::merge_provider_metadata(&meta, &record);
+                        }
+                        Ok(None) => {}
+                        // The registration check already failed closed. A provider
+                        // miss still leaves the OokCite record usable for verify.
+                        Err(_) => {}
+                    }
+                }
                 self.doi_cache.put_if_identity_ok(doi, meta.clone());
                 Ok(meta)
             }
             Ok(resp) => Err(classify_lookup_doi_failure(resp, doi).await),
             Err(e) => Err(format!("ERROR {doi} : {e}")),
         }
+    }
+
+    /// doi.org `responseCode` 1 means the handle is registered. HTTP 404 with
+    /// `responseCode` 100 is an unregistered DOI, not an empty record.
+    async fn require_registered(&self, doi: &str) -> Result<(), String> {
+        if self.providers.is_none() {
+            return Ok(());
+        }
+        match self.registration_status(doi).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!(
+                "UNREGISTERED {doi}: the DOI is not registered at doi.org"
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn registration_status(&self, doi: &str) -> Result<bool, String> {
+        let Some(bases) = &self.providers else {
+            return Ok(true);
+        };
+        let url = format!(
+            "{}/handles/{}",
+            bases.handles.trim_end_matches('/'),
+            encode_path_segment(doi)
+        );
+        let response = self
+            .provider_request(&url)
+            .send()
+            .await
+            .map_err(|_| format!("ERROR {doi} : error sending request"))?;
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
+        if let Some(code) = body.get("responseCode").and_then(|value| value.as_i64()) {
+            return Ok(code == 1);
+        }
+        if status.as_u16() == 404 {
+            return Ok(false);
+        }
+        if status.is_success() {
+            return Ok(true);
+        }
+        Err(format!("ERROR {doi} : error sending request"))
+    }
+
+    async fn provider_record(&self, doi: &str) -> Result<Option<serde_json::Value>, String> {
+        let Some(bases) = &self.providers else {
+            return Ok(None);
+        };
+        let enc = encode_path_segment(doi);
+        let crossref_url = format!("{}/works/{enc}", bases.crossref.trim_end_matches('/'));
+        let datacite_url = format!("{}/dois/{enc}", bases.datacite.trim_end_matches('/'));
+        let mut record = match self.provider_json(&crossref_url).await {
+            Ok(Some(body)) => {
+                let message = body
+                    .get("message")
+                    .cloned()
+                    .filter(|value| value.is_object())
+                    .unwrap_or(body);
+                Some(serde_json::json!({ "crossref": message }))
+            }
+            Ok(None) => match self.provider_json(&datacite_url).await {
+                Ok(Some(body)) => {
+                    let attrs = body
+                        .pointer("/data/attributes")
+                        .cloned()
+                        .filter(|value| value.is_object())
+                        .unwrap_or(body);
+                    Some(serde_json::json!({ "datacite": attrs }))
+                }
+                Ok(None) => None,
+                Err(_) => return Err(format!("ERROR {doi} : error sending request")),
+            },
+            Err(_) => return Err(format!("ERROR {doi} : error sending request")),
+        };
+        if let Some(record) = record.as_mut() {
+            if doi.to_ascii_lowercase().starts_with("10.5281/zenodo.") {
+                if let Some(zenodo) = self.zenodo_record(doi).await {
+                    record
+                        .as_object_mut()
+                        .expect("provider record is an object")
+                        .insert("zenodo".into(), zenodo);
+                }
+            }
+        }
+        Ok(record)
+    }
+
+    async fn zenodo_record(&self, doi: &str) -> Option<serde_json::Value> {
+        let id = doi
+            .to_ascii_lowercase()
+            .strip_prefix("10.5281/zenodo.")?
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        if id.is_empty() {
+            return None;
+        }
+        let bases = self.providers.as_ref()?;
+        let url = format!("{}/records/{id}", bases.zenodo.trim_end_matches('/'));
+        let body = self.provider_json(&url).await.ok()??;
+        let version = body
+            .pointer("/metadata/version")
+            .cloned()
+            .or_else(|| body.get("version").cloned());
+        Some(serde_json::json!({
+            "doi": body.get("doi").cloned().unwrap_or(serde_json::Value::Null),
+            "conceptdoi": body.get("conceptdoi").cloned().unwrap_or(serde_json::Value::Null),
+            "version": version.unwrap_or(serde_json::Value::Null),
+        }))
+    }
+
+    fn provider_request(&self, url: &str) -> reqwest::RequestBuilder {
+        self.http
+            .get(url)
+            .header(reqwest::header::USER_AGENT, PROVIDER_USER_AGENT)
+            .header(reqwest::header::ACCEPT, "application/json")
+    }
+
+    async fn provider_json(&self, url: &str) -> Result<Option<serde_json::Value>, ()> {
+        let response = self.provider_request(url).send().await.map_err(|_| ())?;
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(());
+        }
+        match response.json::<serde_json::Value>().await {
+            Ok(body) if !body.is_null() => Ok(Some(body)),
+            _ => Ok(None),
+        }
+    }
+
+    async fn finish_reverse_hit(
+        &self,
+        hit: crate::resolve_helpers::ReverseLookupMatch,
+    ) -> Result<String, String> {
+        if let Some(doi) = hit
+            .top_doi
+            .as_deref()
+            .filter(|doi| looks_like_doi_token(doi))
+        {
+            self.require_registered(doi).await?;
+        }
+        Ok(hit.output)
+    }
+
+    async fn render_collection_bib(
+        &self,
+        entries: &[serde_json::Value],
+        software_entry: &str,
+    ) -> String {
+        let options = BibOptions::from_software_entry(software_entry);
+        let mut pairs = Vec::with_capacity(entries.len());
+        let mut errors = Vec::new();
+        for entry in entries {
+            let stored = collection_entry_metadata(entry);
+            let doi = stored
+                .get("doi")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|doi| !doi.is_empty())
+                .map(str::to_string);
+            if self.providers.is_none() {
+                pairs.push((stored, None));
+                continue;
+            }
+            let Some(doi) = doi else {
+                pairs.push((stored, None));
+                continue;
+            };
+            if let Err(error) = self.require_registered(&doi).await {
+                errors.push(error);
+                continue;
+            }
+            match self.provider_record(&doi).await {
+                Ok(record) => pairs.push((stored, record)),
+                Err(error) => errors.push(error),
+            }
+        }
+        if !errors.is_empty() {
+            return errors.join("\n");
+        }
+        bib_export::render_pairs(&pairs, &options)
     }
 
     /// Collection-local metadata only — never hits LOOKUP_DOI (free tier path).
@@ -431,7 +664,10 @@ impl Server {
                     Ok(Some(live_match))
                         if live_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE =>
                     {
-                        live_match.output
+                        match self.finish_reverse_hit(live_match).await {
+                            Ok(text) => text,
+                            Err(message) => return message,
+                        }
                     }
                     Ok(Some(_)) | Ok(None) => "No confident matches found".into(),
                     // A live 429 or 5xx is the answer. The weak local hit
@@ -443,22 +679,38 @@ impl Server {
                 // Caller asked for live on first pass: still prefer reverse
                 // hits when confident; otherwise try resolve+live.
                 if local_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE {
-                    local_match.output
+                    match self.finish_reverse_hit(local_match).await {
+                        Ok(text) => text,
+                        Err(message) => return message,
+                    }
                 } else {
                     match self.live_reverse_lookup(&args).await {
-                        Ok(Some(live_match)) => live_match.output,
-                        Ok(None) => local_match.output,
+                        Ok(Some(live_match)) => match self.finish_reverse_hit(live_match).await {
+                            Ok(text) => text,
+                            Err(message) => return message,
+                        },
+                        Ok(None) => match self.finish_reverse_hit(local_match).await {
+                            Ok(text) => text,
+                            Err(message) => return message,
+                        },
                         Err(message) => return message,
                     }
                 }
             }
-            Ok(Some(local_match)) => local_match.output,
-            Ok(None) if !args.use_live_queries => match self.live_reverse_lookup(&args).await {
-                Ok(Some(live_match)) => live_match.output,
+            Ok(Some(local_match)) => match self.finish_reverse_hit(local_match).await {
+                Ok(text) => text,
+                Err(message) => return message,
+            },
+            // An empty local list tries live whether or not the caller set
+            // use_live_queries. The flag used to skip that search.
+            Ok(None) => match self.live_reverse_lookup(&args).await {
+                Ok(Some(live_match)) => match self.finish_reverse_hit(live_match).await {
+                    Ok(text) => text,
+                    Err(message) => return message,
+                },
                 Ok(None) => "No matches found".into(),
                 Err(message) => return message,
             },
-            Ok(None) => "No matches found".into(),
             Err(message) => return message,
         };
         attach_original_query(&args.text, &body)
@@ -1090,7 +1342,7 @@ impl Server {
 
     #[tool(
         name = "export_collection",
-        description = "Export a collection as BibTeX (format=bib, default) or CSL bibliography text (format=csl, or pass a CSL style id such as apa/ieee). BibTeX uses Better BibTeX keys. Call this when the user wants the collection as a file or as formatted copy-out.",
+        description = "Export a collection as BibTeX (format=bib, default) or CSL bibliography text (format=csl, or pass a CSL style id such as apa/ieee). BibTeX is rendered here from Crossref or DataCite fields: proceedings get a booktitle, types and numbers follow the provider, a stored citation_key is kept, and a DOI is not repeated as a URL. software_entry=misc writes @misc with howpublished instead of @software. Call this when the user wants the collection as a file or as formatted copy-out.",
         annotations(
             title = "Export collection bibliography",
             read_only_hint = true,
@@ -1109,17 +1361,23 @@ impl Server {
         match export_kind(&args.format, &args.style) {
             ExportKind::Bibtex => {
                 let r = self
-                    .send_read(|| {
-                        self.request(endpoints::COLLECTION_EXPORT_BIB, &[("id", &col_id)])
-                    })
+                    .send_read(|| self.request(endpoints::COLLECTION_GET, &[("id", &col_id)]))
                     .await;
-                match r {
-                    Ok(r) if r.status().is_success() => {
-                        r.text().await.unwrap_or_else(|_| "Export failed.".into())
-                    }
-                    Ok(r) => failure_text(r, "Failed to export collection").await,
-                    Err(error) => format!("Failed to export collection: {error}"),
+                let collection: serde_json::Value = match r {
+                    Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+                    Ok(r) => return failure_text(r, "Failed to load collection").await,
+                    Err(error) => return format!("Failed to load collection: {error}"),
+                };
+                let entries = collection
+                    .get("entries")
+                    .and_then(|value| value.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if entries.is_empty() {
+                    return "Collection is empty.".into();
                 }
+                self.render_collection_bib(&entries, &args.software_entry)
+                    .await
             }
             ExportKind::Csl { style } => {
                 let r = self
@@ -2772,7 +3030,7 @@ impl Server {
 
     #[tool(
         name = "update_entry_metadata",
-        description = "Correct the stored metadata of one collection entry: title, authors, journal, year, volume, issue, pages, publisher, DOI, or URL. Call this when a DOI resolved to the wrong record, or came back with fields missing, and the user wants the saved entry fixed rather than removed and re-added. Fields left unset keep their current values, and the entry's tags, note, and position in the collection are preserved.",
+        description = "Correct the stored metadata of one collection entry: title, authors, journal, year, volume, issue, pages, publisher, DOI, URL, version, eid, booktitle, entry_type, institution, chapter, number, or citation_key. An empty string deletes that field. clear lists further field names to remove. A braced author such as \"{IEEE Computer Society}\" is stored as one organisation. Call this when a DOI resolved to the wrong record, or came back with fields missing, and the user wants the saved entry fixed rather than removed and re-added. Fields left unset keep their current values, and the entry's tags, note, and position in the collection are preserved.",
         annotations(
             title = "Edit collection entry metadata",
             read_only_hint = false,
@@ -2788,7 +3046,7 @@ impl Server {
             return msg;
         }
         if !entry_metadata_overrides_present(&args) {
-            return "Nothing to update. Provide at least one of title, authors, journal, year, volume, issue, pages, publisher, doi, or url.".into();
+            return "Nothing to update. Provide at least one field to set or clear.".into();
         }
         let col_id = match self.resolve_collection_id(&args.collection).await {
             Ok(id) => id,
@@ -3021,6 +3279,19 @@ fn format_enhanced_search(data: &serde_json::Value) -> String {
     out.join("\n")
 }
 
+fn encode_path_segment(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 fn tool_result_text(result: &CallToolResult) -> String {
     result
         .content
@@ -3128,7 +3399,13 @@ impl Server {
             http: build_api_client(5, reqwest::header::HeaderMap::new()),
             api_base,
             doi_cache: DoiResponseCache::with_default_ttl(),
+            providers: None,
         }
+    }
+
+    fn with_providers(mut self, base: String) -> Self {
+        self.providers = Some(ProviderBases::shared(base));
+        self
     }
 }
 
@@ -3600,6 +3877,7 @@ mod tests {
         let args: ExportCollectionArgs = serde_json::from_str(r#"{"collection": "lab"}"#).unwrap();
         assert_eq!(args.format, "bib");
         assert_eq!(args.style, "apa");
+        assert_eq!(args.software_entry, "software");
     }
 
     #[test]
@@ -4013,7 +4291,7 @@ mod tests {
             }))
             .await;
         assert!(
-            result.contains("@article{Maiman1960,"),
+            result.contains("@article{maimanStimulatedOpticalRadiation1960,"),
             "expected bibtex, got: {result}"
         );
         assert!(result.contains("doi = {10.1038/187493a0}"));
@@ -4105,11 +4383,149 @@ mod tests {
                 collection: "lab".into(),
                 format: "csl".into(),
                 style: "apa".into(),
+                software_entry: "software".into(),
             }))
             .await;
         assert!(
             result.contains("Stimulated Optical Radiation in Ruby"),
             "got: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_collection_bib_uses_the_provider_booktitle() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-1", "name": "lab"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": "e1",
+                    "metadata": {
+                        "entry_type": "techreport",
+                        "title": "How to read floating point numbers accurately",
+                        "doi": "10.1145/93542.93557",
+                        "journal": "ACM Press",
+                        "authors": [{"family": "Clinger", "given": "William D."}],
+                        "date": {"year": 1990}
+                    }
+                }]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-1/export.bib"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("@techreport{broken,}"))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/handles/10.1145%2F93542.93557"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1,
+                "handle": "10.1145/93542.93557"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/works/10.1145%2F93542.93557"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {
+                    "type": "proceedings-article",
+                    "title": ["How to read floating point numbers accurately"],
+                    "container-title": ["Proceedings of the ACM SIGPLAN 1990 conference on Programming language design and implementation - PLDI '90"],
+                    "publisher": "ACM Press",
+                    "page": "92-101",
+                    "DOI": "10.1145/93542.93557",
+                    "URL": "https://doi.org/10.1145/93542.93557",
+                    "author": [{"given": "William D.", "family": "Clinger"}],
+                    "issued": {"date-parts": [[1990]]}
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_export_bib");
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .export_collection(Parameters(ExportCollectionArgs {
+                collection: "lab".into(),
+                format: "bib".into(),
+                style: "apa".into(),
+                software_entry: "software".into(),
+            }))
+            .await;
+        assert!(result.contains("@inproceedings{"), "{result}");
+        assert!(result.contains("booktitle = {"), "{result}");
+        assert!(result.contains("PLDI"), "{result}");
+        assert!(!result.contains("booktitle = {ACM Press}"), "{result}");
+        assert!(!result.contains("@techreport"), "{result}");
+        assert!(!result.contains("url = {https://doi.org/"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn export_collection_bib_rejects_an_unregistered_doi() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-1", "name": "lab"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": "e1",
+                    "metadata": {
+                        "title": "A paper that was never registered",
+                        "doi": "10.2307/4615733",
+                        "authors": [{"family": "Holm"}]
+                    }
+                }]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/handles/10.2307%2F4615733"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "responseCode": 100,
+                "handle": "10.2307/4615733"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/works/10.2307%2F4615733"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_export_missing");
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .export_collection(Parameters(ExportCollectionArgs {
+                collection: "lab".into(),
+                format: "bib".into(),
+                style: "apa".into(),
+                software_entry: "software".into(),
+            }))
+            .await;
+        assert!(result.contains("UNREGISTERED 10.2307/4615733"), "{result}");
+        assert!(result.contains("not registered at doi.org"), "{result}");
+        assert!(
+            !result.contains("@misc") && !result.contains("@article"),
+            "{result}"
         );
     }
 
@@ -4157,6 +4573,92 @@ mod tests {
             }))
             .await;
         assert_eq!(result, "original: nonexistent paper xyz\nNo matches found");
+    }
+
+    #[tokio::test]
+    async fn reverse_lookup_still_searches_live_when_live_is_forced_and_local_is_empty() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains(r#""use_live_queries":true"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "candidates": [{
+                    "score": 80.0,
+                    "metadata": {
+                        "title": "Attention Is All You Need",
+                        "doi": "10.48550/arxiv.1706.03762"
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "Attention Is All You Need".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: true,
+            }))
+            .await;
+        assert!(result.contains("Attention Is All You Need"), "{result}");
+        assert!(result.contains("[confidence:80]"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn reverse_lookup_rejects_an_unregistered_doi() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "score": 90.0,
+                    "metadata": {
+                        "title": "A JSTOR ghost",
+                        "doi": "10.2307/4615733"
+                    }
+                }])),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/handles/10.2307%2F4615733"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "responseCode": 100
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "Holm 1972 a paper that does not exist".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: true,
+            }))
+            .await;
+        assert!(result.contains("UNREGISTERED 10.2307/4615733"), "{result}");
+        assert!(!result.contains("A JSTOR ghost"), "{result}");
     }
 
     #[tokio::test]
@@ -5892,6 +6394,89 @@ mod tests {
             person_from_name("Goswami,"),
             serde_json::json!({"family": "Goswami"})
         );
+        assert_eq!(
+            person_from_name("{IEEE Computer Society}"),
+            serde_json::json!({"family": "IEEE Computer Society", "literal": true})
+        );
+        assert_eq!(
+            person_from_name("{IEEE Computer Society},"),
+            serde_json::json!({"family": "IEEE Computer Society", "literal": true})
+        );
+    }
+
+    #[test]
+    fn entry_metadata_overrides_set_publication_fields_and_can_delete() {
+        let current = serde_json::json!({
+            "id": "kept",
+            "entry_type": "techreport",
+            "title": "A paper",
+            "authors": [{"family": "Goswami"}],
+            "journal": "ACM Press",
+            "affiliation": "University",
+            "editor": [{"family": "Someone"}],
+            "issn": "0000-0000",
+            "date": {"year": 1990, "month": 6}
+        });
+        let args = UpdateEntryMetadataArgs {
+            collection: "Refs".into(),
+            entry_id: "e1".into(),
+            booktitle: Some("Proceedings of PLDI".into()),
+            entry_type: Some("inproceedings".into()),
+            institution: Some("IETF".into()),
+            chapter: Some("1".into()),
+            pages: Some("92-101".into()),
+            version: Some("3.6.0".into()),
+            eid: Some("134106".into()),
+            number: Some("8259".into()),
+            citation_key: Some("clingerHowReadFloating1990".into()),
+            authors: Some(vec!["{IEEE Computer Society}".into()]),
+            journal: Some(String::new()),
+            clear: Some(vec!["affiliation".into(), "editor".into(), "issn".into()]),
+            ..Default::default()
+        };
+        let merged = apply_entry_metadata_overrides(&current, &args);
+        assert_eq!(merged["id"], "kept");
+        assert_eq!(merged["booktitle"], "Proceedings of PLDI");
+        assert_eq!(merged["entry_type"], "inproceedings");
+        assert_eq!(merged["institution"], "IETF");
+        assert_eq!(merged["chapter"], "1");
+        assert_eq!(merged["pages"], "92-101");
+        assert_eq!(merged["version"], "3.6.0");
+        assert_eq!(merged["eid"], "134106");
+        assert_eq!(merged["number"], "8259");
+        assert_eq!(merged["citation_key"], "clingerHowReadFloating1990");
+        assert!(merged.get("journal").is_none(), "{merged}");
+        assert!(merged.get("affiliation").is_none(), "{merged}");
+        assert!(merged.get("editor").is_none(), "{merged}");
+        assert!(merged.get("issn").is_none(), "{merged}");
+        assert_eq!(merged["date"]["month"], 6);
+        assert_eq!(
+            merged["authors"][0],
+            serde_json::json!({"family": "IEEE Computer Society", "literal": true})
+        );
+        let locked = merged["user_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        assert!(locked.contains(&"booktitle"), "{locked:?}");
+        assert!(locked.contains(&"authors"), "{locked:?}");
+        assert!(!locked.contains(&"journal"), "{locked:?}");
+        assert!(!locked.contains(&"affiliation"), "{locked:?}");
+
+        let cleared = apply_entry_metadata_overrides(
+            &merged,
+            &UpdateEntryMetadataArgs {
+                collection: "Refs".into(),
+                entry_id: "e1".into(),
+                clear: Some(vec!["year".into(), "authors".into()]),
+                ..Default::default()
+            },
+        );
+        assert!(cleared["date"].get("year").is_none(), "{cleared}");
+        assert_eq!(cleared["date"]["month"], 6);
+        assert!(cleared.get("authors").is_none(), "{cleared}");
     }
 
     #[test]
@@ -5909,15 +6494,8 @@ mod tests {
             collection: "Refs".into(),
             entry_id: "e1".into(),
             title: Some("Right Title".into()),
-            authors: None,
-            journal: None,
             year: Some(2026),
-            volume: None,
-            issue: None,
-            pages: None,
-            publisher: None,
-            doi: None,
-            url: None,
+            ..Default::default()
         };
         let merged = apply_entry_metadata_overrides(&current, &args);
         assert_eq!(merged["title"], serde_json::json!("Right Title"));
@@ -6089,15 +6667,7 @@ mod tests {
                 collection: "Refs".into(),
                 entry_id: "e1".into(),
                 title: Some("Right Title".into()),
-                authors: None,
-                journal: None,
-                year: None,
-                volume: None,
-                issue: None,
-                pages: None,
-                publisher: None,
-                doi: None,
-                url: None,
+                ..Default::default()
             }))
             .await;
         assert!(out.contains("Updated entry e1"), "{out}");
@@ -6118,16 +6688,7 @@ mod tests {
             .update_entry_metadata(Parameters(UpdateEntryMetadataArgs {
                 collection: "Refs".into(),
                 entry_id: "e1".into(),
-                title: None,
-                authors: None,
-                journal: None,
-                year: None,
-                volume: None,
-                issue: None,
-                pages: None,
-                publisher: None,
-                doi: None,
-                url: None,
+                ..Default::default()
             }))
             .await;
         assert!(out.starts_with("Nothing to update."), "{out}");
@@ -6269,6 +6830,30 @@ mod tests {
         let structured = absent.structured_content.as_ref().unwrap();
         assert!(structured["retry_after"].is_null());
         assert_eq!(structured_keys(&absent), 4);
+
+        let mut transport = CallToolResult::success(vec![ContentBlock::text(
+            "ERROR 10.1/x : error sending request",
+        )]);
+        promote_upstream_failure(&mut transport);
+        assert_eq!(transport.is_error, Some(true));
+        let structured = transport.structured_content.as_ref().unwrap();
+        assert_eq!(structured_keys(&transport), 4);
+        assert_eq!(structured["kind"], "error");
+        assert!(structured["http_status"].is_null());
+
+        let mut unregistered = CallToolResult::success(vec![ContentBlock::text(
+            "UNREGISTERED 10.2307/4615733: the DOI is not registered at doi.org",
+        )]);
+        promote_upstream_failure(&mut unregistered);
+        assert_eq!(unregistered.is_error, Some(true));
+        assert_eq!(
+            unregistered.structured_content.as_ref().unwrap()["kind"],
+            "unregistered"
+        );
+
+        let mut unresolved = CallToolResult::success(vec![ContentBlock::text("Could not resolve")]);
+        promote_upstream_failure(&mut unresolved);
+        assert_eq!(unresolved.is_error, Some(false));
     }
 
     #[tokio::test]
