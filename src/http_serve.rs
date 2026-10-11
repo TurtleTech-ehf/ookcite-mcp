@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::inbound_auth::{inbound_api_key, Gate, GateDeny, HttpAuthMode};
 use crate::oidc_resource::{OidcPolicy, OidcVerifier};
+use crate::overrides::{OverrideStore, Transport};
 use crate::server::Server;
 
 type McpService = StreamableHttpService<Server, LocalSessionManager>;
@@ -48,8 +49,11 @@ impl App {
             .with_sse_keep_alive(None)
             .with_allowed_hosts(gate.hosts.clone())
             .with_cancellation_token(cancel);
+        // Decided once per process: a signed-in server may serve many users
+        // and must not share a per-collection override file between them.
+        let overrides = OverrideStore::for_transport(Transport::Http(gate.auth));
         let service: McpService = StreamableHttpService::new(
-            || Ok(Server::new()),
+            move || Ok(Server::new().with_overrides(overrides.clone())),
             Arc::new(LocalSessionManager::default()),
             config,
         );

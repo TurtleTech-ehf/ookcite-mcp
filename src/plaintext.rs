@@ -262,7 +262,7 @@ mod tests {
         });
         let bib = render_bibtex_entries(&[meta]);
         assert!(bib.contains("@article{maimanStimulatedOpticalRadiation1960,"));
-        assert!(bib.contains("title = {Stimulated {Optical} {Radiation} in {Ruby}}"));
+        assert!(bib.contains("title = {Stimulated Optical Radiation in Ruby}"));
         assert!(bib.contains("doi = {10.1038/187493a0}"));
         assert!(bib.contains("author = {Maiman, T. H.}"));
     }

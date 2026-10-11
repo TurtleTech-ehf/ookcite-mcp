@@ -166,6 +166,8 @@ pub fn apply_entry_metadata_overrides(
     assign("chapter", &args.chapter);
     assign("number", &args.number);
     assign("citation_key", &args.citation_key);
+    assign("howpublished", &args.howpublished);
+    assign("note", &args.note);
 
     if let Some(names) = &args.authors {
         let people: Vec<serde_json::Value> = names
@@ -179,6 +181,20 @@ pub fn apply_entry_metadata_overrides(
         } else {
             meta.insert("authors".into(), serde_json::Value::Array(people));
             lock_field(&mut meta, "authors");
+        }
+    }
+    if let Some(names) = &args.editor {
+        let people: Vec<serde_json::Value> = names
+            .iter()
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| person_from_name(name))
+            .collect();
+        if people.is_empty() {
+            meta.remove("editor");
+            unlock_field(&mut meta, "editor");
+        } else {
+            meta.insert("editor".into(), serde_json::Value::Array(people));
+            lock_field(&mut meta, "editor");
         }
     }
     if let Some(year) = args.year {
@@ -260,6 +276,9 @@ pub fn entry_metadata_overrides_present(args: &UpdateEntryMetadataArgs) -> bool 
         || args.chapter.is_some()
         || args.number.is_some()
         || args.citation_key.is_some()
+        || args.howpublished.is_some()
+        || args.note.is_some()
+        || args.editor.is_some()
         || args
             .clear
             .as_ref()

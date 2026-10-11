@@ -38,13 +38,15 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 webbrowser = { version = "1", features = ["hardened"] }
 zeroize = "1"
+# Advisory lock and same-directory temporary file for the local override store.
+fs4 = "1.1"
+tempfile = "3"
 
 [dev-dependencies]
 wiremock = "0.6"
 rsa = "0.9"
 http = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tempfile = "3"
 
 [lib]
 name = "ookcite_mcp"
