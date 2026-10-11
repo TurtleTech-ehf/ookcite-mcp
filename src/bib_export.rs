@@ -12,6 +12,31 @@ use serde_json::Value;
 pub struct BibOptions {
     /// `true` writes `@misc` plus `howpublished` instead of `@software`.
     pub software_as_misc: bool,
+    /// Where an article number goes.
+    pub eid_as: EidPlacement,
+}
+
+/// elsarticle-num and other classic styles never print `eid`, so an article
+/// with only an article number would show no locator at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EidPlacement {
+    /// Emit `eid`.
+    #[default]
+    Eid,
+    /// Emit the article number as `pages` when the record has no page range.
+    Pages,
+    /// Emit the article number in `note` when the record has no page range.
+    Note,
+}
+
+impl EidPlacement {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "pages" | "page" => Self::Pages,
+            "note" => Self::Note,
+            _ => Self::Eid,
+        }
+    }
 }
 
 impl BibOptions {
@@ -22,8 +47,25 @@ impl BibOptions {
         );
         Self {
             software_as_misc: misc,
+            eid_as: EidPlacement::Eid,
         }
     }
+
+    pub fn from_args(software_entry: &str, eid_as: &str) -> Self {
+        Self {
+            eid_as: EidPlacement::parse(eid_as),
+            ..Self::from_software_entry(software_entry)
+        }
+    }
+}
+
+/// Which kind of Zenodo record a software entry is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ZenodoRecord {
+    /// A concept DOI that resolves to every version.
+    Concept,
+    /// One version of a concept.
+    Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +100,9 @@ struct Work {
     howpublished: Option<String>,
     citation_key: Option<String>,
     from_crossref: bool,
+    zenodo: Option<ZenodoRecord>,
+    note_locked: bool,
+    howpublished_locked: bool,
 }
 
 impl Work {
@@ -86,6 +131,9 @@ impl Work {
             howpublished: None,
             citation_key: None,
             from_crossref: false,
+            zenodo: None,
+            note_locked: false,
+            howpublished_locked: false,
         }
     }
 }
@@ -206,6 +254,9 @@ fn assemble(stored: &Value, provider: Option<&Value>) -> Work {
         work.citation_key = stored_work.citation_key.clone();
     }
     copy_locked(&mut work, &stored_work, &locked);
+    if locked.contains("editor") {
+        work.editors = stored_work.editors.clone();
+    }
     if work.doi.is_empty() {
         work.doi = stored_work.doi;
     }
@@ -263,6 +314,13 @@ fn copy_locked(work: &mut Work, stored: &Work, locked: &HashSet<String>) {
         &stored.version,
     );
     take(locked.contains("note"), &mut work.note, &stored.note);
+    take(
+        locked.contains("howpublished"),
+        &mut work.howpublished,
+        &stored.howpublished,
+    );
+    work.note_locked = locked.contains("note");
+    work.howpublished_locked = locked.contains("howpublished");
     take(
         locked.contains("number"),
         &mut work.report_number,
@@ -457,9 +515,11 @@ fn label_zenodo_relations(work: &mut Work, attrs: &Value) {
     let version = text(attrs, "version");
     if let Some(concept) = version_of {
         work.version = version;
+        work.zenodo = Some(ZenodoRecord::Version);
         work.note = Some(format!("Zenodo version DOI; concept {concept}"));
     } else if has_version {
         work.version = None;
+        work.zenodo = Some(ZenodoRecord::Concept);
         work.note = Some(match version {
             Some(latest) => format!("Zenodo concept DOI; latest version {latest}"),
             None => "Zenodo concept DOI".into(),
@@ -483,6 +543,7 @@ fn apply_zenodo_payload(work: &mut Work, zenodo: &Value) {
     {
         work.doi = concept.to_ascii_lowercase();
         work.version = None;
+        work.zenodo = Some(ZenodoRecord::Concept);
         work.note = Some(match &version {
             Some(latest) => format!("Zenodo concept DOI; latest version {latest}"),
             None => "Zenodo concept DOI".into(),
@@ -490,6 +551,7 @@ fn apply_zenodo_payload(work: &mut Work, zenodo: &Value) {
     } else if !version_doi.is_empty() && requested == version_doi.to_ascii_lowercase() {
         work.doi = version_doi.to_ascii_lowercase();
         work.version = version.clone();
+        work.zenodo = Some(ZenodoRecord::Version);
         work.note = Some(if concept.is_empty() {
             "Zenodo version DOI".into()
         } else {
@@ -533,6 +595,9 @@ fn work_from_stored(meta: &Value) -> Work {
     work.note = text(meta, "note");
     work.howpublished = text(meta, "howpublished");
     work.citation_key = text(meta, "citation_key").or_else(|| text(meta, "cite_key"));
+    let locked = user_fields(meta);
+    work.note_locked = locked.contains("note");
+    work.howpublished_locked = locked.contains("howpublished");
     let kind = map_type(&work.source_type, false);
     if work.booktitle.is_none() && matches!(kind, "inproceedings" | "incollection") {
         work.booktitle = work.journal.take();
@@ -599,9 +664,12 @@ fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
     } else {
         map_type(&work.source_type, options.software_as_misc)
     };
+    let software_misc = options.software_as_misc
+        && bib_type == "misc"
+        && map_type(&work.source_type, false) == "software";
     let mut fields = Vec::new();
     if !work.title.is_empty() {
-        push_text(&mut fields, "title", &display_title(&work.title));
+        push_raw(&mut fields, "title", &display_title(&work.title));
     }
     if let Some(author) = format_people(&work.authors) {
         fields.push(format!("  author = {{{author}}}"));
@@ -612,12 +680,7 @@ fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
     match bib_type {
         "inproceedings" | "incollection" | "inbook" => {
             if let Some(booktitle) = &work.booktitle {
-                push_text(&mut fields, "booktitle", &display_title(booktitle));
-            }
-        }
-        "article" => {
-            if let Some(journal) = &work.journal {
-                push_text(&mut fields, "journal", journal);
+                push_raw(&mut fields, "booktitle", &display_title(booktitle));
             }
         }
         _ => {
@@ -642,13 +705,38 @@ fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
     if let Some(number) = number {
         push_plain(&mut fields, "number", &number);
     }
-    if let Some(pages) = &work.pages {
+    let mut pages = work.pages.clone();
+    let mut eid = work.eid.clone();
+    let mut eid_note = None;
+    if pages.is_none() && eid.is_some() {
+        match options.eid_as {
+            EidPlacement::Eid => {}
+            EidPlacement::Pages => pages = eid.take(),
+            EidPlacement::Note => eid_note = eid.take().map(|number| format!("Article {number}")),
+        }
+    } else if options.eid_as != EidPlacement::Eid {
+        // The page range already locates the article; a style that ignores
+        // `eid` gains nothing from a second locator.
+        eid = None;
+    }
+    if let Some(pages) = &pages {
         push_plain(&mut fields, "pages", &normalize_pages(pages));
     }
-    if let Some(eid) = &work.eid {
+    if let Some(eid) = &eid {
         push_plain(&mut fields, "eid", eid);
     }
-    if let Some(publisher) = &work.publisher {
+    let mut howpublished = work.howpublished.clone();
+    let mut note = work.note.clone();
+    let mut publisher = work.publisher.clone();
+    if software_misc {
+        if !work.howpublished_locked {
+            howpublished = Some(publisher.take().unwrap_or_else(|| "Software".into()));
+        }
+        if !work.note_locked {
+            note = software_note(work, howpublished.as_deref());
+        }
+    }
+    if let Some(publisher) = &publisher {
         push_text(&mut fields, "publisher", publisher);
     }
     if bib_type == "techreport" {
@@ -659,16 +747,16 @@ fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
     if let Some(version) = &work.version {
         push_plain(&mut fields, "version", version);
     }
-    let mut howpublished = work.howpublished.clone();
-    if options.software_as_misc && map_type(&work.source_type, false) == "software" {
-        howpublished = Some("Software".into());
-    }
     if bib_type == "misc" {
         if let Some(howpublished) = howpublished {
             push_text(&mut fields, "howpublished", &howpublished);
         }
     }
-    if let Some(note) = &work.note {
+    let note = match (note, eid_note) {
+        (Some(note), Some(extra)) => Some(format!("{note}, {extra}")),
+        (note, extra) => note.or(extra),
+    };
+    if let Some(note) = &note {
         push_text(&mut fields, "note", note);
     }
     if !work.editors.is_empty() && (work.editors != work.authors || bib_type == "techreport") {
@@ -689,12 +777,41 @@ fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
     format!("@{bib_type}{{{key},\n{}\n}}\n", fields.join(",\n"))
 }
 
-fn push_text(fields: &mut Vec<String>, name: &str, value: &str) {
+/// `note` of a software record written as `@misc`: what it is and which
+/// version, without the archive name already given in `howpublished`.
+fn software_note(work: &Work, howpublished: Option<&str>) -> Option<String> {
+    let label = if howpublished.is_some_and(|text| text.eq_ignore_ascii_case("software")) {
+        None
+    } else {
+        Some("Software")
+    };
+    let detail = match (&work.zenodo, &work.version) {
+        (Some(ZenodoRecord::Concept), _) => Some("all versions".to_string()),
+        (_, Some(version)) => Some(format!("version {}", version.trim_start_matches('v'))),
+        _ => None,
+    };
+    match (label, detail) {
+        (Some(label), Some(detail)) => Some(format!("{label}, {detail}")),
+        (Some(label), None) => Some(label.to_string()),
+        (None, Some(detail)) => Some(detail),
+        (None, None) => None,
+    }
+}
+
+/// A field whose value is already BibTeX (a protected title).
+fn push_raw(fields: &mut Vec<String>, name: &str, value: &str) {
     let value = value.trim();
     if value.is_empty() {
         return;
     }
     fields.push(format!("  {name} = {{{value}}}"));
+}
+
+/// A free-text field: entities decoded, markup and stray spacing removed,
+/// dashes normalised, and BibTeX specials escaped.
+fn push_text(fields: &mut Vec<String>, name: &str, value: &str) {
+    let value = escape_bib_text(&clean_text(value));
+    push_raw(fields, name, &value);
 }
 
 fn push_plain(fields: &mut Vec<String>, name: &str, value: &str) {
@@ -712,12 +829,17 @@ fn format_people(people: &[Person]) -> Option<String> {
             if person.family.trim().is_empty() {
                 return None;
             }
+            let family = clean_name(&person.family);
+            let given = clean_name(&person.given);
             if person.literal {
-                Some(format!("{{{}}}", person.family.trim()))
-            } else if person.given.trim().is_empty() {
-                Some(person.family.trim().to_string())
+                Some(format!("{{{family}}}"))
+            } else if given.is_empty() {
+                Some(family)
             } else {
-                Some(format!("{}, {}", person.family.trim(), person.given.trim()))
+                Some(format!(
+                    "{family}, {}",
+                    tex_initial_letters(&format_initials(&given))
+                ))
             }
         })
         .collect();
@@ -726,6 +848,66 @@ fn format_people(people: &[Person]) -> Option<String> {
     } else {
         Some(names.join(" and "))
     }
+}
+
+/// BibTeX abbreviates a given name by its first byte, which splits a UTF-8
+/// letter ("Ádám" becomes an invalid byte and a dot). An accented capital
+/// that starts a given-name part is written as a braced TeX accent instead.
+fn tex_initial_letters(given: &str) -> String {
+    let mut out = String::new();
+    let mut at_start = true;
+    for ch in given.chars() {
+        if at_start {
+            if let Some(tex) = tex_accent(ch) {
+                out.push_str(tex);
+                at_start = false;
+                continue;
+            }
+        }
+        out.push(ch);
+        at_start = ch.is_whitespace() || ch == '-' || ch == '.';
+    }
+    out
+}
+
+fn tex_accent(ch: char) -> Option<&'static str> {
+    Some(match ch {
+        'Á' => "{\\'A}",
+        'À' => "{\\`A}",
+        'Â' => "{\\^A}",
+        'Ä' => "{\\\"A}",
+        'Å' => "{\\AA}",
+        'Æ' => "{\\AE}",
+        'Ç' => "{\\c{C}}",
+        'Č' => "{\\v{C}}",
+        'É' => "{\\'E}",
+        'È' => "{\\`E}",
+        'Ê' => "{\\^E}",
+        'Ë' => "{\\\"E}",
+        'Í' => "{\\'I}",
+        'Î' => "{\\^I}",
+        'Ł' => "{\\L}",
+        'Ñ' => "{\\~N}",
+        'Ó' => "{\\'O}",
+        'Ô' => "{\\^O}",
+        'Ö' => "{\\\"O}",
+        'Ø' => "{\\O}",
+        'Ř' => "{\\v{R}}",
+        'Š' => "{\\v{S}}",
+        'Ś' => "{\\'S}",
+        'Ú' => "{\\'U}",
+        'Ü' => "{\\\"U}",
+        'Ý' => "{\\'Y}",
+        'Ž' => "{\\v{Z}}",
+        _ => return None,
+    })
+}
+
+/// A name with entities decoded, Unicode hyphens as `-`, and BibTeX specials escaped.
+fn clean_name(value: &str) -> String {
+    escape_bib_text(&normalize_spacing(&normalize_dashes(&decode_entities(
+        value.trim(),
+    ))))
 }
 
 fn generated_key(work: &Work) -> String {
@@ -802,7 +984,7 @@ fn map_type(raw: &str, software_as_misc: bool) -> &'static str {
 }
 
 fn display_title(raw: &str) -> String {
-    let cleaned = strip_tags(raw).trim().to_string();
+    let cleaned = clean_text(raw);
     let cased = if is_shouting(&cleaned) {
         title_case(&cleaned)
     } else {
@@ -865,27 +1047,72 @@ fn recase_word(word: &str, capitalize: bool) -> String {
     out
 }
 
+/// Brace what a sentence-casing style must not lowercase.
+///
+/// Acronyms, internal capitals, and names stay braced. In a sentence-case
+/// title any other capitalised word after the first is a name, so it is
+/// braced too. In a title-case title those capitals are only title casing,
+/// so only known names are braced and the style can lowercase the rest; that
+/// keeps every reference in one case. Brace groups already in the title are
+/// copied unchanged.
 fn protect_case(title: &str) -> String {
+    let title_cased = is_title_cased(title);
     let mut out = String::new();
     let mut word = String::new();
     let mut first_word = true;
-    for ch in title.chars() {
-        if ch.is_alphanumeric() || ch == '\'' || ch == '-' {
-            word.push(ch);
+    let chars: Vec<char> = title.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '{' {
+            flush_word(&mut word, &mut out, &mut first_word, title_cased);
+            let mut depth = 0;
+            while index < chars.len() {
+                let inner = chars[index];
+                out.push(inner);
+                index += 1;
+                if inner == '{' {
+                    depth += 1;
+                } else if inner == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+            first_word = false;
             continue;
         }
-        flush_word(&mut word, &mut out, &mut first_word);
-        out.push(ch);
+        if ch.is_alphanumeric() || ch == '\'' || ch == '-' {
+            word.push(ch);
+        } else {
+            flush_word(&mut word, &mut out, &mut first_word, title_cased);
+            out.push(ch);
+            // A sentence-casing style keeps the capital after a colon.
+            if ch == ':' {
+                first_word = true;
+            }
+        }
+        index += 1;
     }
-    flush_word(&mut word, &mut out, &mut first_word);
+    flush_word(&mut word, &mut out, &mut first_word, title_cased);
     out
 }
 
-fn flush_word(word: &mut String, out: &mut String, first_word: &mut bool) {
+fn flush_word(word: &mut String, out: &mut String, first_word: &mut bool, title_cased: bool) {
     if word.is_empty() {
         return;
     }
-    if needs_brace(word, *first_word) {
+    let lower = word.to_lowercase();
+    if let Some(proper) = LOWERCASE_NAMES
+        .iter()
+        .find(|(plain, _)| *plain == lower && word.as_str() == lower)
+        .map(|(_, proper)| *proper)
+    {
+        out.push('{');
+        out.push_str(proper);
+        out.push('}');
+    } else if needs_brace(word, *first_word, title_cased) {
         out.push('{');
         out.push_str(word);
         out.push('}');
@@ -896,22 +1123,131 @@ fn flush_word(word: &mut String, out: &mut String, first_word: &mut bool) {
     word.clear();
 }
 
-fn needs_brace(word: &str, first: bool) -> bool {
+/// Names a publisher sometimes prints in lowercase inside a title.
+const LOWERCASE_NAMES: &[(&str, &str)] = &[
+    ("python", "Python"),
+    ("gaussian", "Gaussian"),
+    ("bayesian", "Bayesian"),
+    ("hessian", "Hessian"),
+    ("newtonian", "Newtonian"),
+];
+
+/// Capitalised words that stay capitalised in a title-case title.
+const NAMES: &[&str] = &[
+    "Arrhenius",
+    "Bayesian",
+    "Boltzmann",
+    "Born",
+    "Brownian",
+    "Carlo",
+    "Cartesian",
+    "Cholesky",
+    "Dirac",
+    "Euler",
+    "Ewald",
+    "Eyring",
+    "Fock",
+    "Fortran",
+    "Fourier",
+    "Gaussian",
+    "Hamiltonian",
+    "Hartree",
+    "Hessian",
+    "Hubbard",
+    "Ising",
+    "Jones",
+    "Julia",
+    "Kohn",
+    "Kramers",
+    "Krylov",
+    "Lagrangian",
+    "Lanczos",
+    "Langevin",
+    "Laplace",
+    "Lennard",
+    "Markov",
+    "Monte",
+    "Newton",
+    "Oppenheimer",
+    "Poisson",
+    "Python",
+    "Raman",
+    "Rust",
+    "Schrödinger",
+    "Sham",
+    "Verlet",
+    "Wannier",
+];
+
+/// Most longer words after the first start with a capital.
+fn is_title_cased(title: &str) -> bool {
+    let mut capital = 0;
+    let mut total = 0;
+    let mut depth = 0i32;
+    let mut word = String::new();
+    let mut words = Vec::new();
+    for ch in title.chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+        if ch.is_alphabetic() || ch == '-' || ch == '\'' {
+            word.push(ch);
+        } else {
+            if !word.is_empty() {
+                words.push((std::mem::take(&mut word), depth > 0 || ch == '}'));
+            }
+        }
+    }
+    if !word.is_empty() {
+        words.push((word, false));
+    }
+    for (word, _) in words.iter().skip(1) {
+        let letters = word.chars().filter(|ch| ch.is_alphabetic()).count();
+        if letters < 4 {
+            continue;
+        }
+        total += 1;
+        if word.chars().next().is_some_and(char::is_uppercase) {
+            capital += 1;
+        }
+    }
+    total >= 2 && capital * 10 >= total * 6
+}
+
+fn needs_brace(word: &str, first: bool, title_cased: bool) -> bool {
     let letters: Vec<char> = word.chars().filter(|ch| ch.is_alphabetic()).collect();
     if letters.is_empty() {
         return false;
     }
     let uppers = letters.iter().filter(|ch| ch.is_uppercase()).count();
     let has_digit = word.chars().any(|ch| ch.is_ascii_digit());
-    let internal_upper = word
-        .chars()
-        .skip_while(|ch| !ch.is_alphabetic())
-        .skip(1)
-        .any(|ch| ch.is_uppercase());
-    if uppers >= 2 || internal_upper || (has_digit && uppers >= 1) {
+    // In a title-case title "Energy-Weighted" is two capitalised words, not a name.
+    let parts: Vec<&str> = if title_cased {
+        word.split('-').collect()
+    } else {
+        vec![word]
+    };
+    let internal_upper = parts.iter().any(|part| {
+        part.chars()
+            .skip_while(|ch| !ch.is_alphabetic())
+            .skip(1)
+            .any(|ch| ch.is_uppercase())
+    });
+    let part_uppers = parts
+        .iter()
+        .any(|part| part.chars().filter(|ch| ch.is_uppercase()).count() >= 2);
+    if part_uppers || internal_upper || (has_digit && uppers >= 1) {
         return true;
     }
-    !first && letters.first().is_some_and(|ch| ch.is_uppercase())
+    if first || !letters.first().is_some_and(|ch| ch.is_uppercase()) {
+        return false;
+    }
+    if !title_cased {
+        return true;
+    }
+    parts.iter().any(|part| NAMES.contains(part))
 }
 
 fn escape_bib_text(value: &str) -> String {
@@ -926,21 +1262,174 @@ fn escape_bib_text(value: &str) -> String {
     out
 }
 
+/// Plain text of a provider string: HTML entities decoded, JATS, HTML and
+/// MathML markup removed, whitespace collapsed, and dashes in TeX form.
+///
+/// Software names set in `<tt>`, `<monospace>`, `<code>`, or `<sc>`/`<scp>`
+/// are braced so their case survives. A small-caps run that continues a
+/// capital (`P<scp>ACKMOL</scp>`) is joined to it.
+fn clean_text(value: &str) -> String {
+    let decoded = decode_entities(value);
+    let without_tags = strip_tags(&decoded);
+    normalize_spacing(&normalize_dashes(&without_tags))
+}
+
 fn strip_tags(value: &str) -> String {
     let mut out = String::new();
-    let mut in_tag = false;
-    for ch in value.chars() {
-        if ch == '<' {
-            in_tag = true;
+    let chars: Vec<char> = value.chars().collect();
+    let mut index = 0;
+    let mut name_tags: Vec<bool> = Vec::new();
+    let mut run = String::new();
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch != '<' {
+            if name_tags.last().copied().unwrap_or(false) {
+                run.push(ch);
+            } else {
+                out.push(ch);
+            }
+            index += 1;
             continue;
         }
-        if ch == '>' && in_tag {
-            in_tag = false;
-            continue;
-        }
-        if !in_tag {
+        let Some(close) = chars[index..].iter().position(|ch| *ch == '>') else {
             out.push(ch);
+            index += 1;
+            continue;
+        };
+        let tag: String = chars[index + 1..index + close].iter().collect();
+        index += close + 1;
+        let tag = tag.trim();
+        let closing = tag.starts_with('/');
+        let name = tag
+            .trim_start_matches('/')
+            .split(|ch: char| ch.is_whitespace() || ch == '/')
+            .next()
+            .unwrap_or("")
+            .rsplit(':')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let is_name = matches!(name.as_str(), "tt" | "monospace" | "code" | "sc" | "scp");
+        if tag.ends_with('/') {
+            continue;
         }
+        if !closing {
+            name_tags.push(is_name);
+            continue;
+        }
+        let was_name = name_tags.pop().unwrap_or(false);
+        if !was_name || name_tags.last().copied().unwrap_or(false) {
+            continue;
+        }
+        let text = std::mem::take(&mut run).trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let trimmed_len = out.trim_end().len();
+        let before: Vec<char> = out[..trimmed_len].chars().collect();
+        let joins_capital = name.starts_with("sc")
+            && before.last().is_some_and(|ch| ch.is_uppercase())
+            && (before.len() == 1 || !before[before.len() - 2].is_alphanumeric());
+        if joins_capital {
+            let capital = before[before.len() - 1];
+            out.truncate(trimmed_len - capital.len_utf8());
+            out.push('{');
+            out.push(capital);
+            out.push_str(&text.to_uppercase());
+            out.push('}');
+        } else {
+            out.push('{');
+            out.push_str(&text);
+            out.push('}');
+        }
+    }
+    out.push_str(&run);
+    out
+}
+
+fn decode_entities(value: &str) -> String {
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let end = tail[1..]
+            .find(|ch: char| ch == ';' || ch.is_whitespace() || ch == '&')
+            .map(|offset| offset + 1);
+        let decoded = match end {
+            Some(end) if tail[end..].starts_with(';') => {
+                entity(&tail[1..end]).map(|ch| (ch, end + 1))
+            }
+            _ => None,
+        };
+        match decoded {
+            Some((ch, used)) => {
+                out.push_str(&ch);
+                rest = &tail[used..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn entity(name: &str) -> Option<String> {
+    let named = match name {
+        "amp" => "&",
+        "lt" => "<",
+        "gt" => ">",
+        "quot" => "\"",
+        "apos" => "'",
+        "nbsp" => " ",
+        "ndash" => "–",
+        "mdash" => "—",
+        "rsquo" => "’",
+        "lsquo" => "‘",
+        _ => "",
+    };
+    if !named.is_empty() {
+        return Some(named.to_string());
+    }
+    let code = name.strip_prefix('#')?;
+    let number = if let Some(hex) = code.strip_prefix('x').or_else(|| code.strip_prefix('X')) {
+        u32::from_str_radix(hex, 16).ok()?
+    } else {
+        code.parse().ok()?
+    };
+    char::from_u32(number).map(String::from)
+}
+
+/// TeX dashes: an em dash is `---`, an en dash or a spaced hyphen between
+/// words is `--`, and Unicode hyphens are `-`.
+fn normalize_dashes(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        match ch {
+            '—' | '―' => out.push_str("---"),
+            '–' => out.push_str("--"),
+            '‐' | '‑' | '‒' => out.push('-'),
+            _ => out.push(ch),
+        }
+    }
+    out.replace(" - ", " -- ")
+}
+
+/// One space between words, none before closing punctuation, none after an opening bracket.
+fn normalize_spacing(value: &str) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    for ch in collapsed.chars() {
+        if matches!(ch, ':' | ';' | ',' | '.' | ')' | '?' | '!') && out.ends_with(' ') {
+            out.pop();
+        }
+        if ch == ' ' && (out.ends_with('(') || out.ends_with('[')) {
+            continue;
+        }
+        out.push(ch);
     }
     out
 }
@@ -1014,8 +1503,14 @@ fn person_from_json(value: &Value) -> Option<Person> {
             literal: false,
         });
     }
+    // Crossref writes an organisation author as a bare `name`.
     if let Some(name) = text(value, "name") {
-        return person_from_display(&name);
+        let name = unwrap_braces(&name).unwrap_or(name);
+        return Some(Person {
+            family: name,
+            given: String::new(),
+            literal: true,
+        });
     }
     None
 }
@@ -1120,10 +1615,47 @@ fn soften_people(people: &mut [Person]) {
 
 fn soften_shouting(value: &str) -> String {
     let letters: Vec<char> = value.chars().filter(|ch| ch.is_alphabetic()).collect();
-    if letters.len() < 2 || letters.iter().any(|ch| ch.is_lowercase()) {
+    if letters.len() < 2 || letters.iter().any(|ch| ch.is_lowercase()) || is_initials(value) {
         return value.to_string();
     }
     recase_word(value, true)
+}
+
+/// "S.R.", "S. R.", "K.w." and "J" are initials only.
+fn is_initials(value: &str) -> bool {
+    let runs: Vec<&str> = value
+        .split(|ch: char| ch == '.' || ch.is_whitespace() || ch == '-')
+        .filter(|run| !run.is_empty())
+        .collect();
+    !runs.is_empty() && runs.iter().all(|run| run.chars().count() == 1)
+}
+
+/// Initials as "S. R.": upper case, each followed by a full stop and a space.
+fn format_initials(value: &str) -> String {
+    if !is_initials(value) || !value.contains('.') {
+        return value.to_string();
+    }
+    let mut out = Vec::new();
+    let mut hyphen_next = false;
+    let mut current = String::new();
+    for ch in value.chars() {
+        if ch.is_alphabetic() {
+            if hyphen_next {
+                current.push('-');
+                hyphen_next = false;
+            } else if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+            current.extend(ch.to_uppercase());
+            current.push('.');
+        } else if ch == '-' {
+            hyphen_next = true;
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out.join(" ")
 }
 
 fn unwrap_braces(value: &str) -> Option<String> {
@@ -1476,13 +2008,14 @@ mod tests {
         }));
         assert!(bib.starts_with("@incollection{"), "{bib}");
         assert!(
-            bib.contains("booktitle = {Radiation {Effects} in {Solids}}"),
+            bib.contains("booktitle = {Radiation Effects in Solids}"),
             "{bib}"
         );
         assert!(!bib.contains("NATO Science Series"), "{bib}");
         assert!(bib.contains("chapter = {1}"), "{bib}");
         assert!(bib.contains("pages = {1--23}"), "{bib}");
-        assert!(bib.contains("{Kinetic}"), "{bib}");
+        // Title case is left to the style; only the names stay braced.
+        assert!(bib.contains("Kinetic {Monte} {Carlo} Method"), "{bib}");
     }
 
     #[test]
@@ -1593,10 +2126,13 @@ mod tests {
             &[assemble(&stored, Some(&provider))],
             &BibOptions {
                 software_as_misc: true,
+                ..Default::default()
             },
         );
         assert!(misc.starts_with("@misc{"), "{misc}");
-        assert!(misc.contains("howpublished = {Software}"), "{misc}");
+        assert!(misc.contains("howpublished = {Zenodo}"), "{misc}");
+        assert!(misc.contains("note = {Software, all versions}"), "{misc}");
+        assert!(!misc.contains("publisher"), "{misc}");
     }
 
     #[test]
@@ -1684,6 +2220,294 @@ mod tests {
         );
         assert!(!bib.contains("Gunde"), "{bib}");
         assert!(bib.contains("Goswami, Rohit"), "{bib}");
+    }
+
+    #[test]
+    fn entities_and_title_markup_are_cleaned() {
+        let bib = bib_of(json!({
+            "crossref": {
+                "type": "journal-article",
+                "title": ["P\n                    <scp>ACKMOL</scp>\n                    : A package for building initial configurations"],
+                "container-title": ["Computing in Science &amp; Engineering"],
+                "DOI": "10.1002/jcc.21224",
+                "author": [{"given": "S.R.", "family": "Bahn"}, {"given": "K.W.", "family": "Jacobsen"}]
+            }
+        }));
+        assert!(
+            bib.contains("title = {{PACKMOL}: A package for building initial configurations}"),
+            "{bib}"
+        );
+        assert!(
+            bib.contains(r"journal = {Computing in Science \& Engineering}"),
+            "{bib}"
+        );
+        assert!(
+            bib.contains("author = {Bahn, S. R. and Jacobsen, K. W.}"),
+            "{bib}"
+        );
+
+        let bib = bib_of(json!({
+            "crossref": {
+                "type": "journal-article",
+                "title": ["<tt>metatensor</tt>\n   and\n   <tt>metatomic</tt>\n   : Foundational libraries"],
+                "DOI": "10.1063/5.0304911"
+            }
+        }));
+        assert!(
+            bib.contains("title = {{metatensor} and {metatomic}: Foundational libraries}"),
+            "{bib}"
+        );
+
+        let bib = bib_of(json!({
+            "crossref": {
+                "type": "journal-article",
+                "title": ["Efficient iterative schemes for\n   <i>ab initio</i>\n   total-energy calculations"],
+                "DOI": "10.1103/physrevb.54.11169"
+            }
+        }));
+        assert!(
+            bib.contains(
+                "title = {Efficient iterative schemes for ab initio total-energy calculations}"
+            ),
+            "{bib}"
+        );
+    }
+
+    #[test]
+    fn accented_initials_are_tex_accents() {
+        assert_eq!(tex_initial_letters("Ádám"), "{\\'A}dám");
+        assert_eq!(tex_initial_letters("Jean-Éric"), "Jean-{\\'E}ric");
+        assert_eq!(tex_initial_letters("Vilhjálmur"), "Vilhjálmur");
+        assert_eq!(tex_initial_letters("Ö. R."), "{\\\"O}. R.");
+    }
+
+    #[test]
+    fn dashes_and_spaces_are_normalised() {
+        assert_eq!(clean_name("Michaud\u{2010}Agrawal"), "Michaud-Agrawal");
+        assert_eq!(
+            clean_text("LAMMPS - a flexible tool"),
+            "LAMMPS -- a flexible tool"
+        );
+        assert_eq!(
+            clean_text("environment\u{2014}a library, OVITO\u{2013}the tool"),
+            "environment---a library, OVITO--the tool"
+        );
+        assert_eq!(clean_text("Michaud\u{2010}Agrawal"), "Michaud-Agrawal");
+        assert_eq!(
+            clean_text("implementation  - PLDI '90"),
+            "implementation -- PLDI '90"
+        );
+        assert_eq!(clean_text("a ( b ) , c &#x2013; d"), "a (b), c -- d");
+        assert_eq!(clean_text("R&D & more"), "R&D & more");
+    }
+
+    #[test]
+    fn title_case_is_left_to_the_style_and_names_stay_braced() {
+        assert_eq!(
+            display_title("Nudged Elastic Band Method Using Energy-Weighted Springs with Gaussian Process Regression"),
+            "Nudged Elastic Band Method Using Energy-Weighted Springs with {Gaussian} Process Regression"
+        );
+        assert_eq!(
+            display_title("Reaction-rate theory: fifty years after Kramers"),
+            "Reaction-rate theory: fifty years after {Kramers}"
+        );
+        assert_eq!(
+            display_title(
+                "Python Materials Genomics (pymatgen): A robust, open-source python library"
+            ),
+            "Python {Materials} {Genomics} (pymatgen): A robust, open-source {Python} library"
+        );
+        assert_eq!(
+            display_title("IEEE Standard for Floating-Point Arithmetic"),
+            "{IEEE} Standard for Floating-Point Arithmetic"
+        );
+        assert_eq!(
+            display_title("Updating quasi-Newton matrices with limited storage"),
+            "Updating {quasi-Newton} matrices with limited storage"
+        );
+        // Caller braces are copied unchanged.
+        assert_eq!(
+            display_title("The {JavaScript Object Notation (JSON)} Data Interchange Format"),
+            "The {JavaScript Object Notation (JSON)} Data Interchange Format"
+        );
+    }
+
+    #[test]
+    fn article_number_can_go_to_pages_or_note() {
+        let provider = json!({
+            "crossref": {
+                "type": "journal-article",
+                "title": ["Optimization methods for finding minimum energy paths"],
+                "container-title": ["The Journal of Chemical Physics"],
+                "volume": "128",
+                "issue": "13",
+                "article-number": "134106",
+                "DOI": "10.1063/1.2841941"
+            }
+        });
+        let work = assemble(&json!({"doi": "10.1063/1.2841941"}), Some(&provider));
+        let render = |eid_as| {
+            render_works(
+                std::slice::from_ref(&work),
+                &BibOptions {
+                    eid_as,
+                    ..Default::default()
+                },
+            )
+        };
+        let eid = render(EidPlacement::Eid);
+        assert!(
+            eid.contains("eid = {134106}") && !eid.contains("pages"),
+            "{eid}"
+        );
+        let pages = render(EidPlacement::Pages);
+        assert!(
+            pages.contains("pages = {134106}") && !pages.contains("eid ="),
+            "{pages}"
+        );
+        let note = render(EidPlacement::Note);
+        assert!(
+            note.contains("note = {Article 134106}") && !note.contains("eid ="),
+            "{note}"
+        );
+        assert_eq!(EidPlacement::parse("PAGES"), EidPlacement::Pages);
+        assert_eq!(EidPlacement::parse("anything"), EidPlacement::Eid);
+    }
+
+    #[test]
+    fn local_clear_removes_provider_fields() {
+        use crate::overrides::CollectionOverrides;
+        use crate::tool_args::UpdateEntryMetadataArgs;
+        let provider = json!({
+            "crossref": {
+                "type": "journal-article",
+                "title": ["Packmol"],
+                "author": [{"given": "L.", "family": "Martinez"}],
+                "container-title": ["Journal of Computational Chemistry"],
+                "issued": {"date-parts": [[2009, 3]]},
+                "volume": "30",
+                "DOI": "10.1002/jcc.21224",
+                "URL": "https://example.org/landing"
+            }
+        });
+        let mut store = CollectionOverrides::new("paper");
+        store.record(
+            "doi:10.1002/jcc.21224".into(),
+            &UpdateEntryMetadataArgs {
+                collection: "paper".into(),
+                entry_id: "e1".into(),
+                clear: Some(vec!["year".into(), "volume".into(), "url".into()]),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![
+            json!({"id": "e1", "metadata": {"doi": "10.1002/jcc.21224", "date": {"year": 2009}}}),
+        ];
+        store.apply_to_entries(&mut entries);
+        let bib = render_works(
+            &[assemble(&entries[0]["metadata"], Some(&provider))],
+            &BibOptions::default(),
+        );
+        assert!(bib.contains("journal = {"), "{bib}");
+        assert!(!bib.contains("year ="), "{bib}");
+        assert!(!bib.contains("volume ="), "{bib}");
+        assert!(!bib.contains("url ="), "{bib}");
+    }
+
+    #[test]
+    fn local_override_wins_over_the_provider_record() {
+        use crate::overrides::{apply, EntryOverride};
+        let provider = json!({
+            "crossref": {
+                "type": "report",
+                "title": ["The JavaScript Object Notation (JSON) Data Interchange Format"],
+                "author": [{"given": "Tim", "family": "Bray"}],
+                "editor": [{"given": "T.", "family": "Bray"}],
+                "publisher": "RFC Editor",
+                "DOI": "10.17487/rfc8259",
+                "URL": "https://www.rfc-editor.org/info/rfc8259"
+            }
+        });
+        let mut ov = EntryOverride::default();
+        ov.fields.insert("url".into(), None);
+        ov.fields
+            .insert("citation_key".into(), Some("brayJson2017".into()));
+        ov.fields
+            .insert("entry_type".into(), Some("techreport".into()));
+        ov.editor = Some(Vec::new());
+        let stored = apply(&json!({"doi": "10.17487/rfc8259"}), &ov);
+        let bib = render_works(
+            &[assemble(&stored, Some(&provider))],
+            &BibOptions::default(),
+        );
+        assert!(bib.starts_with("@techreport{brayJson2017,"), "{bib}");
+        assert!(!bib.contains("editor"), "{bib}");
+        assert!(!bib.contains("url ="), "{bib}");
+        assert!(bib.contains("number = {8259}"), "{bib}");
+
+        let provider = json!({
+            "crossref": {
+                "type": "journal-article",
+                "title": ["Software citation principles"],
+                "author": [{"given": "Arfon M.", "family": "Smith"}, {"name": "FORCE11 Software Citation Working Group"}],
+                "DOI": "10.7717/peerj-cs.86"
+            }
+        });
+        let ov = EntryOverride {
+            authors: Some(vec![
+                json!({"family": "Smith", "given": "Arfon M."}),
+                json!({"family": "FORCE11 Software Citation Working Group", "literal": true}),
+            ]),
+            ..Default::default()
+        };
+        let stored = apply(&json!({"doi": "10.7717/peerj-cs.86"}), &ov);
+        let bib = render_works(
+            &[assemble(&stored, Some(&provider))],
+            &BibOptions::default(),
+        );
+        assert!(
+            bib.contains(
+                "author = {Smith, Arfon M. and {FORCE11 Software Citation Working Group}}"
+            ),
+            "{bib}"
+        );
+    }
+
+    #[test]
+    fn readcon_fixture_renders_clean_text() {
+        let providers: HashMap<String, Value> =
+            serde_json::from_str(include_str!("../tests/fixtures/providers.json")).unwrap();
+        let mut dois: Vec<&String> = providers.keys().collect();
+        dois.sort();
+        let works: Vec<Work> = dois
+            .iter()
+            .map(|doi| assemble(&json!({"doi": doi}), Some(&providers[*doi])))
+            .collect();
+        let options = BibOptions {
+            software_as_misc: true,
+            eid_as: EidPlacement::Pages,
+        };
+        let exported = render_works(&works, &options);
+        for entry in split_entries(&exported) {
+            for line in entry.lines().skip(1) {
+                let line = line.trim();
+                if line == "}" || line.is_empty() {
+                    continue;
+                }
+                assert!(
+                    line.contains(" = {"),
+                    "field broken over lines: {line}\n{entry}"
+                );
+                assert!(!line.contains("&amp;"), "{entry}");
+                assert!(!line.contains('<'), "{entry}");
+                assert!(!line.contains("  "), "{entry}");
+                assert!(!line.contains(" - "), "{entry}");
+                assert!(!line.starts_with("eid ="), "{entry}");
+            }
+            if entry.contains("howpublished = {Zenodo}") {
+                assert!(entry.contains("note = {Software, "), "{entry}");
+            }
+        }
     }
 
     #[test]

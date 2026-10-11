@@ -167,7 +167,17 @@ pub struct ExportCollectionArgs {
     /// How a software record is written in BibTeX: `software` (default) or `misc` (with `howpublished`)
     #[serde(default = "default_software_entry")]
     pub software_entry: String,
+    /// Where an article number goes: `eid` (default), `pages` (for styles such as elsarticle-num that ignore `eid`), or `note`
+    #[serde(default = "default_eid_as")]
+    pub eid_as: String,
+    /// Lay the local override file of this collection over the server record (default true)
+    #[serde(default = "default_true")]
+    pub local_overrides: bool,
 }
+pub fn default_eid_as() -> String {
+    "eid".into()
+}
+
 pub fn default_export_format() -> String {
     "bib".into()
 }
@@ -487,9 +497,21 @@ pub struct UpdateEntryMetadataArgs {
     /// Citation key to keep on export. An empty string deletes the field.
     #[serde(default)]
     pub citation_key: Option<String>,
-    /// Field names to remove (`affiliation`, `editor`, `issn`, `year`, ...).
+    /// BibTeX `howpublished`, such as "IEEE Std 754-2019". An empty string deletes the field.
+    #[serde(default)]
+    pub howpublished: Option<String>,
+    /// BibTeX `note`. An empty string deletes the field.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Replacement editor list, in the same form as `authors`. An empty list deletes editors.
+    #[serde(default)]
+    pub editor: Option<Vec<String>>,
+    /// Field names to remove (`affiliation`, `editor`, `issn`, `year`, ...). A cleared field is also left out of the export, even when Crossref or DataCite supplies it, until it is set again.
     #[serde(default)]
     pub clear: Option<Vec<String>>,
+    /// Write the edit only to the local override file and skip the server update. Only a server on the caller's machine (stdio, or HTTP with auth=none) keeps local overrides; a signed-in HTTP server returns an error and changes nothing.
+    #[serde(default)]
+    pub local_only: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
