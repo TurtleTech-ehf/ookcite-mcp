@@ -10,6 +10,8 @@ use ookcite_mcp::endpoints;
 pub struct ReverseLookupMatch {
     pub output: String,
     pub top_score: f64,
+    /// DOI of the hit that `top_score` describes, when that hit has one.
+    pub top_doi: Option<String>,
 }
 
 pub fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<ReverseLookupMatch> {
@@ -26,21 +28,27 @@ pub fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<Reve
     };
     let mut out = Vec::new();
     let mut top_score = f64::NEG_INFINITY;
+    let mut top_doi = None;
     // `/api/v1/resolve` answers with the chosen `paper` *and* keeps that
     // same record in `candidates`. Rendering both printed every top hit
     // twice, which read as the corpus holding duplicate works rather
     // than as a formatting bug. Remember what `paper` claimed so the
-    // candidate loop can skip it.
+    // candidate loop can skip it. The paper's confidence is that
+    // candidate's score. A fixed 100 hid a weak hit from the live fallback.
     let mut seen: Option<(String, String)> = None;
+    let mut saw_paper = false;
     if let Some(paper) = payload.get("paper") {
+        saw_paper = true;
         let title = paper["title"].as_str().unwrap_or("?");
         let doi = paper["doi"].as_str().unwrap_or("?");
         let journal = paper["journal"].as_str().unwrap_or("N/A");
         let authors = format_author_list(paper);
+        let score = paper_candidate_score(paper, &array_candidates);
         out.push(format!(
-            "1. [confidence:100] title: {title} | {authors} | {journal} (doi:{doi})"
+            "1. [confidence:{score:.0}] title: {title} | {authors} | {journal} (doi:{doi})"
         ));
-        top_score = top_score.max(100.0);
+        top_score = score;
+        top_doi = real_doi(doi);
         seen = Some((
             doi.trim().to_ascii_lowercase(),
             title.trim().to_ascii_lowercase(),
@@ -65,11 +73,17 @@ pub fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<Reve
                 cand_title == *seen_title
             };
             if same {
-                top_score = top_score.max(score);
                 continue;
             }
         }
-        top_score = top_score.max(score);
+        if !saw_paper {
+            if score > top_score {
+                top_score = score;
+                top_doi = real_doi(doi);
+            } else if top_doi.is_none() {
+                top_doi = real_doi(doi);
+            }
+        }
         out.push(format!(
             "{}. [confidence:{:.0}] title: {title} | {authors} | {journal} (doi:{doi})",
             out.len() + 1,
@@ -79,11 +93,63 @@ pub fn format_reverse_lookup_payload(payload: &serde_json::Value) -> Option<Reve
     if out.is_empty() {
         None
     } else {
+        if !top_score.is_finite() {
+            top_score = 0.0;
+        }
         Some(ReverseLookupMatch {
             output: out.join("\n"),
             top_score,
+            top_doi,
         })
     }
+}
+
+fn real_doi(doi: &str) -> Option<String> {
+    let doi = doi.trim();
+    if doi.is_empty() || doi == "?" {
+        None
+    } else {
+        Some(doi.to_string())
+    }
+}
+
+fn paper_candidate_score(paper: &serde_json::Value, candidates: &[serde_json::Value]) -> f64 {
+    let paper_doi = paper["doi"]
+        .as_str()
+        .unwrap_or("?")
+        .trim()
+        .to_ascii_lowercase();
+    let paper_title = paper["title"]
+        .as_str()
+        .unwrap_or("?")
+        .trim()
+        .to_ascii_lowercase();
+    candidates
+        .iter()
+        .find_map(|candidate| {
+            let meta = candidate.get("metadata").unwrap_or(candidate);
+            let doi = meta["doi"]
+                .as_str()
+                .unwrap_or("?")
+                .trim()
+                .to_ascii_lowercase();
+            let title = meta["title"]
+                .as_str()
+                .unwrap_or("?")
+                .trim()
+                .to_ascii_lowercase();
+            let same = if paper_doi != "?" && doi != "?" {
+                paper_doi == doi
+            } else {
+                paper_title == title
+            };
+            if same {
+                Some(candidate["score"].as_f64().unwrap_or(0.0))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0.0)
 }
 
 fn format_author_list(meta: &serde_json::Value) -> String {
@@ -513,7 +579,7 @@ mod tests {
             "numbering must stay sequential: {}",
             lines[1]
         );
-        assert!(lines[0].contains("[confidence:100]"));
+        assert!(lines[0].contains("[confidence:9]"));
         assert!(lines[0].contains("title: A"));
     }
 
