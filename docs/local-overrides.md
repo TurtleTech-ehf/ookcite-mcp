@@ -4,6 +4,17 @@ The OokCite API accepts `update_entry_metadata` edits but does not yet store eve
 The open items are listed in [`ookcite-api-export.md`](ookcite-api-export.md).
 Until the API stores them, `ookcite-mcp` keeps each edit in a local file and applies it on export, so the `.bib` still comes only from `export_collection`.
 
+## Which servers keep it
+
+The file is keyed by collection name only, so it belongs to the one person who runs the process.
+The process decides once at startup whether it keeps the store:
+
+- The stdio server keeps it.
+- `ookcite-mcp serve` with `auth=none` keeps it, since that mode is a copy for one person.
+- `ookcite-mcp serve` with bearer or OAuth auth never reads or writes it, since one user's edits would otherwise reach another user's export of a collection with the same name.
+
+On a server without the store, `update_entry_metadata` updates the server record only, `local_only=true` returns an error and changes nothing, and `export_collection` exports the server record alone.
+
 ## Where the file lives
 
 One JSON file per collection:
@@ -13,12 +24,13 @@ One JSON file per collection:
 3. Otherwise `~/.local/share/ookcite/overrides/<collection>.json`.
 
 Characters outside `A-Z a-z 0-9 . _ -` in the collection name become `_` in the file name.
-The file is written through a temporary sibling and renamed, so an interrupted write never leaves half a file.
+Each edit reads, changes and writes the file while it holds an exclusive advisory lock on `<collection>.json.lock`, so concurrent edits from several threads or processes are applied one after another.
+The file is written to a uniquely named temporary file in the same directory and renamed over the old one, so an interrupted write never leaves half a file and two writers never share a temporary name.
 
 ## How edits reach it
 
 `update_entry_metadata` folds every call into the file before it sends the PUT to the server.
-The reply names the file.
+The reply names the DOI or entry and the collection, never a path on the machine.
 If the server rejects the PUT (for example `entry_type=techreport`, which the API enum refuses), the local override is still saved and the reply says so.
 `local_only=true` writes only the local file.
 
@@ -58,12 +70,21 @@ A string replaces the provider value.
 `null` removes the field from the export, even when Crossref or DataCite has it.
 `authors` and `editor` are person lists; an empty list removes them.
 A person with `"literal": true` is one organisation name and exports braced.
-`year` replaces the year.
+`year` replaces the year, and `"year": null` removes it from the export.
+
+## Clearing a field
+
+`clear` in `update_entry_metadata` records a removal marker for each name: `null` in `fields`, an empty `authors` or `editor` list, or `"year": null`.
+Export leaves a cleared field out even when Crossref or DataCite supplies a value for it, so `clear=["year"]` drops the provider year too.
+Setting the field again later replaces the marker.
 
 ## Export
 
 `export_collection` loads the file, lays each override over the server record, and marks every overridden field as caller-set, so the provider value does not replace it.
 `local_overrides=false` exports the server record alone.
+
+A file that cannot be read or parsed does not stop the export.
+The full path and the error go to stderr, and the BibTeX starts with a `%` comment that names the collection and says the overrides were not applied.
 
 `eid_as` chooses where an article number goes:
 

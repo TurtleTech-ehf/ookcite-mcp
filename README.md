@@ -336,10 +336,12 @@ Typical workflow:
 4. Treat the collection as an audit/export companion, not the only copy of your bibliography
 
 **Local overrides:** the API does not yet store every field
-`update_entry_metadata` sends, so each edit is also kept in
-`$XDG_DATA_HOME/ookcite/overrides/<collection>.json` and applied by
-`export_collection`. `eid_as=pages` places article numbers where elsarticle-num
-prints them. See [`docs/local-overrides.md`](docs/local-overrides.md).
+`update_entry_metadata` sends, so a copy running on your own machine (stdio, or
+`serve` with `auth=none`) also keeps each edit in
+`$XDG_DATA_HOME/ookcite/overrides/<collection>.json` and applies it in
+`export_collection`. A signed-in HTTP server keeps no local overrides.
+`eid_as=pages` places article numbers where elsarticle-num prints them. See
+[`docs/local-overrides.md`](docs/local-overrides.md).
 
 **Removing a single entry:** call `search_collection` (or `check_duplicates`) to
 see each hit as `entry_id: …` (and optionally `aliases: doi:…` when the stored id
