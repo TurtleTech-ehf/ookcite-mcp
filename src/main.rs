@@ -72,7 +72,10 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let server = Server::new();
+    // One person on this machine: keep the local override store.
+    let server = Server::new().with_overrides(overrides::OverrideStore::for_transport(
+        overrides::Transport::Stdio,
+    ));
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
     Ok(())

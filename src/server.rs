@@ -94,6 +94,8 @@ pub struct Server {
     /// Crossref, DataCite, Zenodo, and doi.org. Absent in unit tests so they
     /// stay on the mocked OokCite API and never call a live provider.
     providers: Option<ProviderBases>,
+    /// Local override store, decided once by the entry point. Off unless set.
+    overrides: overrides::OverrideStore,
 }
 
 #[tool_router]
@@ -107,7 +109,15 @@ impl Server {
             api_base: api_base_url(),
             doi_cache: shared_doi_cache().clone(),
             providers: Some(ProviderBases::production()),
+            overrides: overrides::OverrideStore::Disabled,
         }
+    }
+
+    /// Use the override store the entry point chose with
+    /// [`overrides::OverrideStore::for_transport`].
+    pub fn with_overrides(mut self, store: overrides::OverrideStore) -> Self {
+        self.overrides = store;
+        self
     }
 
     async fn fetch_me_quota(&self) -> Option<MeQuota> {
@@ -1342,7 +1352,7 @@ impl Server {
 
     #[tool(
         name = "export_collection",
-        description = "Export a collection as BibTeX (format=bib, default) or CSL bibliography text (format=csl, or pass a CSL style id such as apa/ieee). BibTeX is rendered here from Crossref or DataCite fields: proceedings get a booktitle, types and numbers follow the provider, a stored citation_key is kept, and a DOI is not repeated as a URL. Local overrides recorded by update_entry_metadata are applied first (local_overrides=false skips them). software_entry=misc writes @misc with howpublished instead of @software. eid_as=pages or eid_as=note places an article number where styles that ignore eid, such as elsarticle-num, print it. Call this when the user wants the collection as a file or as formatted copy-out.",
+        description = "Export a collection as BibTeX (format=bib, default) or CSL bibliography text (format=csl, or pass a CSL style id such as apa/ieee). BibTeX is rendered here from Crossref or DataCite fields: proceedings get a booktitle, types and numbers follow the provider, a stored citation_key is kept, and a DOI is not repeated as a URL. Local overrides recorded by update_entry_metadata are applied first when this server keeps them (stdio, or HTTP with auth=none); local_overrides=false skips them, and an unreadable override file is skipped with a warning comment. software_entry=misc writes @misc with howpublished instead of @software. eid_as=pages or eid_as=note places an article number where styles that ignore eid, such as elsarticle-num, print it. Call this when the user wants the collection as a file or as formatted copy-out.",
         annotations(
             title = "Export collection bibliography",
             read_only_hint = true,
@@ -1377,14 +1387,20 @@ impl Server {
                     return "Collection is empty.".into();
                 }
                 let mut entries = entries;
+                let mut warning = None;
                 if args.local_overrides {
-                    match overrides::load(&args.collection) {
-                        Ok(store) => store.apply_to_entries(&mut entries),
-                        Err(error) => return error,
+                    match self.overrides.load_for_export(&args.collection) {
+                        overrides::Loaded::Store(store) => store.apply_to_entries(&mut entries),
+                        overrides::Loaded::Skipped(note) => warning = note,
                     }
                 }
                 let options = BibOptions::from_args(&args.software_entry, &args.eid_as);
-                self.render_collection_bib(&entries, options).await
+                let bib = self.render_collection_bib(&entries, options).await;
+                match warning {
+                    // A leading % line is a comment to BibTeX.
+                    Some(warning) => format!("% {warning}\n{bib}"),
+                    None => bib,
+                }
             }
             ExportKind::Csl { style } => {
                 let r = self
@@ -3037,7 +3053,7 @@ impl Server {
 
     #[tool(
         name = "update_entry_metadata",
-        description = "Correct the stored metadata of one collection entry: title, authors, editor, journal, year, volume, issue, pages, publisher, DOI, URL, version, eid, booktitle, entry_type, institution, chapter, number, howpublished, note, or citation_key. An empty string deletes that field. clear lists further field names to remove. Every edit is also kept in a local override file for the collection, which export_collection applies, so a field the server does not store still reaches the BibTeX; local_only=true skips the server update. A braced author such as \"{IEEE Computer Society}\" is stored as one organisation. Call this when a DOI resolved to the wrong record, or came back with fields missing, and the user wants the saved entry fixed rather than removed and re-added. Fields left unset keep their current values, and the entry's tags, note, and position in the collection are preserved.",
+        description = "Correct the stored metadata of one collection entry: title, authors, editor, journal, year, volume, issue, pages, publisher, DOI, URL, version, eid, booktitle, entry_type, institution, chapter, number, howpublished, note, or citation_key. An empty string deletes that field. clear lists further field names to remove; a cleared field, year included, is also left out of the export even when Crossref or DataCite supplies it. When this server runs on the caller's machine (stdio, or HTTP with auth=none), every edit is also kept in a local override file for the collection, which export_collection applies, so a field the server does not store still reaches the BibTeX; local_only=true skips the server update. A shared HTTP server with sign-in keeps no local overrides and refuses local_only. A braced author such as \"{IEEE Computer Society}\" is stored as one organisation. Call this when a DOI resolved to the wrong record, or came back with fields missing, and the user wants the saved entry fixed rather than removed and re-added. Fields left unset keep their current values, and the entry's tags, note, and position in the collection are preserved.",
         annotations(
             title = "Edit collection entry metadata",
             read_only_hint = false,
@@ -3073,23 +3089,24 @@ impl Server {
             return format!("Entry {eid} has no stored metadata to edit.");
         };
         let metadata = apply_entry_metadata_overrides(current, &args);
-        let local = record_local_override(&args, &eid, current);
+        let local = self.record_local_override(&args, &eid, current);
         if args.local_only {
             return match local {
-                LocalOverride::Saved(path) => format!(
-                    "Saved a local override for entry {eid} in '{}' ({}). The server record was not changed.",
-                    args.collection,
-                    path.display()
-                ),
-                LocalOverride::Skipped => {
-                    "local_only was set but no override directory is available (set OOKCITE_OVERRIDES_DIR, XDG_DATA_HOME or HOME).".into()
+                LocalOverride::Saved(saved) => {
+                    format!("{saved} The server record was not changed.")
                 }
-                LocalOverride::Failed(error) => error,
+                LocalOverride::Off => format!(
+                    "local_only was not applied. {} The server record was not changed.",
+                    overrides::DISABLED_MESSAGE
+                ),
+                LocalOverride::Failed(error) => {
+                    format!("{error} The server record was not changed.")
+                }
             };
         }
         let local_note = match &local {
-            LocalOverride::Saved(path) => format!(" Local override saved to {}.", path.display()),
-            LocalOverride::Skipped => String::new(),
+            LocalOverride::Saved(saved) => format!(" {saved}"),
+            LocalOverride::Off => String::new(),
             LocalOverride::Failed(error) => format!(" {error}"),
         };
         let r = self
@@ -3188,32 +3205,40 @@ impl Server {
     }
 }
 
+/// Outcome of keeping an edit locally. Every message is path-free.
 enum LocalOverride {
-    Saved(std::path::PathBuf),
-    Skipped,
+    Saved(String),
+    /// This process keeps no local overrides (a shared HTTP server).
+    Off,
     Failed(String),
 }
 
-/// Record an edit in the local override file of its collection. The server
-/// does not yet persist every field, so export reads this file back.
-fn record_local_override(
-    args: &UpdateEntryMetadataArgs,
-    entry_id: &str,
-    current: &serde_json::Value,
-) -> LocalOverride {
-    let Some(dir) = overrides::store_dir() else {
-        return LocalOverride::Skipped;
-    };
-    let doi = current.get("doi").and_then(|value| value.as_str());
-    let key = overrides::CollectionOverrides::key_for(entry_id, doi);
-    let mut store = match overrides::load_from(&dir, &args.collection) {
-        Ok(store) => store,
-        Err(error) => return LocalOverride::Failed(format!("Local override not saved: {error}")),
-    };
-    store.record(key, args);
-    match overrides::save_to(&dir, &store) {
-        Ok(path) => LocalOverride::Saved(path),
-        Err(error) => LocalOverride::Failed(format!("Local override not saved: {error}")),
+impl Server {
+    /// Record an edit in the local override file of its collection. The server
+    /// does not yet persist every field, so export reads this file back.
+    fn record_local_override(
+        &self,
+        args: &UpdateEntryMetadataArgs,
+        entry_id: &str,
+        current: &serde_json::Value,
+    ) -> LocalOverride {
+        if self.overrides == overrides::OverrideStore::Disabled {
+            return LocalOverride::Off;
+        }
+        let doi = current
+            .get("doi")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|doi| !doi.is_empty());
+        let key = overrides::CollectionOverrides::key_for(entry_id, doi);
+        match self.overrides.record(&args.collection, key, args) {
+            Ok(()) => LocalOverride::Saved(format!(
+                "Saved a local override for {} in collection '{}'.",
+                doi.map_or_else(|| format!("entry {entry_id}"), str::to_string),
+                args.collection
+            )),
+            Err(error) => LocalOverride::Failed(format!("Local override not saved: {error}")),
+        }
     }
 }
 
@@ -3461,6 +3486,7 @@ impl Server {
             api_base,
             doi_cache: DoiResponseCache::with_default_ttl(),
             providers: None,
+            overrides: overrides::OverrideStore::Disabled,
         }
     }
 
@@ -6744,7 +6770,6 @@ mod tests {
     #[tokio::test]
     async fn update_entry_metadata_records_a_local_override() {
         let dir = tempfile::tempdir().unwrap();
-        let _dir = EnvGuard::set("OOKCITE_OVERRIDES_DIR", dir.path().to_str().unwrap());
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/collections"))
@@ -6780,7 +6805,8 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let server = test_server(&mock.uri());
+        let server = test_server(&mock.uri())
+            .with_overrides(overrides::OverrideStore::Enabled(dir.path().to_path_buf()));
         let out = server
             .update_entry_metadata(Parameters(UpdateEntryMetadataArgs {
                 collection: "Refs".into(),
@@ -6791,7 +6817,12 @@ mod tests {
             }))
             .await;
         assert!(out.contains("Updated entry e1"), "{out}");
-        assert!(out.contains("Local override saved"), "{out}");
+        assert!(
+            out.contains("Saved a local override for 10.1002/JCC.21224 in collection 'Refs'."),
+            "{out}"
+        );
+        let shown = dir.path().to_string_lossy().into_owned();
+        assert!(!out.contains(&shown) && !out.contains(".json"), "{out}");
 
         let out = server
             .update_entry_metadata(Parameters(UpdateEntryMetadataArgs {
@@ -6803,6 +6834,7 @@ mod tests {
             }))
             .await;
         assert!(out.contains("The server record was not changed"), "{out}");
+        assert!(!out.contains(&shown) && !out.contains(".json"), "{out}");
 
         let store = overrides::load_from(dir.path(), "Refs").unwrap();
         let entry = &store.entries["doi:10.1002/jcc.21224"];
@@ -6815,6 +6847,162 @@ mod tests {
             Some("{PACKMOL}: A package")
         );
         assert_eq!(entry.fields["url"], None);
+    }
+
+    /// GET mocks for collection "Refs" (id c1) with one entry carrying a year.
+    async fn mount_refs_collection(mock: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "c1", "name": "Refs"}
+            ])))
+            .mount(mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/c1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "c1",
+                "name": "Refs",
+                "entries": [{
+                    "id": "e1",
+                    "metadata": {
+                        "entry_type": "Article",
+                        "title": "Packmol",
+                        "doi": "10.1002/jcc.21224",
+                        "journal": "Journal of Computational Chemistry",
+                        "date": {"year": 2009},
+                        "authors": [{"family": "Martinez", "given": "L."}]
+                    }
+                }]
+            })))
+            .mount(mock)
+            .await;
+    }
+
+    fn export_args() -> ExportCollectionArgs {
+        ExportCollectionArgs {
+            collection: "Refs".into(),
+            format: "bib".into(),
+            style: "apa".into(),
+            software_entry: "software".into(),
+            eid_as: "eid".into(),
+            local_overrides: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_http_server_keeps_no_local_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file that would change the export if it were read.
+        let mut planted = overrides::CollectionOverrides::new("Refs");
+        planted.record(
+            "doi:10.1002/jcc.21224".into(),
+            &UpdateEntryMetadataArgs {
+                collection: "Refs".into(),
+                entry_id: "e1".into(),
+                citation_key: Some("leakedKey".into()),
+                ..Default::default()
+            },
+        );
+        overrides::save_to(dir.path(), "Refs", &planted).unwrap();
+        let before = std::fs::read_to_string(dir.path().join("Refs.json")).unwrap();
+        let _dir = EnvGuard::set("OOKCITE_OVERRIDES_DIR", dir.path().to_str().unwrap());
+
+        let mock = MockServer::start().await;
+        mount_refs_collection(&mock).await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/collections/c1/entries/e1/metadata"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "e1",
+                "metadata": {"title": "Packmol"}
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        for auth in [
+            crate::inbound_auth::HttpAuthMode::Oauth,
+            crate::inbound_auth::HttpAuthMode::Bearer,
+        ] {
+            let store = overrides::OverrideStore::for_transport(overrides::Transport::Http(auth));
+            assert_eq!(store, overrides::OverrideStore::Disabled, "{auth:?}");
+        }
+        let server =
+            test_server(&mock.uri()).with_overrides(overrides::OverrideStore::for_transport(
+                overrides::Transport::Http(crate::inbound_auth::HttpAuthMode::Oauth),
+            ));
+
+        let out = server
+            .update_entry_metadata(Parameters(UpdateEntryMetadataArgs {
+                collection: "Refs".into(),
+                entry_id: "e1".into(),
+                citation_key: Some("otherUserKey".into()),
+                local_only: true,
+                ..Default::default()
+            }))
+            .await;
+        assert!(out.contains("not kept by this shared server"), "{out}");
+        assert!(out.contains("The server record was not changed"), "{out}");
+
+        let out = server
+            .update_entry_metadata(Parameters(UpdateEntryMetadataArgs {
+                collection: "Refs".into(),
+                entry_id: "e1".into(),
+                citation_key: Some("otherUserKey".into()),
+                ..Default::default()
+            }))
+            .await;
+        assert!(out.contains("Updated entry e1"), "{out}");
+        assert!(!out.contains("local override"), "{out}");
+
+        let bib = server.export_collection(Parameters(export_args())).await;
+        assert!(bib.contains("@article{"), "{bib}");
+        assert!(!bib.contains("leakedKey"), "{bib}");
+        let after = std::fs::read_to_string(dir.path().join("Refs.json")).unwrap();
+        assert_eq!(before, after);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn export_skips_a_corrupt_override_file_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Refs.json"), "{\"entries\": [oops").unwrap();
+        let mock = MockServer::start().await;
+        mount_refs_collection(&mock).await;
+        let server = test_server(&mock.uri())
+            .with_overrides(overrides::OverrideStore::Enabled(dir.path().to_path_buf()));
+        let bib = server.export_collection(Parameters(export_args())).await;
+        assert!(
+            bib.starts_with("% Warning: the local override file for collection 'Refs'"),
+            "{bib}"
+        );
+        assert!(bib.contains("@article{"), "{bib}");
+        assert!(bib.contains("year = {2009}"), "{bib}");
+        let shown = dir.path().to_string_lossy().into_owned();
+        assert!(!bib.contains(&shown) && !bib.contains("Refs.json"), "{bib}");
+    }
+
+    #[tokio::test]
+    async fn local_clear_removes_the_year_from_the_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock = MockServer::start().await;
+        mount_refs_collection(&mock).await;
+        let server = test_server(&mock.uri())
+            .with_overrides(overrides::OverrideStore::Enabled(dir.path().to_path_buf()));
+        let out = server
+            .update_entry_metadata(Parameters(UpdateEntryMetadataArgs {
+                collection: "Refs".into(),
+                entry_id: "e1".into(),
+                clear: Some(vec!["year".into(), "journal".into()]),
+                local_only: true,
+                ..Default::default()
+            }))
+            .await;
+        assert!(out.contains("Saved a local override"), "{out}");
+        let bib = server.export_collection(Parameters(export_args())).await;
+        assert!(bib.contains("@article{"), "{bib}");
+        assert!(!bib.contains("year ="), "{bib}");
+        assert!(!bib.contains("journal ="), "{bib}");
     }
 
     #[tokio::test]

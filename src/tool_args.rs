@@ -506,10 +506,10 @@ pub struct UpdateEntryMetadataArgs {
     /// Replacement editor list, in the same form as `authors`. An empty list deletes editors.
     #[serde(default)]
     pub editor: Option<Vec<String>>,
-    /// Field names to remove (`affiliation`, `editor`, `issn`, `year`, ...).
+    /// Field names to remove (`affiliation`, `editor`, `issn`, `year`, ...). A cleared field is also left out of the export, even when Crossref or DataCite supplies it, until it is set again.
     #[serde(default)]
     pub clear: Option<Vec<String>>,
-    /// Write the edit only to the local override file and skip the server update.
+    /// Write the edit only to the local override file and skip the server update. Only a server on the caller's machine (stdio, or HTTP with auth=none) keeps local overrides; a signed-in HTTP server returns an error and changes nothing.
     #[serde(default)]
     pub local_only: bool,
 }

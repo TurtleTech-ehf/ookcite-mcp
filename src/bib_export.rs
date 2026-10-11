@@ -2375,6 +2375,46 @@ mod tests {
     }
 
     #[test]
+    fn local_clear_removes_provider_fields() {
+        use crate::overrides::CollectionOverrides;
+        use crate::tool_args::UpdateEntryMetadataArgs;
+        let provider = json!({
+            "crossref": {
+                "type": "journal-article",
+                "title": ["Packmol"],
+                "author": [{"given": "L.", "family": "Martinez"}],
+                "container-title": ["Journal of Computational Chemistry"],
+                "issued": {"date-parts": [[2009, 3]]},
+                "volume": "30",
+                "DOI": "10.1002/jcc.21224",
+                "URL": "https://example.org/landing"
+            }
+        });
+        let mut store = CollectionOverrides::new("paper");
+        store.record(
+            "doi:10.1002/jcc.21224".into(),
+            &UpdateEntryMetadataArgs {
+                collection: "paper".into(),
+                entry_id: "e1".into(),
+                clear: Some(vec!["year".into(), "volume".into(), "url".into()]),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![
+            json!({"id": "e1", "metadata": {"doi": "10.1002/jcc.21224", "date": {"year": 2009}}}),
+        ];
+        store.apply_to_entries(&mut entries);
+        let bib = render_works(
+            &[assemble(&entries[0]["metadata"], Some(&provider))],
+            &BibOptions::default(),
+        );
+        assert!(bib.contains("journal = {"), "{bib}");
+        assert!(!bib.contains("year ="), "{bib}");
+        assert!(!bib.contains("volume ="), "{bib}");
+        assert!(!bib.contains("url ="), "{bib}");
+    }
+
+    #[test]
     fn local_override_wins_over_the_provider_record() {
         use crate::overrides::{apply, EntryOverride};
         let provider = json!({
