@@ -599,7 +599,7 @@ fn work_from_stored(meta: &Value) -> Work {
     work.note_locked = locked.contains("note");
     work.howpublished_locked = locked.contains("howpublished");
     let kind = map_type(&work.source_type, false);
-    if work.booktitle.is_none() && matches!(kind, "inproceedings" | "incollection") {
+    if work.booktitle.is_none() && matches!(kind, "inproceedings" | "incollection" | "inbook") {
         work.booktitle = work.journal.take();
     }
     work
@@ -1850,6 +1850,30 @@ mod tests {
         let stored = json!({"doi": provider.pointer("/crossref/DOI").and_then(|v| v.as_str()).or_else(|| provider.pointer("/datacite/doi").and_then(|v| v.as_str())).unwrap_or("")});
         let work = assemble(&stored, Some(&provider));
         render_works(&[work], &BibOptions::default())
+    }
+
+    #[test]
+    fn stored_inbook_moves_its_container_into_booktitle() {
+        let bib = render_stored_entries(&[json!({
+            "entry_type": "inbook",
+            "title": "Introduction to the kinetic Monte Carlo method",
+            "authors": [{"family": "Voter", "given": "Arthur F."}],
+            "year": 2007,
+            "journal": "Radiation Effects in Solids",
+            "pages": "1-23",
+            "publisher": "Springer Netherlands",
+            "citation_key": "voterIntroductionKineticMonte2007"
+        })]);
+        assert!(
+            bib.contains("@inbook{voterIntroductionKineticMonte2007,"),
+            "{bib}"
+        );
+        assert!(
+            bib.contains("booktitle = {Radiation Effects in Solids}"),
+            "{bib}"
+        );
+        assert!(!bib.contains("\n  journal = "), "{bib}");
+        assert!(bib.contains("pages = {1--23}"), "{bib}");
     }
 
     #[test]

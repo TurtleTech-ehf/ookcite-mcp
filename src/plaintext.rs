@@ -172,11 +172,62 @@ pub fn render_bibtex_entries(entries: &[serde_json::Value]) -> String {
     crate::bib_export::render_stored_entries(entries)
 }
 
+/// The stored metadata of a collection entry. When the metadata has no
+/// `citation_key`, the key the server rendered for the entry is copied in, so
+/// an export keeps the keys the server has already handed out.
 pub fn collection_entry_metadata(entry: &serde_json::Value) -> serde_json::Value {
-    entry
+    let mut meta = entry
         .get("metadata")
         .cloned()
-        .unwrap_or_else(|| entry.clone())
+        .unwrap_or_else(|| entry.clone());
+    let server_key = entry
+        .pointer("/render/citation_key")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty());
+    if let (Some(key), Some(object)) = (server_key, meta.as_object_mut()) {
+        let has_key = object
+            .get("citation_key")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|key| !key.trim().is_empty());
+        if !has_key {
+            object.insert("citation_key".into(), serde_json::Value::String(key.into()));
+        }
+    }
+    meta
+}
+
+#[cfg(test)]
+mod entry_metadata_tests {
+    use super::collection_entry_metadata;
+    use serde_json::json;
+
+    #[test]
+    fn server_rendered_key_fills_a_missing_citation_key() {
+        let entry = json!({
+            "metadata": {"title": "Ab initio global potential", "doi": "10.1063/1.1383586"},
+            "render": {"citation_key": "vanmourikAbInitioGlobal2001"}
+        });
+        let meta = collection_entry_metadata(&entry);
+        assert_eq!(meta["citation_key"], "vanmourikAbInitioGlobal2001");
+    }
+
+    #[test]
+    fn stored_citation_key_wins_over_the_server_rendered_key() {
+        let entry = json!({
+            "metadata": {"title": "PACKMOL", "citation_key": "martinezPackmol2009"},
+            "render": {"citation_key": "martinezPackmolPackageBuilding2009"}
+        });
+        let meta = collection_entry_metadata(&entry);
+        assert_eq!(meta["citation_key"], "martinezPackmol2009");
+    }
+
+    #[test]
+    fn entry_without_a_rendered_key_is_unchanged() {
+        let entry = json!({"metadata": {"title": "Ruby"}});
+        let meta = collection_entry_metadata(&entry);
+        assert!(meta.get("citation_key").is_none());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
