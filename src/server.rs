@@ -181,8 +181,14 @@ impl Server {
     }
 
     async fn lookup_doi_json_cached(&self, doi: &str) -> Result<serde_json::Value, String> {
-        if let Some(meta) = self.doi_cache.get_valid(doi) {
-            return Ok(meta);
+        // The cache is one map per process, so over HTTP it would hand one
+        // account's lookup to the next request and no one would be metered
+        // for it. Only a single-user process may read or write it.
+        let cacheable = !inbound_auth::in_http_scope();
+        if cacheable {
+            if let Some(meta) = self.doi_cache.get_valid(doi) {
+                return Ok(meta);
+            }
         }
         self.require_registered(doi).await?;
         let r = lookup_doi_with_retry(&self.http, &self.api_base, doi).await;
@@ -200,7 +206,9 @@ impl Server {
                         Err(_) => {}
                     }
                 }
-                self.doi_cache.put_if_identity_ok(doi, meta.clone());
+                if cacheable {
+                    self.doi_cache.put_if_identity_ok(doi, meta.clone());
+                }
                 Ok(meta)
             }
             Ok(resp) => Err(classify_lookup_doi_failure(resp, doi).await),
@@ -3707,6 +3715,48 @@ mod tests {
         assert!(a.contains("VALID") && a.contains("Ruby"), "first: {a}");
         assert!(b.contains("VALID") && b.contains("Ruby"), "second: {b}");
         // second must not trigger another POST — enforced by mock expect(1)
+    }
+
+    /// The cache is one map for the whole process. Two HTTP requests are two
+    /// accounts, so a DOI the first one paid for must still cost the second
+    /// one a metered lookup: the API is where quota is counted, and an answer
+    /// that never reaches it is a lookup nobody is charged for.
+    #[tokio::test]
+    async fn an_http_request_is_not_served_from_another_requests_lookup() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/187493a0",
+                "title": "Stimulated Optical Radiation in Ruby",
+                "authors": [{"family": "Maiman"}],
+                "date": {"year": 1960},
+                "journal": "Nature"
+            })))
+            .expect(2)
+            .mount(&mock)
+            .await;
+
+        let server = test_server(&mock.uri());
+        let lookup = |key: &'static str| {
+            let server = server.clone();
+            async move {
+                inbound_auth::with_http_bearer(Some(key.into()), async {
+                    server
+                        .validate_doi(Parameters(DoiArgs {
+                            doi: "10.1038/187493a0".into(),
+                            ..Default::default()
+                        }))
+                        .await
+                })
+                .await
+            }
+        };
+        let first = lookup("ookc_tenant_one").await;
+        let second = lookup("ookc_tenant_two").await;
+        assert!(first.contains("VALID"), "first: {first}");
+        assert!(second.contains("VALID"), "second: {second}");
+        // Two POSTs, one per account — enforced by mock expect(2).
     }
 
     /// All DOIs are collection members + remaining=0: batch_format must not POST LOOKUP_DOI.
