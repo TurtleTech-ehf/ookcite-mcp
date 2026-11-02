@@ -1726,9 +1726,7 @@ impl Server {
             if resolver_answer_agrees_with_ranking(&metadata, &ranked) {
                 return Ok(Some(metadata));
             }
-            eprintln!(
-                "ookcite-mcp: resolver answer for {q:?} is absent from the ranked candidates; taking the ranking"
-            );
+            eprintln!("{}", resolver_disagreement_note(q, &metadata));
         }
 
         if let Some(metadata) = ranked.first().and_then(|row| row.get("metadata")).cloned() {
@@ -3404,6 +3402,26 @@ fn format_enhanced_search(data: &serde_json::Value) -> String {
     out.join("\n")
 }
 
+/// Why the ranking was taken over the resolver's own answer.
+///
+/// This reaches stderr, which on the hosted server is the operator's log.
+/// A citation query is text somebody submitted, often from a reference list
+/// that is not published yet, so the line reports its size and the DOI the
+/// resolver picked -- which is what a report about this disagreement needs.
+fn resolver_disagreement_note(query: &str, resolved: &serde_json::Value) -> String {
+    let size = query.chars().count();
+    match crate::resolve_helpers::metadata_doi(resolved) {
+        Some(doi) => format!(
+            "ookcite-mcp: resolver answer {doi} is absent from the ranked candidates \
+             for a {size} character query; taking the ranking"
+        ),
+        None => format!(
+            "ookcite-mcp: the resolver answer is absent from the ranked candidates \
+             for a {size} character query; taking the ranking"
+        ),
+    }
+}
+
 fn encode_path_segment(value: &str) -> String {
     let mut out = String::new();
     for byte in value.bytes() {
@@ -3746,6 +3764,38 @@ mod tests {
         assert!(a.contains("VALID") && a.contains("Ruby"), "first: {a}");
         assert!(b.contains("VALID") && b.contains("Ruby"), "second: {b}");
         // second must not trigger another POST — enforced by mock expect(1)
+    }
+
+    /// This line goes to stderr, which on the hosted server is the operator's
+    /// log. A citation query is submitted text, routinely from a reference
+    /// list that is still unpublished, and the resolved record carries a
+    /// title. Neither belongs in a log; the DOI and a size do.
+    #[test]
+    fn the_resolver_disagreement_line_keeps_submitted_text_out_of_the_log() {
+        let note = resolver_disagreement_note(
+            "Smith & Patel, nanoscale thermometry in situ, submitted 2026",
+            &serde_json::json!({
+                "doi": "10.18653/v1/d19-1261",
+                "title": "Nanometre-scale thermometry in a living cell",
+            }),
+        );
+        assert!(note.contains("10.18653/v1/d19-1261"), "{note}");
+        assert!(
+            !note.contains("nanoscale thermometry"),
+            "the query reached the log: {note}"
+        );
+        assert!(
+            !note.contains("Nanometre-scale"),
+            "the resolved title reached the log: {note}"
+        );
+        assert!(
+            note.contains("60"),
+            "the query size is still reported: {note}"
+        );
+
+        let untitled = resolver_disagreement_note("a query", &serde_json::json!({}));
+        assert!(untitled.contains("ranked candidates"), "{untitled}");
+        assert!(!untitled.contains("a query"), "{untitled}");
     }
 
     /// A tool call only enters HTTP scope when the request's headers reached
