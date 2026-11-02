@@ -3874,6 +3874,13 @@ mod tests {
         assert!(first.contains("VALID"), "first: {first}");
         assert!(second.contains("VALID"), "second: {second}");
         // Two POSTs, one per account — enforced by mock expect(2).
+        // The map has no size bound and evicts only on read, so an HTTP
+        // lookup that wrote to it would grow it for every account served.
+        assert_eq!(
+            server.doi_cache.len_for_test(),
+            0,
+            "an HTTP lookup was written to the process cache"
+        );
     }
 
     /// All DOIs are collection members + remaining=0: batch_format must not POST LOOKUP_DOI.
