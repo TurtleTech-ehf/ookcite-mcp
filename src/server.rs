@@ -96,6 +96,9 @@ pub struct Server {
     providers: Option<ProviderBases>,
     /// Local override store, decided once by the entry point. Off unless set.
     overrides: overrides::OverrideStore,
+    /// Whether this process serves many accounts over HTTP, decided once by
+    /// the entry point. Off unless set.
+    shared_http: bool,
 }
 
 #[tool_router]
@@ -110,6 +113,7 @@ impl Server {
             doi_cache: shared_doi_cache().clone(),
             providers: Some(ProviderBases::production()),
             overrides: overrides::OverrideStore::Disabled,
+            shared_http: false,
         }
     }
 
@@ -118,6 +122,33 @@ impl Server {
     pub fn with_overrides(mut self, store: overrides::OverrideStore) -> Self {
         self.overrides = store;
         self
+    }
+
+    /// Declare that this process serves many accounts over HTTP.
+    pub fn with_shared_http(mut self, shared: bool) -> Self {
+        self.shared_http = shared;
+        self
+    }
+
+    /// Run one tool call under the credential its request carried.
+    ///
+    /// `inbound` is `Some` when the request arrived over HTTP with its
+    /// headers attached, and holds whatever bearer those headers carried,
+    /// which may be absent. A shared HTTP server has no process credential
+    /// to lend a request that arrives without them: falling through to
+    /// `OOKCITE_API_KEY` would spend and read the operator's own account on
+    /// behalf of whoever sent the request. Only a single-user process, which
+    /// is the person that key belongs to, falls through to it.
+    async fn in_credential_scope<T>(
+        &self,
+        inbound: Option<Option<String>>,
+        call: impl std::future::Future<Output = T>,
+    ) -> T {
+        match inbound {
+            Some(key) => inbound_auth::with_http_bearer(key, call).await,
+            None if self.shared_http => inbound_auth::with_http_bearer(None, call).await,
+            None => call.await,
+        }
     }
 
     async fn fetch_me_quota(&self) -> Option<MeQuota> {
@@ -181,8 +212,14 @@ impl Server {
     }
 
     async fn lookup_doi_json_cached(&self, doi: &str) -> Result<serde_json::Value, String> {
-        if let Some(meta) = self.doi_cache.get_valid(doi) {
-            return Ok(meta);
+        // The cache is one map per process, so over HTTP it would hand one
+        // account's lookup to the next request and no one would be metered
+        // for it. Only a single-user process may read or write it.
+        let cacheable = !inbound_auth::in_http_scope();
+        if cacheable {
+            if let Some(meta) = self.doi_cache.get_valid(doi) {
+                return Ok(meta);
+            }
         }
         self.require_registered(doi).await?;
         let r = lookup_doi_with_retry(&self.http, &self.api_base, doi).await;
@@ -200,7 +237,9 @@ impl Server {
                         Err(_) => {}
                     }
                 }
-                self.doi_cache.put_if_identity_ok(doi, meta.clone());
+                if cacheable {
+                    self.doi_cache.put_if_identity_ok(doi, meta.clone());
+                }
                 Ok(meta)
             }
             Ok(resp) => Err(classify_lookup_doi_failure(resp, doi).await),
@@ -1687,9 +1726,7 @@ impl Server {
             if resolver_answer_agrees_with_ranking(&metadata, &ranked) {
                 return Ok(Some(metadata));
             }
-            eprintln!(
-                "ookcite-mcp: resolver answer for {q:?} is absent from the ranked candidates; taking the ranking"
-            );
+            eprintln!("{}", resolver_disagreement_note(q, &metadata));
         }
 
         if let Some(metadata) = ranked.first().and_then(|row| row.get("metadata")).cloned() {
@@ -3365,6 +3402,26 @@ fn format_enhanced_search(data: &serde_json::Value) -> String {
     out.join("\n")
 }
 
+/// Why the ranking was taken over the resolver's own answer.
+///
+/// This reaches stderr, which on the hosted server is the operator's log.
+/// A citation query is text somebody submitted, often from a reference list
+/// that is not published yet, so the line reports its size and the DOI the
+/// resolver picked -- which is what a report about this disagreement needs.
+fn resolver_disagreement_note(query: &str, resolved: &serde_json::Value) -> String {
+    let size = query.chars().count();
+    match crate::resolve_helpers::metadata_doi(resolved) {
+        Some(doi) => format!(
+            "ookcite-mcp: resolver answer {doi} is absent from the ranked candidates \
+             for a {size} character query; taking the ranking"
+        ),
+        None => format!(
+            "ookcite-mcp: the resolver answer is absent from the ranked candidates \
+             for a {size} character query; taking the ranking"
+        ),
+    }
+}
+
 fn encode_path_segment(value: &str) -> String {
     let mut out = String::new();
     for byte in value.bytes() {
@@ -3414,10 +3471,9 @@ impl ServerHandler for Server {
             .get::<http::request::Parts>()
             .map(|parts| inbound_auth::inbound_api_key(&parts.headers));
         let tcc = ToolCallContext::new(self, request, context);
-        let called = match http_key {
-            Some(key) => inbound_auth::with_http_bearer(key, self.tool_router.call(tcc)).await,
-            None => self.tool_router.call(tcc).await,
-        };
+        let called = self
+            .in_credential_scope(http_key, self.tool_router.call(tcc))
+            .await;
         called.map(|response| match response {
             CallToolResponse::Complete(mut result) => {
                 promote_upstream_failure(&mut result);
@@ -3487,6 +3543,7 @@ impl Server {
             doi_cache: DoiResponseCache::with_default_ttl(),
             providers: None,
             overrides: overrides::OverrideStore::Disabled,
+            shared_http: false,
         }
     }
 
@@ -3707,6 +3764,151 @@ mod tests {
         assert!(a.contains("VALID") && a.contains("Ruby"), "first: {a}");
         assert!(b.contains("VALID") && b.contains("Ruby"), "second: {b}");
         // second must not trigger another POST — enforced by mock expect(1)
+    }
+
+    /// This line goes to stderr, which on the hosted server is the operator's
+    /// log. A citation query is submitted text, routinely from a reference
+    /// list that is still unpublished, and the resolved record carries a
+    /// title. Neither belongs in a log; the DOI and a size do.
+    #[test]
+    fn the_resolver_disagreement_line_keeps_submitted_text_out_of_the_log() {
+        let note = resolver_disagreement_note(
+            "Smith & Patel, nanoscale thermometry in situ, submitted 2026",
+            &serde_json::json!({
+                "doi": "10.18653/v1/d19-1261",
+                "title": "Nanometre-scale thermometry in a living cell",
+            }),
+        );
+        assert!(note.contains("10.18653/v1/d19-1261"), "{note}");
+        assert!(
+            !note.contains("nanoscale thermometry"),
+            "the query reached the log: {note}"
+        );
+        assert!(
+            !note.contains("Nanometre-scale"),
+            "the resolved title reached the log: {note}"
+        );
+        assert!(
+            note.contains("60"),
+            "the query size is still reported: {note}"
+        );
+
+        let untitled = resolver_disagreement_note("a query", &serde_json::json!({}));
+        assert!(untitled.contains("ranked candidates"), "{untitled}");
+        assert!(!untitled.contains("a query"), "{untitled}");
+    }
+
+    /// The line the operator actually collects is the `eprintln!`, not the
+    /// helper above it. Testing the helper alone leaves the call site free to
+    /// go back to formatting the query, so hold the call sites too: no
+    /// stderr line in this file may interpolate a submitted query.
+    #[test]
+    fn no_stderr_line_in_this_file_interpolates_a_submitted_query() {
+        // The test half quotes the old format string on purpose, so only the
+        // production half is in scope.
+        let (production, _) = include_str!("server.rs")
+            .split_once("\nmod tests {")
+            .expect("server.rs has a test module");
+        let mut offenders = Vec::new();
+        let mut rest = production;
+        while let Some(at) = rest.find("eprintln!") {
+            let tail = &rest[at..];
+            let end = tail.find(");").map_or(tail.len(), |i| i + 2);
+            let call = &tail[..end];
+            if call.contains("{q:?}") || call.contains("{q}") || call.contains("{query") {
+                offenders.push(call.to_string());
+            }
+            rest = &tail[end..];
+        }
+        assert!(
+            offenders.is_empty(),
+            "a stderr line interpolates a submitted query: {offenders:#?}"
+        );
+    }
+
+    /// A tool call only enters HTTP scope when the request's headers reached
+    /// the handler. If they ever do not, a shared server must still refuse
+    /// the process key: running that call under the operator's own
+    /// OOKCITE_API_KEY would read and spend the operator's account for
+    /// whoever sent the request.
+    #[tokio::test]
+    async fn a_shared_http_call_without_headers_does_not_use_the_process_key() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_operator_key");
+
+        let shared = Server::new().with_shared_http(true);
+        let seen = shared
+            .in_credential_scope(None, async { inbound_auth::api_key() })
+            .await;
+        assert_eq!(
+            seen, None,
+            "a shared server ran a headerless call as the operator"
+        );
+
+        let caller = shared
+            .in_credential_scope(Some(Some("ookc_caller".into())), async {
+                inbound_auth::api_key()
+            })
+            .await;
+        assert_eq!(caller.as_deref(), Some("ookc_caller"));
+
+        let stdio = Server::new();
+        let own = stdio
+            .in_credential_scope(None, async { inbound_auth::api_key() })
+            .await;
+        assert_eq!(
+            own.as_deref(),
+            Some("ookc_operator_key"),
+            "a single-user server still uses the key it was given"
+        );
+    }
+
+    /// The cache is one map for the whole process. Two HTTP requests are two
+    /// accounts, so a DOI the first one paid for must still cost the second
+    /// one a metered lookup: the API is where quota is counted, and an answer
+    /// that never reaches it is a lookup nobody is charged for.
+    #[tokio::test]
+    async fn an_http_request_is_not_served_from_another_requests_lookup() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/187493a0",
+                "title": "Stimulated Optical Radiation in Ruby",
+                "authors": [{"family": "Maiman"}],
+                "date": {"year": 1960},
+                "journal": "Nature"
+            })))
+            .expect(2)
+            .mount(&mock)
+            .await;
+
+        let server = test_server(&mock.uri());
+        let lookup = |key: &'static str| {
+            let server = server.clone();
+            async move {
+                inbound_auth::with_http_bearer(Some(key.into()), async {
+                    server
+                        .validate_doi(Parameters(DoiArgs {
+                            doi: "10.1038/187493a0".into(),
+                            ..Default::default()
+                        }))
+                        .await
+                })
+                .await
+            }
+        };
+        let first = lookup("ookc_tenant_one").await;
+        let second = lookup("ookc_tenant_two").await;
+        assert!(first.contains("VALID"), "first: {first}");
+        assert!(second.contains("VALID"), "second: {second}");
+        // Two POSTs, one per account — enforced by mock expect(2).
+        // The map has no size bound and evicts only on read, so an HTTP
+        // lookup that wrote to it would grow it for every account served.
+        assert_eq!(
+            server.doi_cache.len_for_test(),
+            0,
+            "an HTTP lookup was written to the process cache"
+        );
     }
 
     /// All DOIs are collection members + remaining=0: batch_format must not POST LOOKUP_DOI.

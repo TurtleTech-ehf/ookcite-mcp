@@ -52,8 +52,15 @@ impl App {
         // Decided once per process: a signed-in server may serve many users
         // and must not share a per-collection override file between them.
         let overrides = OverrideStore::for_transport(Transport::Http(gate.auth));
+        // Bearer and OAuth both front many accounts, so no request here may
+        // borrow the process key.
+        let shared = matches!(gate.auth, HttpAuthMode::Bearer | HttpAuthMode::Oauth);
         let service: McpService = StreamableHttpService::new(
-            move || Ok(Server::new().with_overrides(overrides.clone())),
+            move || {
+                Ok(Server::new()
+                    .with_overrides(overrides.clone())
+                    .with_shared_http(shared))
+            },
             Arc::new(LocalSessionManager::default()),
             config,
         );
