@@ -1,7 +1,7 @@
 const https = require("https");
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
 const crypto = require("crypto");
 const zlib = require("zlib");
 
@@ -176,9 +176,11 @@ function extractZip(buffer) {
   return false;
 }
 
-async function tryBinstall() {
+// The install path comes from wherever npm placed the package, so it must
+// reach cargo as one argument rather than as text a shell gets to read.
+function tryBinstall(binDir = BIN_DIR) {
   try {
-    execSync("cargo binstall ookcite-mcp --no-confirm --install-path " + JSON.stringify(BIN_DIR), {
+    execFileSync("cargo", ["binstall", "ookcite-mcp", "--no-confirm", "--install-path", binDir], {
       stdio: "inherit",
     });
     return true;
@@ -187,9 +189,9 @@ async function tryBinstall() {
   }
 }
 
-async function tryCargoInstall() {
+function tryCargoInstall(binDir = BIN_DIR) {
   try {
-    execSync("cargo install ookcite-mcp --root " + JSON.stringify(path.join(BIN_DIR, "..")), {
+    execFileSync("cargo", ["install", "ookcite-mcp", "--root", path.join(binDir, "..")], {
       stdio: "inherit",
     });
     return true;
@@ -233,14 +235,14 @@ async function main() {
 
   // Fallback: cargo binstall
   console.log("Trying cargo binstall...");
-  if (await tryBinstall()) {
+  if (tryBinstall()) {
     console.log("ookcite-mcp installed via cargo binstall.");
     return;
   }
 
   // Fallback: cargo install
   console.log("Trying cargo install (this may take a few minutes)...");
-  if (await tryCargoInstall()) {
+  if (tryCargoInstall()) {
     console.log("ookcite-mcp installed via cargo install.");
     return;
   }
@@ -257,4 +259,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { redirectTarget, verifyChecksum, MAX_REDIRECTS };
+module.exports = { redirectTarget, verifyChecksum, tryBinstall, tryCargoInstall, MAX_REDIRECTS };
