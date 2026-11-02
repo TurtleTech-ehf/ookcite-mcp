@@ -96,6 +96,9 @@ pub struct Server {
     providers: Option<ProviderBases>,
     /// Local override store, decided once by the entry point. Off unless set.
     overrides: overrides::OverrideStore,
+    /// Whether this process serves many accounts over HTTP, decided once by
+    /// the entry point. Off unless set.
+    shared_http: bool,
 }
 
 #[tool_router]
@@ -110,6 +113,7 @@ impl Server {
             doi_cache: shared_doi_cache().clone(),
             providers: Some(ProviderBases::production()),
             overrides: overrides::OverrideStore::Disabled,
+            shared_http: false,
         }
     }
 
@@ -118,6 +122,33 @@ impl Server {
     pub fn with_overrides(mut self, store: overrides::OverrideStore) -> Self {
         self.overrides = store;
         self
+    }
+
+    /// Declare that this process serves many accounts over HTTP.
+    pub fn with_shared_http(mut self, shared: bool) -> Self {
+        self.shared_http = shared;
+        self
+    }
+
+    /// Run one tool call under the credential its request carried.
+    ///
+    /// `inbound` is `Some` when the request arrived over HTTP with its
+    /// headers attached, and holds whatever bearer those headers carried,
+    /// which may be absent. A shared HTTP server has no process credential
+    /// to lend a request that arrives without them: falling through to
+    /// `OOKCITE_API_KEY` would spend and read the operator's own account on
+    /// behalf of whoever sent the request. Only a single-user process, which
+    /// is the person that key belongs to, falls through to it.
+    async fn in_credential_scope<T>(
+        &self,
+        inbound: Option<Option<String>>,
+        call: impl std::future::Future<Output = T>,
+    ) -> T {
+        match inbound {
+            Some(key) => inbound_auth::with_http_bearer(key, call).await,
+            None if self.shared_http => inbound_auth::with_http_bearer(None, call).await,
+            None => call.await,
+        }
     }
 
     async fn fetch_me_quota(&self) -> Option<MeQuota> {
@@ -3422,10 +3453,9 @@ impl ServerHandler for Server {
             .get::<http::request::Parts>()
             .map(|parts| inbound_auth::inbound_api_key(&parts.headers));
         let tcc = ToolCallContext::new(self, request, context);
-        let called = match http_key {
-            Some(key) => inbound_auth::with_http_bearer(key, self.tool_router.call(tcc)).await,
-            None => self.tool_router.call(tcc).await,
-        };
+        let called = self
+            .in_credential_scope(http_key, self.tool_router.call(tcc))
+            .await;
         called.map(|response| match response {
             CallToolResponse::Complete(mut result) => {
                 promote_upstream_failure(&mut result);
@@ -3495,6 +3525,7 @@ impl Server {
             doi_cache: DoiResponseCache::with_default_ttl(),
             providers: None,
             overrides: overrides::OverrideStore::Disabled,
+            shared_http: false,
         }
     }
 
@@ -3715,6 +3746,42 @@ mod tests {
         assert!(a.contains("VALID") && a.contains("Ruby"), "first: {a}");
         assert!(b.contains("VALID") && b.contains("Ruby"), "second: {b}");
         // second must not trigger another POST — enforced by mock expect(1)
+    }
+
+    /// A tool call only enters HTTP scope when the request's headers reached
+    /// the handler. If they ever do not, a shared server must still refuse
+    /// the process key: running that call under the operator's own
+    /// OOKCITE_API_KEY would read and spend the operator's account for
+    /// whoever sent the request.
+    #[tokio::test]
+    async fn a_shared_http_call_without_headers_does_not_use_the_process_key() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_operator_key");
+
+        let shared = Server::new().with_shared_http(true);
+        let seen = shared
+            .in_credential_scope(None, async { inbound_auth::api_key() })
+            .await;
+        assert_eq!(
+            seen, None,
+            "a shared server ran a headerless call as the operator"
+        );
+
+        let caller = shared
+            .in_credential_scope(Some(Some("ookc_caller".into())), async {
+                inbound_auth::api_key()
+            })
+            .await;
+        assert_eq!(caller.as_deref(), Some("ookc_caller"));
+
+        let stdio = Server::new();
+        let own = stdio
+            .in_credential_scope(None, async { inbound_auth::api_key() })
+            .await;
+        assert_eq!(
+            own.as_deref(),
+            Some("ookc_operator_key"),
+            "a single-user server still uses the key it was given"
+        );
     }
 
     /// The cache is one map for the whole process. Two HTTP requests are two
