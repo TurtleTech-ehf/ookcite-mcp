@@ -3798,6 +3798,34 @@ mod tests {
         assert!(!untitled.contains("a query"), "{untitled}");
     }
 
+    /// The line the operator actually collects is the `eprintln!`, not the
+    /// helper above it. Testing the helper alone leaves the call site free to
+    /// go back to formatting the query, so hold the call sites too: no
+    /// stderr line in this file may interpolate a submitted query.
+    #[test]
+    fn no_stderr_line_in_this_file_interpolates_a_submitted_query() {
+        // The test half quotes the old format string on purpose, so only the
+        // production half is in scope.
+        let (production, _) = include_str!("server.rs")
+            .split_once("\nmod tests {")
+            .expect("server.rs has a test module");
+        let mut offenders = Vec::new();
+        let mut rest = production;
+        while let Some(at) = rest.find("eprintln!") {
+            let tail = &rest[at..];
+            let end = tail.find(");").map_or(tail.len(), |i| i + 2);
+            let call = &tail[..end];
+            if call.contains("{q:?}") || call.contains("{q}") || call.contains("{query") {
+                offenders.push(call.to_string());
+            }
+            rest = &tail[end..];
+        }
+        assert!(
+            offenders.is_empty(),
+            "a stderr line interpolates a submitted query: {offenders:#?}"
+        );
+    }
+
     /// A tool call only enters HTTP scope when the request's headers reached
     /// the handler. If they ever do not, a shared server must still refuse
     /// the process key: running that call under the operator's own
