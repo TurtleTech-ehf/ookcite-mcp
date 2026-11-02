@@ -259,4 +259,11 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { redirectTarget, verifyChecksum, tryBinstall, tryCargoInstall, MAX_REDIRECTS };
+module.exports = {
+  redirectTarget,
+  verifyChecksum,
+  downloadAndVerify,
+  tryBinstall,
+  tryCargoInstall,
+  MAX_REDIRECTS,
+};
