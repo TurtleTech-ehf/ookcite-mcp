@@ -1,5 +1,4 @@
 const https = require("https");
-const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
@@ -34,15 +33,41 @@ function getAssetName() {
   return `${name}${ext}`;
 }
 
-function fetch(urlStr) {
+const MAX_REDIRECTS = 5;
+
+// The archive lands on disk as an executable, so every hop has to stay under
+// TLS: one plaintext hop lets anyone on the path choose what gets run.
+function redirectTarget(currentUrl, location, redirectsLeft) {
+  if (redirectsLeft <= 0) {
+    throw new Error(`Too many redirects for ${currentUrl}`);
+  }
+  const next = new URL(location, currentUrl);
+  if (next.protocol !== "https:") {
+    throw new Error(`Refusing a redirect from ${currentUrl} to non-https ${next.protocol}//${next.host}`);
+  }
+  return next.toString();
+}
+
+function fetch(urlStr, redirectsLeft = MAX_REDIRECTS) {
   return new Promise((resolve, reject) => {
-    const get = urlStr.startsWith("https:") ? https.get : http.get;
-    get(urlStr, { headers: { "User-Agent": "ookcite-mcp-npm" } }, (res) => {
+    let url;
+    try {
+      url = redirectTarget(urlStr, urlStr, MAX_REDIRECTS);
+    } catch (e) {
+      return reject(e);
+    }
+    https.get(url, { headers: { "User-Agent": "ookcite-mcp-npm" } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetch(res.headers.location).then(resolve, reject);
+        let next;
+        try {
+          next = redirectTarget(url, res.headers.location, redirectsLeft);
+        } catch (e) {
+          return reject(e);
+        }
+        return fetch(next, redirectsLeft - 1).then(resolve, reject);
       }
       if (res.statusCode !== 200) {
-        return reject(new Error(`HTTP ${res.statusCode} for ${urlStr}`));
+        return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
       }
       const chunks = [];
       res.on("data", (c) => chunks.push(c));
@@ -50,6 +75,24 @@ function fetch(urlStr) {
       res.on("error", reject);
     }).on("error", reject);
   });
+}
+
+// A checksum that did not arrive is not a checksum that passed. Treating it
+// as one means failing a single request is enough to skip verification.
+function verifyChecksum(asset, archive, checksumFile) {
+  const published = checksumFile
+    ? checksumFile.toString("utf8").trim().split(/\s+/)[0].toLowerCase()
+    : "";
+  if (!/^[0-9a-f]{64}$/.test(published)) {
+    throw new Error(
+      `No readable SHA-256 published for ${asset}; refusing to install an unverified binary.`
+    );
+  }
+  const actual = crypto.createHash("sha256").update(archive).digest("hex");
+  if (actual !== published) {
+    throw new Error(`Checksum mismatch for ${asset}: expected ${published}, got ${actual}`);
+  }
+  return published;
 }
 
 async function downloadAndVerify(asset) {
@@ -63,14 +106,8 @@ async function downloadAndVerify(asset) {
     fetch(checksumUrl).catch(() => null),
   ]);
 
-  if (checksumFile) {
-    const expected = checksumFile.toString("utf8").trim().split(/\s+/)[0].toLowerCase();
-    const actual = crypto.createHash("sha256").update(archive).digest("hex");
-    if (actual !== expected) {
-      throw new Error(`Checksum mismatch: expected ${expected}, got ${actual}`);
-    }
-    console.log("Checksum verified.");
-  }
+  verifyChecksum(asset, archive, checksumFile);
+  console.log("Checksum verified.");
 
   return archive;
 }
@@ -216,4 +253,8 @@ async function main() {
   process.exit(1);
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = { redirectTarget, verifyChecksum, MAX_REDIRECTS };
