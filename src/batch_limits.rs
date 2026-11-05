@@ -462,7 +462,9 @@ mod tests {
 
     #[test]
     fn anon_soft_cap_refuses_large_batch() {
-        let items: Vec<String> = (0..20).map(|i| format!("10.1/a{i}")).collect();
+        let items: Vec<String> = (0..=crate::constants::ANON_BATCH_SOFT_CAP)
+            .map(|i| format!("10.1/a{i}"))
+            .collect();
         let pf = plan_metered_batch(&items, &HashSet::new(), &HashMap::new(), None, false);
         assert!(pf.refuse_message.is_some());
         assert!(pf.need_lookup.is_empty());

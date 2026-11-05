@@ -37,8 +37,8 @@ An existing API key remains supported:
 npx @turtletech/ookcite-mcp setup --key YOUR_API_KEY
 ```
 
-No API key required for basic usage (20 lookups/day): `format_citation` and a
-small plaintext `import_bibliography` (omit `collection`, up to 8 items).
+No API key required for basic usage (40 lookups/day): `format_citation` and a
+small plaintext `import_bibliography` (omit `collection`, up to 40 items).
 [Sign up](https://my.turtletech.us/signup?service=ookcite&source=ookcite_mcp) for more.
 
 ### Paste a list to BibTeX
@@ -376,7 +376,7 @@ These three require an Academic or Business plan.
 
 | Tier      | Price     | Lookups/day | API calls/month | Collections | Entries/collection |
 | --------- | --------- | ----------- | --------------- | ----------- | ------------------ |
-| Anonymous | Free      | 20          | --              | 0           | --                 |
+| Anonymous | Free      | 40          | --              | 0           | --                 |
 | Free      | Free      | 60          | --              | 4           | 200                |
 | Academic  | EUR 4/mo  | 20,000      | 10,000          | 10          | 1,000              |
 | Business  | EUR 10/mo | 20,000      | 40,000          | 20          | 4,000              |

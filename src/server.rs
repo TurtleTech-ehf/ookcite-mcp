@@ -4593,7 +4593,8 @@ mod tests {
     #[tokio::test]
     async fn plaintext_import_refuses_anonymous_over_soft_cap() {
         let mock = MockServer::start().await;
-        let citations: Vec<serde_json::Value> = (0..9)
+        let over = usize::try_from(crate::constants::ANON_BATCH_SOFT_CAP).unwrap() + 1;
+        let citations: Vec<serde_json::Value> = (0..over)
             .map(|i| {
                 serde_json::json!({
                     "index": i,
@@ -4617,7 +4618,7 @@ mod tests {
 
         let _no_key = EnvGuard::unset("OOKCITE_API_KEY");
         let s = test_server(&mock.uri());
-        let list = (0..9)
+        let list = (0..over)
             .map(|i| format!("{}. Paper {i} 2020", i + 1))
             .collect::<Vec<_>>()
             .join("\n");

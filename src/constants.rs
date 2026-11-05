@@ -25,14 +25,14 @@ pub const DOI_CACHE_TTL_SECS: u64 = 600;
 
 /// Anonymous daily cap. The sold catalogue owns the number; this constant
 /// is the public crate's copy, and the catalogue crate checks it.
-pub const ANON_DAILY_LOOKUPS: u32 = 20;
+pub const ANON_DAILY_LOOKUPS: u32 = 40;
 
 /// Free-account daily cap. Same source rule as [`ANON_DAILY_LOOKUPS`].
 pub const FREE_DAILY_LOOKUPS: u32 = 60;
 
 /// Anonymous / no-key: refuse metered batches larger than this.
 /// The daily cap is [`ANON_DAILY_LOOKUPS`].
-pub const ANON_BATCH_SOFT_CAP: u32 = 8;
+pub const ANON_BATCH_SOFT_CAP: u32 = 40;
 
 /// Inputs the synchronous `/api/v1/resolve/batch` path accepts. The async mode
 /// takes 1000 but answers with a job id, and no tool here polls jobs.
@@ -114,6 +114,15 @@ pub fn build_api_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anonymous_catalogue_client_pin_is_40_60_40() {
+        assert_eq!(
+            (ANON_DAILY_LOOKUPS, FREE_DAILY_LOOKUPS, ANON_BATCH_SOFT_CAP,),
+            (40, 60, 40),
+            "anonymous daily, free daily, and anonymous batch soft cap"
+        );
+    }
 
     #[test]
     fn startup_probes_default_off() {
