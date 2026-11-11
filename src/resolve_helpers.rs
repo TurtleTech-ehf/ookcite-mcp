@@ -7,6 +7,7 @@ use crate::http_error::error_detail;
 use crate::tool_args::ReverseArgs;
 use ookcite_mcp::endpoints;
 
+#[derive(Debug)]
 pub struct ReverseLookupMatch {
     pub output: String,
     pub top_score: f64,
