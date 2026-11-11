@@ -186,7 +186,7 @@ pub async fn classify_reverse_lookup_response(
             error_detail(r).await,
             rate_limit_hint()
         )),
-        Ok(r) if r.status().as_u16() == 403 => {
+        Ok(r) if matches!(r.status().as_u16(), 401 | 403) => {
             Err(format!("ACCESS DENIED: {}", error_detail(r).await))
         }
         Ok(r) if r.status().as_u16() == 504 || r.status().as_u16() == 408 => {
@@ -195,7 +195,7 @@ pub async fn classify_reverse_lookup_response(
         Ok(r) if r.status().is_server_error() => {
             Err(format!("TEMPORARY ERROR: {}", error_detail(r).await))
         }
-        Ok(_) => Ok(None),
+        Ok(r) => Err(format!("CLIENT ERROR: {}", error_detail(r).await)),
         Err(e) => Err(format!("Reverse lookup failed: {e}")),
     }
 }
@@ -513,9 +513,39 @@ pub async fn lookup_doi_with_retry(
 
 #[cfg(test)]
 mod tests {
-    use super::format_reverse_lookup_payload;
     use super::is_retryable_lookup_status;
+    use super::{classify_reverse_lookup_response, format_reverse_lookup_payload};
     use reqwest::StatusCode;
+
+    fn response(status: u16, body: &str) -> reqwest::Response {
+        reqwest::Response::from(
+            http::Response::builder()
+                .status(status)
+                .body(body.to_string())
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn reverse_lookup_does_not_turn_client_failures_into_an_empty_result() {
+        let unauthorized = classify_reverse_lookup_response(Ok(response(401, "expired token")))
+            .await
+            .expect_err("401 must reach the caller");
+        assert!(unauthorized.starts_with("ACCESS DENIED:"), "{unauthorized}");
+        assert!(unauthorized.contains("expired token"), "{unauthorized}");
+
+        let invalid_request = classify_reverse_lookup_response(Ok(response(400, "invalid filter")))
+            .await
+            .expect_err("400 must reach the caller");
+        assert!(
+            invalid_request.starts_with("CLIENT ERROR:"),
+            "{invalid_request}"
+        );
+        assert!(
+            invalid_request.contains("invalid filter"),
+            "{invalid_request}"
+        );
+    }
 
     #[test]
     fn idempotent_retry_delay_is_capped() {
