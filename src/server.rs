@@ -46,6 +46,7 @@ use rmcp::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 /// Process-wide identity-safe exact-DOI cache (shared across Server clones).
 fn shared_doi_cache() -> &'static DoiResponseCache {
@@ -84,6 +85,20 @@ impl ProviderBases {
 }
 
 const PROVIDER_USER_AGENT: &str = "ookcite-mcp (mailto:rgoswami@ieee.org)";
+
+struct DoiLookup {
+    metadata: serde_json::Value,
+    retrieved_at: Instant,
+    from_cache: bool,
+}
+
+impl DoiLookup {
+    fn freshness_line(&self) -> String {
+        let age_secs = self.retrieved_at.elapsed().as_secs();
+        let source = if self.from_cache { "cached" } else { "live" };
+        format!("Metadata: {source} (retrieved {age_secs}s ago)")
+    }
+}
 
 #[derive(Clone)]
 pub struct Server {
@@ -211,14 +226,18 @@ impl Server {
         (dois, titles)
     }
 
-    async fn lookup_doi_json_cached(&self, doi: &str) -> Result<serde_json::Value, String> {
+    async fn lookup_doi_with_freshness(&self, doi: &str) -> Result<DoiLookup, String> {
         // The cache is one map per process, so over HTTP it would hand one
         // account's lookup to the next request and no one would be metered
         // for it. Only a single-user process may read or write it.
         let cacheable = !inbound_auth::in_http_scope();
         if cacheable {
-            if let Some(meta) = self.doi_cache.get_valid(doi) {
-                return Ok(meta);
+            if let Some(cached) = self.doi_cache.get_valid_with_timing(doi) {
+                return Ok(DoiLookup {
+                    metadata: cached.metadata,
+                    retrieved_at: cached.retrieved_at,
+                    from_cache: true,
+                });
             }
         }
         self.require_registered(doi).await?;
@@ -237,14 +256,28 @@ impl Server {
                         Err(_) => {}
                     }
                 }
-                if cacheable {
-                    self.doi_cache.put_if_identity_ok(doi, meta.clone());
-                }
-                Ok(meta)
+                let retrieved_at = if cacheable {
+                    self.doi_cache
+                        .put_if_identity_ok(doi, meta.clone())
+                        .unwrap_or_else(Instant::now)
+                } else {
+                    Instant::now()
+                };
+                Ok(DoiLookup {
+                    metadata: meta,
+                    retrieved_at,
+                    from_cache: false,
+                })
             }
             Ok(resp) => Err(classify_lookup_doi_failure(resp, doi).await),
             Err(e) => Err(format!("ERROR {doi} : {e}")),
         }
+    }
+
+    async fn lookup_doi_json_cached(&self, doi: &str) -> Result<serde_json::Value, String> {
+        self.lookup_doi_with_freshness(doi)
+            .await
+            .map(|lookup| lookup.metadata)
     }
 
     /// doi.org `responseCode` 1 means the handle is registered. HTTP 404 with
@@ -626,8 +659,12 @@ impl Server {
         annotations(title = "Validate DOI", read_only_hint = true, idempotent_hint = true)
     )]
     async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
-        match self.lookup_doi_json_cached(&args.doi).await {
-            Ok(meta) => format_validate_doi(&args.doi, &meta, &args.claim),
+        match self.lookup_doi_with_freshness(&args.doi).await {
+            Ok(lookup) => format!(
+                "{}\n{}",
+                format_validate_doi(&args.doi, &lookup.metadata, &args.claim),
+                lookup.freshness_line()
+            ),
             Err(msg) => msg,
         }
     }
@@ -4333,6 +4370,47 @@ mod tests {
         assert!(result.starts_with("VALID"));
         assert!(result.contains("Stimulated Optical Radiation in Ruby"));
         assert!(result.contains("Maiman"));
+    }
+
+    #[tokio::test]
+    async fn validate_doi_reports_live_then_cached_metadata_age() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/187493a0",
+                "title": "Stimulated Optical Radiation in Ruby"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let server = test_server(&mock.uri());
+        let first = server
+            .validate_doi(Parameters(DoiArgs {
+                doi: "10.1038/187493a0".into(),
+                ..Default::default()
+            }))
+            .await;
+        assert!(
+            first.contains("Metadata: live (retrieved ") && first.ends_with("s ago)"),
+            "{first}"
+        );
+
+        let second = server
+            .validate_doi(Parameters(DoiArgs {
+                doi: "10.1038/187493a0".into(),
+                ..Default::default()
+            }))
+            .await;
+        assert!(
+            second.contains("Metadata: cached (retrieved ") && second.ends_with("s ago)"),
+            "{second}"
+        );
+        assert!(
+            !second.contains("published"),
+            "freshness must not be inferred from bibliographic dates: {second}"
+        );
     }
 
     #[tokio::test]

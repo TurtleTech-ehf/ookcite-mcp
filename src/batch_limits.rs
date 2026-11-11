@@ -253,6 +253,22 @@ pub struct DoiResponseCache {
     ttl: Duration,
 }
 
+/// A valid cached metadata record and the instant its upstream lookup completed.
+///
+/// `retrieved_at` deliberately tracks local retrieval, not a publication,
+/// deposit, or update date embedded in bibliographic metadata.
+#[derive(Clone)]
+pub struct CachedDoiMetadata {
+    pub metadata: serde_json::Value,
+    pub retrieved_at: Instant,
+}
+
+impl CachedDoiMetadata {
+    pub fn age(&self) -> Duration {
+        self.retrieved_at.elapsed()
+    }
+}
+
 impl DoiResponseCache {
     pub fn new(ttl_secs: u64) -> Self {
         Self {
@@ -265,8 +281,9 @@ impl DoiResponseCache {
         Self::new(DOI_CACHE_TTL_SECS)
     }
 
-    /// Return cached metadata only if embedded DOI normalizes to `key`.
-    pub fn get_valid(&self, requested_doi: &str) -> Option<serde_json::Value> {
+    /// Return cached metadata and its local retrieval instant only when the
+    /// embedded DOI normalizes to `key`.
+    pub fn get_valid_with_timing(&self, requested_doi: &str) -> Option<CachedDoiMetadata> {
         let key = normalize_doi_token(requested_doi);
         let mut guard = self.inner.lock().ok()?;
         let (at, meta) = guard.get(&key)?.clone();
@@ -278,17 +295,34 @@ impl DoiResponseCache {
             guard.remove(&key);
             return None;
         }
-        Some(meta)
+        Some(CachedDoiMetadata {
+            metadata: meta,
+            retrieved_at: at,
+        })
+    }
+
+    /// Return cached metadata only if embedded DOI normalizes to `key`.
+    pub fn get_valid(&self, requested_doi: &str) -> Option<serde_json::Value> {
+        self.get_valid_with_timing(requested_doi)
+            .map(|cached| cached.metadata)
     }
 
     /// Store only when identity matches the request key.
-    pub fn put_if_identity_ok(&self, requested_doi: &str, meta: serde_json::Value) {
+    pub fn put_if_identity_ok(
+        &self,
+        requested_doi: &str,
+        meta: serde_json::Value,
+    ) -> Option<Instant> {
         let key = normalize_doi_token(requested_doi);
         if !metadata_doi_matches_json(&meta, &key) {
-            return;
+            return None;
         }
+        let retrieved_at = Instant::now();
         if let Ok(mut guard) = self.inner.lock() {
-            guard.insert(key, (Instant::now(), meta));
+            guard.insert(key, (retrieved_at, meta));
+            Some(retrieved_at)
+        } else {
+            None
         }
     }
 
