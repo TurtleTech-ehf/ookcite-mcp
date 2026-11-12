@@ -30,6 +30,8 @@ pub async fn classify_lookup_doi_failure(resp: reqwest::Response, doi: &str) -> 
         format!("RATE LIMITED {doi} : {detail}\n{}", rate_limit_hint())
     } else if matches!(status.as_u16(), 401 | 403) {
         format!("ACCESS DENIED {doi} : {detail}")
+    } else if matches!(status.as_u16(), 408 | 504) {
+        format!("TIMEOUT {doi} : {detail}")
     } else if status.is_server_error() {
         format!("TEMPORARY ERROR {doi} : {detail}")
     } else if status.is_client_error() && status.as_u16() != 404 {
@@ -148,7 +150,7 @@ pub fn upstream_failure_report(text: &str) -> Option<UpstreamFailureReport> {
     let (kind, http_status, marker) = if text.contains("RATE LIMITED") {
         ("rate_limited", Some(429), Some("RATE LIMITED"))
     } else if text.contains("TIMEOUT") {
-        ("timeout", Some(504), Some("TIMEOUT"))
+        ("timeout", Some(timeout_status(text)), Some("TIMEOUT"))
     } else if text.contains("TEMPORARY ERROR") {
         ("temporary_error", Some(503), Some("TEMPORARY ERROR"))
     } else if line_has_prefix(text, "ACCESS DENIED") {
@@ -173,6 +175,23 @@ pub fn upstream_failure_report(text: &str) -> Option<UpstreamFailureReport> {
         http_status,
         retry_after: marker.and_then(|marker| retry_after_on_marked_line(text, marker)),
     })
+}
+
+fn timeout_status(text: &str) -> u16 {
+    if text
+        .lines()
+        .filter_map(|line| line.split_once("TIMEOUT").map(|(_, detail)| detail))
+        .filter_map(|detail| {
+            detail.strip_prefix(": ").or_else(|| {
+                detail.split_once(" : ").map(|(_, status)| status)
+            })
+        })
+        .any(|status| status.starts_with("408 Request Timeout:"))
+    {
+        408
+    } else {
+        504
+    }
 }
 
 /// A verdict line may be prefixed with `[n]`. Bibliographic misses stay unmarked.
@@ -350,5 +369,24 @@ Check remaining quota";
         assert!(message.starts_with("RATE LIMITED"));
         assert!(message.contains("TEMPORARY ERROR"));
         assert!(!message.contains("INVALID"));
+    }
+}
+
+#[cfg(test)]
+mod timeout_status_regression_tests {
+    #[test]
+    fn a_gateway_error_body_cannot_replace_its_status() {
+        let report = super::upstream_failure_report(
+            "TIMEOUT 10.1234/example : 504 Gateway Timeout: upstream mentioned 408 Request Timeout",
+        ).unwrap();
+        assert_eq!(report.http_status, Some(504));
+    }
+
+    #[test]
+    fn a_timeout_without_a_doi_keeps_its_request_status() {
+        let report = super::upstream_failure_report(
+            "TIMEOUT: 408 Request Timeout: request expired",
+        ).unwrap();
+        assert_eq!(report.http_status, Some(408));
     }
 }

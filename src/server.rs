@@ -3832,6 +3832,64 @@ mod tests {
         // second must not trigger another POST — enforced by mock expect(1)
     }
 
+    #[tokio::test]
+    async fn validate_doi_retries_gateway_timeout_before_reporting_timeout() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(
+                ResponseTemplate::new(504)
+                    .insert_header("retry-after", "0")
+                    .set_body_string("lookup deadline elapsed"),
+            )
+            .expect(3)
+            .mount(&mock)
+            .await;
+
+        let output = test_server(&mock.uri())
+            .validate_doi(Parameters(DoiArgs {
+                doi: "10.1038/gateway-timeout".into(),
+                ..Default::default()
+            }))
+            .await;
+
+        assert!(
+            output.starts_with("TIMEOUT 10.1038/gateway-timeout : 504 Gateway Timeout:"),
+            "{output}"
+        );
+        assert!(output.contains("(Retry-After: 0)"), "{output}");
+        assert!(!output.contains("TEMPORARY ERROR"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn validate_doi_reports_request_timeout_as_timeout() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(
+                ResponseTemplate::new(408)
+                    .insert_header("retry-after", "0")
+                    .set_body_string("request expired upstream"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let output = test_server(&mock.uri())
+            .validate_doi(Parameters(DoiArgs {
+                doi: "10.1038/request-timeout".into(),
+                ..Default::default()
+            }))
+            .await;
+
+        assert!(
+            output.starts_with("TIMEOUT 10.1038/request-timeout : 408 Request Timeout:"),
+            "{output}"
+        );
+        assert!(output.contains("(Retry-After: 0)"), "{output}");
+        assert!(!output.starts_with("CLIENT ERROR"), "{output}");
+    }
+
     /// This line goes to stderr, which on the hosted server is the operator's
     /// log. A citation query is submitted text, routinely from a reference
     /// list that is still unpublished, and the resolved record carries a
@@ -7570,6 +7628,22 @@ mod tests {
         assert_eq!(structured["http_status"], 503);
         assert_eq!(structured["retry_after"], "not-a-delay");
         assert_eq!(structured_keys(&malformed), 4);
+    }
+
+    #[test]
+    fn promote_keeps_a_request_timeout_status() {
+        let text =
+            "TIMEOUT 10.1038/request-timeout : 408 Request Timeout: request expired (Retry-After: 4)";
+        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+        promote_upstream_failure(&mut result);
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured_keys(&result), 4);
+        assert_eq!(structured["kind"], "timeout");
+        assert_eq!(structured["http_status"], 408);
+        assert_eq!(structured["retry_after"], "4");
+        assert_eq!(structured["message"], text);
     }
 
     #[test]
