@@ -383,11 +383,19 @@ pub fn format_batch_resolve_results(
     payload: &serde_json::Value,
 ) -> Vec<String> {
     let results = payload["results"].as_array().cloned().unwrap_or_default();
-    let mut by_index: std::collections::HashMap<usize, &serde_json::Value> =
-        std::collections::HashMap::new();
+    let mut by_index: Vec<Option<&serde_json::Value>> = vec![None; citations.len()];
+    let mut duplicate_index = vec![false; citations.len()];
     for r in &results {
-        if let Some(idx) = r["index"].as_u64() {
-            by_index.insert(idx as usize, r);
+        if let Some(idx) = r["index"]
+            .as_u64()
+            .and_then(|idx| usize::try_from(idx).ok())
+            .filter(|idx| *idx < citations.len())
+        {
+            if by_index[idx].is_some() {
+                duplicate_index[idx] = true;
+            } else {
+                by_index[idx] = Some(r);
+            }
         }
     }
     citations
@@ -395,7 +403,12 @@ pub fn format_batch_resolve_results(
         .enumerate()
         .map(|(i, citation)| {
             let n = i + 1;
-            let Some(result) = by_index.get(&i) else {
+            if duplicate_index[i] {
+                return format!(
+                    "{n}. ERROR | {citation} | response contained duplicate result index"
+                );
+            }
+            let Some(result) = by_index[i] else {
                 return format!("{n}. NO RESULT | {citation}");
             };
             if result["status"].as_str() == Some("error") {

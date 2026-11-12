@@ -1199,10 +1199,17 @@ impl Server {
 
         let use_live_queries = args.use_live_queries;
         // Collection members: synthetic metadata only — never LOOKUP_DOI (free path).
-        let mut entries: Vec<serde_json::Value> = pf
+        // Keep their original positions: appending all members before the
+        // metered lookups changes a numeric citation sequence for mixed batches.
+        let member_entries: HashMap<String, serde_json::Value> = pf
             .members
             .iter()
-            .map(|(doi, title)| Self::synthetic_member_metadata(doi, title.as_deref()))
+            .map(|(doi, title)| {
+                (
+                    doi.clone(),
+                    Self::synthetic_member_metadata(doi, title.as_deref()),
+                )
+            })
             .collect();
 
         let conc = read_only_concurrency();
@@ -1242,13 +1249,35 @@ impl Server {
         // command numbered them differently. The server builds its paired
         // data in input order and says so twice; this is the client
         // throwing that away.
-        let resolved: Vec<_> = stream::iter(futs).buffered(conc).collect().await;
+        let resolved: Vec<_> = stream::iter(futs)
+            .buffered(conc)
+            .collect::<Vec<Result<serde_json::Value, String>>>()
+            .await;
+        let resolved_by_position: HashMap<usize, Result<serde_json::Value, String>> = pf
+            .need_lookup
+            .iter()
+            .map(|item| item.index)
+            .zip(resolved)
+            .collect();
 
+        let mut entries = Vec::new();
         let mut errors = Vec::new();
-        for result in resolved {
-            match result {
-                Ok(meta) => entries.push(meta),
-                Err(e) => errors.push(e),
+        for (index, citation) in args.citations.iter().enumerate() {
+            let text = citation.trim();
+            if text.is_empty() {
+                continue;
+            }
+            if looks_like_doi_token(text) {
+                if let Some(member) = member_entries.get(&normalize_doi_token(text)) {
+                    entries.push(member.clone());
+                    continue;
+                }
+            }
+            if let Some(result) = resolved_by_position.get(&index) {
+                match result {
+                    Ok(meta) => entries.push(meta.clone()),
+                    Err(error) => errors.push(error.clone()),
+                }
             }
         }
         errors.sort_by_key(|error| crate::http_error::failure_rank(error));
@@ -4027,6 +4056,84 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn batch_format_keeps_mixed_member_and_lookup_entries_in_input_order() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan": "free",
+                "lookups_remaining": 10,
+                "lookups_limit": 60
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-1", "name": "lab"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": "doi:10.1/member",
+                    "metadata": {"doi": "10.1/member", "title": "Member paper"}
+                }]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains("10.1/live"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1/live",
+                "title": "Live paper"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/format"))
+            .and(body_json(serde_json::json!({
+                "entries": [
+                    {"doi": "10.1/live", "title": "Live paper"},
+                    {
+                        "doi": "10.1/member",
+                        "title": "Member paper",
+                        "entry_type": "article",
+                        "authors": []
+                    }
+                ],
+                "style": "apa",
+                "locale": "en-US"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [
+                    {"intext_plain": "[1]", "bib_plain": "Live paper."},
+                    {"intext_plain": "[2]", "bib_plain": "Member paper."}
+                ]
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_batch_format_order");
+        let result = test_server(&mock.uri())
+            .batch_format(Parameters(crate::tool_args::BatchArgs {
+                citations: vec!["10.1/live".into(), "10.1/member".into()],
+                style: default_style(),
+                use_live_queries: false,
+            }))
+            .await;
+        assert!(
+            result.starts_with("[1] Live paper.\n[2] Member paper."),
+            "{result}"
+        );
+    }
+
     #[test]
     fn test_endpoint_url_construction() {
         let u = endpoints::LOOKUP_DOI.url("https://example.com", &[]);
@@ -4242,7 +4349,7 @@ mod tests {
     // --- Wiremock integration tests ---
 
     use rmcp::handler::server::wrapper::Parameters;
-    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::matchers::{body_json, body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_server(base: &str) -> Server {
@@ -6947,6 +7054,43 @@ mod tests {
             "{}",
             lines[2]
         );
+    }
+
+    #[test]
+    fn batch_resolve_marks_duplicate_response_indexes_as_aligned_errors() {
+        let citations = vec!["first".to_string(), "second".to_string()];
+        let payload = serde_json::json!({
+            "results": [
+                {
+                    "index": 0,
+                    "status": "ok",
+                    "paper": {"title": "First response", "doi": "10.1/first"}
+                },
+                {
+                    "index": 0,
+                    "status": "error",
+                    "message": "conflicting response"
+                },
+                {
+                    "index": 1,
+                    "status": "ok",
+                    "paper": {"title": "Second response", "doi": "10.1/second"}
+                }
+            ]
+        });
+
+        let lines = format_batch_resolve_results(&citations, &payload);
+        assert_eq!(
+            lines[0],
+            "1. ERROR | first | response contained duplicate result index"
+        );
+        assert!(
+            lines[1].starts_with("2. RESOLVED | Second response"),
+            "{}",
+            lines[1]
+        );
+        assert!(!lines[0].contains("First response"));
+        assert!(!lines[0].contains("conflicting response"));
     }
 
     #[tokio::test]
