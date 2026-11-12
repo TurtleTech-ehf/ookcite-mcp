@@ -182,9 +182,9 @@ fn timeout_status(text: &str) -> u16 {
         .lines()
         .filter_map(|line| line.split_once("TIMEOUT").map(|(_, detail)| detail))
         .filter_map(|detail| {
-            detail.strip_prefix(": ").or_else(|| {
-                detail.split_once(" : ").map(|(_, status)| status)
-            })
+            detail
+                .strip_prefix(": ")
+                .or_else(|| detail.split_once(" : ").map(|(_, status)| status))
         })
         .any(|status| status.starts_with("408 Request Timeout:"))
     {
@@ -378,15 +378,16 @@ mod timeout_status_regression_tests {
     fn a_gateway_error_body_cannot_replace_its_status() {
         let report = super::upstream_failure_report(
             "TIMEOUT 10.1234/example : 504 Gateway Timeout: upstream mentioned 408 Request Timeout",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(report.http_status, Some(504));
     }
 
     #[test]
     fn a_timeout_without_a_doi_keeps_its_request_status() {
-        let report = super::upstream_failure_report(
-            "TIMEOUT: 408 Request Timeout: request expired",
-        ).unwrap();
+        let report =
+            super::upstream_failure_report("TIMEOUT: 408 Request Timeout: request expired")
+                .unwrap();
         assert_eq!(report.http_status, Some(408));
     }
 }
