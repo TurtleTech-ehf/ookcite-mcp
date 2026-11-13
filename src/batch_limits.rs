@@ -264,6 +264,9 @@ pub struct CachedDoiMetadata {
 }
 
 impl CachedDoiMetadata {
+    /// Local retrieval age. Production reads `retrieved_at` directly.
+    /// The helper stays for tests, so the release binary does not carry it.
+    #[cfg(test)]
     pub fn age(&self) -> Duration {
         self.retrieved_at.elapsed()
     }
@@ -302,6 +305,8 @@ impl DoiResponseCache {
     }
 
     /// Return cached metadata only if embedded DOI normalizes to `key`.
+    /// Tests use this shape. Callers in the server use `get_valid_with_timing`.
+    #[cfg(test)]
     pub fn get_valid(&self, requested_doi: &str) -> Option<serde_json::Value> {
         self.get_valid_with_timing(requested_doi)
             .map(|cached| cached.metadata)
@@ -511,6 +516,11 @@ mod tests {
         let bad = serde_json::json!({"doi": "10.1/other", "title": "Wrong"});
         cache.put_if_identity_ok("10.1038/187493a0", good.clone());
         cache.put_if_identity_ok("10.1038/187493a0", bad);
+        let timed = cache
+            .get_valid_with_timing("10.1038/187493a0")
+            .expect("cached ruby record");
+        assert_eq!(timed.metadata["title"], "Ruby");
+        assert!(timed.age() < std::time::Duration::from_secs(5));
         let got = cache.get_valid("10.1038/187493a0").unwrap();
         assert_eq!(got["title"], "Ruby");
         assert_eq!(cache.len_for_test(), 1);
