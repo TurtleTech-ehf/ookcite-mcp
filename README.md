@@ -186,6 +186,86 @@ Optional env (stdio MCP, all clients):
 | `OOKCITE_CREDENTIAL_STORE` | `platform` to load a platform credential reference |
 | `OOKCITE_CREDENTIAL_SERVICE` | Platform credential service name (default `ookcite-mcp`) |
 | `OOKCITE_CREDENTIAL_ACCOUNT` | Platform credential account name (default `default`) |
+| `OOKCITE_PROVIDERS` | `off` skips Crossref, DataCite, Zenodo, and doi.org. `none`, `disabled`, `0`, `false`, and `no` do the same. Unset keeps the live hosts |
+| `OOKCITE_CROSSREF_API` | Crossref works base (default `https://api.crossref.org`). Ignored when providers are off |
+| `OOKCITE_DATACITE_API` | DataCite base (default `https://api.datacite.org`). Ignored when providers are off |
+| `OOKCITE_ZENODO_API` | Zenodo base (default `https://zenodo.org/api`). Ignored when providers are off |
+| `OOKCITE_DOI_API` | DOI handle API base (default `https://doi.org/api`). Ignored when providers are off |
+
+## Try it in five minutes
+
+Point the server at a local OokCite API and keep the live providers out of
+the process. `OOKCITE_PROVIDERS=off` is enough: Crossref, DataCite, Zenodo,
+and doi.org are not contacted. A claim for a field the local record does
+not carry comes back `INCOMPLETE`.
+
+Start a lookup stub. This one answers every DOI with the 1960 ruby paper
+and leaves `issue` out. It listens on `127.0.0.1` only:
+
+```bash
+python3 - <<'PY'
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+RECORD = {
+    "doi": "10.1038/187493a0",
+    "title": "Stimulated Optical Radiation in Ruby",
+    "authors": [{"family": "Maiman", "given": "T. H."}],
+    "date": {"year": 1960},
+    "journal": "Nature",
+    "volume": "187",
+    "pages": "493-494",
+}
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(n)
+        body = json.dumps(RECORD).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *_args):
+        return
+ThreadingHTTPServer(("127.0.0.1", 8080), Handler).serve_forever()
+PY
+```
+
+In another shell, build once and send one claim check. Close standard
+input when the reply arrives; the server exits with it:
+
+```bash
+cargo build --bin ookcite-mcp
+export OOKCITE_API=http://127.0.0.1:8080
+export OOKCITE_PROVIDERS=off
+unset OOKCITE_API_KEY OOKCITE_API_KEY_COMMAND OOKCITE_API_KEY_FILE \
+  OOKCITE_CREDENTIAL_STORE
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"local","version":"0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"verify_references","arguments":{"dois":["10.1038/187493a0"],"claims":[{"issue":"4736","year":1960}]}}}' \
+  | ./target/debug/ookcite-mcp
+```
+
+The tool text is:
+
+```text
+INCOMPLETE 10.1038/187493a0 : Stimulated Optical Radiation in Ruby
+issue: claimed 4736, record has none
+```
+
+To exercise provider-shaped responses on the same machine, leave
+`OOKCITE_PROVIDERS` unset and point each base at a stub:
+
+```bash
+export OOKCITE_CROSSREF_API=http://127.0.0.1:9091
+export OOKCITE_DATACITE_API=http://127.0.0.1:9091
+export OOKCITE_ZENODO_API=http://127.0.0.1:9091
+export OOKCITE_DOI_API=http://127.0.0.1:9091
+```
+
+`OOKCITE_PROVIDERS=off` skips those URLs even when they are set. Restart
+the client after changing the environment of a stdio server.
 
 ## Marketplace plugin
 
@@ -424,6 +504,7 @@ per-collection metadata overrides described in `docs/local-overrides.md`.
 | `src/server.rs` | `Server` + `#[tool_router]` MCP tool handlers (plus unit tests at bottom) |
 | `src/tool_args.rs` | Tool argument structs (`serde` + `schemars`) |
 | `src/constants.rs` | API base URL, package version, reverse-lookup confidence threshold |
+| `src/providers.rs` | Crossref, DataCite, Zenodo, and doi.org bases (`OOKCITE_PROVIDERS=off` skips them) |
 | `src/http_error.rs` | `error_detail` and HTTP status classification for client-facing strings |
 | `src/collection_entries.rs` | Collection entry ids, bare DOI / `doi:` alias resolution, search lines |
 | `src/plaintext.rs` | Pasted-list split and local `.bib` render |
