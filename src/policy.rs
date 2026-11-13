@@ -87,6 +87,7 @@ pub fn policy_summary_lines() -> Vec<String> {
             "OOKCITE_API_KEY: {}",
             redact_api_key_hint(std::env::var("OOKCITE_API_KEY").ok().as_deref())
         ),
+        crate::providers::summary_line(),
     ];
     if let Ok(base) = std::env::var("OOKCITE_API") {
         if !base.trim().is_empty() {

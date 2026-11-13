@@ -23,6 +23,7 @@ mod oidc_resource;
 mod overrides;
 mod plaintext;
 mod policy;
+mod providers;
 mod resolve_helpers;
 mod server;
 mod setup;

@@ -91,7 +91,7 @@ pub fn quota_soft_hint(remaining: u32, limit: u32) -> Option<String> {
 /// Install and authentication guidance appended to client-facing errors.
 pub fn setup_help_block() -> String {
     format!(
-        "--- setup help ---\nookcite-mcp {VERSION}\nAPI (default): {API}\nOptional override: OOKCITE_API=https://host\nAuth: set OOKCITE_API_KEY (Bearer ookc_…) for higher limits + collections\n  Mint key: https://ookcite.turtletech.us (dashboard) or ttech-dashboard\nInstall / reconfigure:\n  ookcite-mcp setup --key YOUR_KEY\n  npx -y @turtletech/ookcite-mcp  (or cargo install --path .)\nClient policy:\n  OOKCITE_MCP_READ_ONLY=1     — hard-disable collection mutations\n  OOKCITE_MCP_ALLOW_MUTATE=0  — deny mutations (default allow if unset)\n  OOKCITE_STARTUP_PROBES=1    — stderr auth/update checks at MCP launch\nDiagnostics: use doctor or health_check tools; never paste full API keys into chat."
+        "--- setup help ---\nookcite-mcp {VERSION}\nAPI (default): {API}\nOptional override: OOKCITE_API=https://host\nAuth: set OOKCITE_API_KEY (Bearer ookc_…) for higher limits + collections\n  Mint key: https://ookcite.turtletech.us (dashboard) or ttech-dashboard\nInstall / reconfigure:\n  ookcite-mcp setup --key YOUR_KEY\n  npx -y @turtletech/ookcite-mcp  (or cargo install --path .)\nClient policy:\n  OOKCITE_MCP_READ_ONLY=1     — hard-disable collection mutations\n  OOKCITE_MCP_ALLOW_MUTATE=0  — deny mutations (default allow if unset)\n  OOKCITE_STARTUP_PROBES=1    — stderr auth/update checks at MCP launch\nProviders:\n  OOKCITE_PROVIDERS=off       — skip Crossref, DataCite, Zenodo, and doi.org\n  OOKCITE_CROSSREF_API, OOKCITE_DATACITE_API, OOKCITE_ZENODO_API, OOKCITE_DOI_API — one base URL each\nDiagnostics: use doctor or health_check tools; never paste full API keys into chat."
     )
 }
 
@@ -138,6 +138,16 @@ mod tests {
         assert!(quota_soft_hint(5, 20).is_none());
         assert!(quota_soft_hint(0, 20).is_some());
         assert!(quota_soft_hint(1, 0).is_none());
+    }
+
+    #[test]
+    fn setup_help_names_the_provider_switch() {
+        let help = setup_help_block();
+        assert!(help.contains("OOKCITE_PROVIDERS=off"));
+        assert!(help.contains("OOKCITE_CROSSREF_API"));
+        assert!(help.contains("OOKCITE_DATACITE_API"));
+        assert!(help.contains("OOKCITE_ZENODO_API"));
+        assert!(help.contains("OOKCITE_DOI_API"));
     }
 
     #[test]

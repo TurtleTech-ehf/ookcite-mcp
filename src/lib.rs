@@ -19,6 +19,7 @@
 //! | `server` | `Server` + `#[tool_router]` MCP tools (+ unit tests) |
 //! | `tool_args` | MCP tool argument structs (schemars / serde) |
 //! | `constants` | `API` base URL, `VERSION`, confidence thresholds |
+//! | `providers` | Crossref, DataCite, Zenodo, and doi.org bases |
 //! | `http_error` | `error_detail` and status classification helpers |
 //! | `collection_entries` | Entry id / DOI alias resolve + search line format |
 //! | `plaintext` | Pasted-list split and local `.bib` render |

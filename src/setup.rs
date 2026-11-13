@@ -72,6 +72,11 @@ fn print_manual_config(api_key: Option<&str>) {
     println!(
         "  OOKCITE_API              optional; override API base (default ookcite-api.turtletech.us)"
     );
+    println!("  OOKCITE_PROVIDERS=off    skip Crossref, DataCite, Zenodo, and doi.org");
+    println!("  OOKCITE_CROSSREF_API     Crossref base (default https://api.crossref.org)");
+    println!("  OOKCITE_DATACITE_API     DataCite base (default https://api.datacite.org)");
+    println!("  OOKCITE_ZENODO_API       Zenodo base (default https://zenodo.org/api)");
+    println!("  OOKCITE_DOI_API          DOI handle base (default https://doi.org/api)");
     println!(
         "  OOKCITE_STARTUP_PROBES=1 optional; extra auth/update checks on stderr at MCP launch"
     );
@@ -497,6 +502,11 @@ mod tests {
         assert!(src.contains("mcpServers"));
         assert!(src.contains("@turtletech/ookcite-mcp"));
         assert!(src.contains("OOKCITE_STARTUP_PROBES"));
+        assert!(src.contains("OOKCITE_PROVIDERS=off"));
+        assert!(src.contains("OOKCITE_CROSSREF_API"));
+        assert!(src.contains("OOKCITE_DATACITE_API"));
+        assert!(src.contains("OOKCITE_ZENODO_API"));
+        assert!(src.contains("OOKCITE_DOI_API"));
     }
 
     #[test]

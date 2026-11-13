@@ -54,36 +54,6 @@ fn shared_doi_cache() -> &'static DoiResponseCache {
     CACHE.get_or_init(DoiResponseCache::with_default_ttl)
 }
 
-#[derive(Clone)]
-struct ProviderBases {
-    crossref: String,
-    datacite: String,
-    zenodo: String,
-    handles: String,
-}
-
-impl ProviderBases {
-    fn production() -> Self {
-        Self {
-            crossref: "https://api.crossref.org".into(),
-            datacite: "https://api.datacite.org".into(),
-            zenodo: "https://zenodo.org/api".into(),
-            handles: "https://doi.org/api".into(),
-        }
-    }
-
-    #[cfg(test)]
-    fn shared(base: impl Into<String>) -> Self {
-        let base = base.into().trim_end_matches('/').to_string();
-        Self {
-            crossref: base.clone(),
-            datacite: base.clone(),
-            zenodo: base.clone(),
-            handles: base,
-        }
-    }
-}
-
 const PROVIDER_USER_AGENT: &str = "ookcite-mcp (mailto:rgoswami@ieee.org)";
 
 struct DoiLookup {
@@ -106,9 +76,11 @@ pub struct Server {
     http: reqwest::Client,
     api_base: String,
     doi_cache: DoiResponseCache,
-    /// Crossref, DataCite, Zenodo, and doi.org. Absent in unit tests so they
-    /// stay on the mocked OokCite API and never call a live provider.
-    providers: Option<ProviderBases>,
+    /// Crossref, DataCite, Zenodo, and the DOI handle API.
+    /// `None` when `OOKCITE_PROVIDERS=off`, so a lookup stays on `api_base`.
+    /// Unit tests that build a server with `new_with_base` also leave this
+    /// empty, so they stay on the mocked OokCite API.
+    providers: Option<crate::providers::ProviderBases>,
     /// Local override store, decided once by the entry point. Off unless set.
     overrides: overrides::OverrideStore,
     /// Whether this process serves many accounts over HTTP, decided once by
@@ -126,7 +98,7 @@ impl Server {
             http: build_api_client(30, reqwest::header::HeaderMap::new()),
             api_base: api_base_url(),
             doi_cache: shared_doi_cache().clone(),
-            providers: Some(ProviderBases::production()),
+            providers: crate::providers::ProviderBases::from_env(),
             overrides: overrides::OverrideStore::Disabled,
             shared_http: false,
         }
@@ -3614,7 +3586,7 @@ impl Server {
     }
 
     fn with_providers(mut self, base: String) -> Self {
-        self.providers = Some(ProviderBases::shared(base));
+        self.providers = Some(crate::providers::ProviderBases::shared(base));
         self
     }
 }
@@ -3678,6 +3650,66 @@ mod tests {
                 None => unsafe { std::env::remove_var(self.key) },
             }
         }
+    }
+
+    /// Several environment variables, restored together under `env_lock`.
+    struct EnvScope {
+        prev: Vec<(&'static str, Option<String>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvScope {
+        fn apply(pairs: &[(&'static str, Option<&str>)]) -> Self {
+            let lock = env_lock();
+            let mut prev = Vec::with_capacity(pairs.len());
+            for (key, value) in pairs {
+                prev.push((*key, std::env::var(key).ok()));
+                // SAFETY: held under env_lock for the guard lifetime.
+                match value {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+            Self { prev, _lock: lock }
+        }
+    }
+
+    impl Drop for EnvScope {
+        fn drop(&mut self) {
+            for (key, value) in self.prev.drain(..).rev() {
+                // SAFETY: held under env_lock for the guard lifetime.
+                match value {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        }
+    }
+
+    fn provider_env<'a>(
+        extra: &[(&'static str, Option<&'a str>)],
+    ) -> Vec<(&'static str, Option<&'a str>)> {
+        let mut pairs = vec![
+            ("OOKCITE_PROVIDERS", None),
+            ("OOKCITE_CROSSREF_API", None),
+            ("OOKCITE_DATACITE_API", None),
+            ("OOKCITE_ZENODO_API", None),
+            ("OOKCITE_DOI_API", None),
+            ("OOKCITE_API", None),
+            ("OOKCITE_API_KEY", None),
+            ("OOKCITE_API_KEY_COMMAND", None),
+            ("OOKCITE_API_KEY_FILE", None),
+            ("OOKCITE_CREDENTIAL_STORE", None),
+            ("OOKCITE_STARTUP_PROBES", None),
+        ];
+        for (key, value) in extra {
+            if let Some(slot) = pairs.iter_mut().find(|(name, _)| name == key) {
+                slot.1 = *value;
+            } else {
+                pairs.push((*key, *value));
+            }
+        }
+        pairs
     }
 
     #[test]
@@ -7982,5 +8014,378 @@ mod tests {
             .await;
         assert!(result.contains("Status: ok"), "{result}");
         assert!(!result.contains("Collections:"), "{result}");
+    }
+
+    fn provider_field<'a>(bases: &'a crate::providers::ProviderBases, name: &str) -> &'a str {
+        match name {
+            "crossref" => &bases.crossref,
+            "datacite" => &bases.datacite,
+            "zenodo" => &bases.zenodo,
+            "doi" => &bases.handles,
+            other => panic!("unknown provider {other}"),
+        }
+    }
+
+    #[test]
+    fn provider_bases_default_to_production() {
+        let pairs = provider_env(&[]);
+        let _env = EnvScope::apply(&pairs);
+        let bases = crate::providers::ProviderBases::from_env().expect("providers stay on");
+        assert!(bases.is_production());
+        let server = Server::new();
+        assert!(server
+            .providers
+            .as_ref()
+            .is_some_and(|bases| bases.is_production()));
+        assert!(
+            Server::doctor_report_sync_prelude().contains("providers: live"),
+            "{}",
+            Server::doctor_report_sync_prelude()
+        );
+    }
+
+    #[test]
+    fn each_provider_base_overrides_on_its_own() {
+        let cases = [
+            (
+                "OOKCITE_CROSSREF_API",
+                "http://127.0.0.1:9/crossref/",
+                "http://127.0.0.1:9/crossref",
+                "crossref",
+            ),
+            (
+                "OOKCITE_DATACITE_API",
+                "http://127.0.0.1:9/datacite",
+                "http://127.0.0.1:9/datacite",
+                "datacite",
+            ),
+            (
+                "OOKCITE_ZENODO_API",
+                "http://127.0.0.1:9/zenodo/",
+                "http://127.0.0.1:9/zenodo",
+                "zenodo",
+            ),
+            (
+                "OOKCITE_DOI_API",
+                "http://127.0.0.1:9/doi",
+                "http://127.0.0.1:9/doi",
+                "doi",
+            ),
+        ];
+        for (key, raw, want, field) in cases {
+            let pairs = provider_env(&[(key, Some(raw))]);
+            let _env = EnvScope::apply(&pairs);
+            let bases = crate::providers::ProviderBases::from_env().expect(key);
+            assert_eq!(provider_field(&bases, field), want, "{key}");
+            let production = crate::providers::ProviderBases::production();
+            for other in ["crossref", "datacite", "zenodo", "doi"] {
+                if other == field {
+                    continue;
+                }
+                assert_eq!(
+                    provider_field(&bases, other),
+                    provider_field(&production, other),
+                    "{key} moved {other}"
+                );
+            }
+            let stored = Server::new().providers.expect(key);
+            assert_eq!(provider_field(&stored, field), want, "{key}");
+        }
+    }
+
+    #[test]
+    fn provider_off_values_ignore_base_overrides() {
+        for word in ["off", "OFF", " none ", "disabled", "0", "false", "no"] {
+            let pairs = provider_env(&[
+                ("OOKCITE_PROVIDERS", Some(word)),
+                ("OOKCITE_CROSSREF_API", Some("https://api.crossref.org")),
+                ("OOKCITE_DOI_API", Some("https://doi.org/api")),
+            ]);
+            let _env = EnvScope::apply(&pairs);
+            assert!(
+                crate::providers::ProviderBases::from_env().is_none(),
+                "{word}"
+            );
+            assert!(Server::new().providers.is_none(), "{word}");
+            let line = crate::providers::summary_line();
+            assert!(line.starts_with("providers: off"), "{word}: {line}");
+        }
+    }
+
+    #[test]
+    fn empty_provider_switch_stays_live_and_summary_hides_userinfo() {
+        let blank = provider_env(&[
+            ("OOKCITE_PROVIDERS", Some("   ")),
+            ("OOKCITE_DOI_API", Some("   ")),
+        ]);
+        let _env = EnvScope::apply(&blank);
+        assert!(crate::providers::ProviderBases::from_env()
+            .expect("blank switch")
+            .is_production());
+        drop(_env);
+
+        let pairs = provider_env(&[
+            ("OOKCITE_PROVIDERS", Some("on")),
+            (
+                "OOKCITE_CROSSREF_API",
+                Some("http://user:secret@127.0.0.1:9/crossref/"),
+            ),
+        ]);
+        let _env = EnvScope::apply(&pairs);
+        let line = crate::providers::summary_line();
+        assert!(line.contains("http://127.0.0.1:9/crossref"), "{line}");
+        assert!(!line.contains("secret"), "{line}");
+        assert!(!line.contains("user:"), "{line}");
+    }
+
+    fn record_without_volume(doi: &str) -> serde_json::Value {
+        serde_json::json!({
+            "doi": doi,
+            "title": "A record with no volume",
+            "authors": [{"family": "Maiman", "given": "T. H."}],
+            "date": {"year": 1960},
+            "journal": "Nature",
+            "pages": "493-494",
+            "entry_type": "article"
+        })
+    }
+
+    fn volume_claim() -> BibliographicClaim {
+        BibliographicClaim {
+            year: Some(1960),
+            journal: Some("Nature".into()),
+            volume: Some("187".into()),
+            ..BibliographicClaim::default()
+        }
+    }
+
+    fn assert_incomplete(result: &str) {
+        assert!(result.starts_with("INCOMPLETE"), "{result}");
+        assert!(
+            result.contains("volume: claimed 187, record has none"),
+            "{result}"
+        );
+        assert!(!result.contains("MISMATCH"), "{result}");
+        assert!(!result.contains("VALID"), "{result}");
+        assert!(!result.contains("ERROR"), "{result}");
+        assert!(!result.contains("UNREGISTERED"), "{result}");
+        for host in [
+            "crossref.org",
+            "datacite.org",
+            "zenodo.org",
+            "doi.org",
+            "turtletech",
+        ] {
+            assert!(!result.to_ascii_lowercase().contains(host), "{result}");
+        }
+    }
+
+    struct RecordingDns {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl reqwest::dns::Resolve for RecordingDns {
+        fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            let host = name.as_str().to_string();
+            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                let addr = std::net::SocketAddr::new(ip, 0);
+                return Box::pin(async move {
+                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>(Box::new(std::iter::once(
+                        addr,
+                    ))
+                        as reqwest::dns::Addrs)
+                });
+            }
+            self.seen
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .push(host);
+            Box::pin(async move {
+                Err(
+                    Box::new(std::io::Error::other("host is outside the local fixture"))
+                        as Box<dyn std::error::Error + Send + Sync>,
+                )
+            })
+        }
+    }
+
+    fn local_only_client(seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .dns_resolver(std::sync::Arc::new(RecordingDns { seen }))
+            .build()
+            .expect("local-only HTTP client")
+    }
+
+    fn assert_no_outside_name(seen: &std::sync::Mutex<Vec<String>>) {
+        let names = seen.lock().unwrap_or_else(|err| err.into_inner());
+        let outside: Vec<_> = names
+            .iter()
+            .filter(|name| name.parse::<std::net::IpAddr>().is_err())
+            .cloned()
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "a lookup resolved a name outside the fixture: {outside:?}"
+        );
+    }
+
+    fn assert_fixture_only(requests: &[wiremock::Request], allowed: &[&str]) {
+        assert!(!requests.is_empty(), "the fixture saw no request");
+        for request in requests {
+            let host = request.url.host_str().unwrap_or("");
+            assert!(
+                host == "127.0.0.1" || host == "localhost",
+                "request left the fixture: {}",
+                request.url
+            );
+            let path = request.url.path();
+            assert!(
+                allowed.iter().any(|prefix| path.starts_with(prefix)),
+                "unexpected fixture path {path} in {}",
+                request.url
+            );
+            let rendered = request.url.to_string().to_ascii_lowercase();
+            for host in [
+                "crossref.org",
+                "datacite.org",
+                "zenodo.org",
+                "doi.org",
+                "turtletech",
+            ] {
+                assert!(!rendered.contains(host), "{}", request.url);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn providers_off_reaches_incomplete_without_an_outside_request() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/offline-incomplete";
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains(doi))
+            .respond_with(ResponseTemplate::new(200).set_body_json(record_without_volume(doi)))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let uri = mock.uri();
+        let pairs = provider_env(&[
+            ("OOKCITE_PROVIDERS", Some("off")),
+            ("OOKCITE_API", Some(uri.as_str())),
+            ("OOKCITE_CROSSREF_API", Some("https://api.crossref.org")),
+            ("OOKCITE_DATACITE_API", Some("https://api.datacite.org")),
+            ("OOKCITE_ZENODO_API", Some("https://zenodo.org/api")),
+            ("OOKCITE_DOI_API", Some("https://doi.org/api")),
+        ]);
+        let _env = EnvScope::apply(&pairs);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut server = Server::new();
+        assert!(server.providers.is_none());
+        server.http = local_only_client(seen.clone());
+        server.doi_cache = DoiResponseCache::with_default_ttl();
+
+        let result = server
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec![doi.into()],
+                claims: vec![volume_claim()],
+            }))
+            .await;
+        assert_incomplete(&result);
+        assert_no_outside_name(&seen);
+        let requests = mock.received_requests().await.expect("recorded requests");
+        assert_fixture_only(&requests, &["/api/v1/lookup/doi"]);
+    }
+
+    #[tokio::test]
+    async fn local_provider_stubs_reach_incomplete_without_an_outside_request() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/stub-incomplete";
+        let encoded = super::encode_path_segment(doi);
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains(doi))
+            .respond_with(ResponseTemplate::new(200).set_body_json(record_without_volume(doi)))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/handles/{encoded}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1,
+                "handle": doi
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/works/{encoded}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {
+                    "type": "journal-article",
+                    "title": ["A record with no volume"],
+                    "container-title": ["Nature"],
+                    "page": "493-494",
+                    "author": [{"family": "Maiman", "given": "T. H."}],
+                    "issued": {"date-parts": [[1960]]},
+                    "DOI": doi
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let uri = mock.uri();
+        let pairs = provider_env(&[
+            ("OOKCITE_PROVIDERS", Some("on")),
+            ("OOKCITE_API", Some(uri.as_str())),
+            ("OOKCITE_CROSSREF_API", Some(uri.as_str())),
+            ("OOKCITE_DATACITE_API", Some(uri.as_str())),
+            ("OOKCITE_ZENODO_API", Some(uri.as_str())),
+            ("OOKCITE_DOI_API", Some(uri.as_str())),
+        ]);
+        let _env = EnvScope::apply(&pairs);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut server = Server::new();
+        let bases = server.providers.clone().expect("stubs stay enabled");
+        assert_eq!(bases.crossref, uri);
+        assert_eq!(bases.datacite, uri);
+        assert_eq!(bases.zenodo, uri);
+        assert_eq!(bases.handles, uri);
+        server.http = local_only_client(seen.clone());
+        server.doi_cache = DoiResponseCache::with_default_ttl();
+
+        let result = server
+            .validate_doi(Parameters(DoiArgs {
+                doi: doi.into(),
+                claim: volume_claim(),
+            }))
+            .await;
+        assert_incomplete(&result);
+        assert_no_outside_name(&seen);
+        let requests = mock.received_requests().await.expect("recorded requests");
+        assert_fixture_only(&requests, &["/api/v1/lookup/doi", "/handles/", "/works/"]);
+        let paths: Vec<_> = requests
+            .iter()
+            .map(|request| request.url.path().to_string())
+            .collect();
+        assert!(
+            paths.iter().any(|path| path.starts_with("/handles/")),
+            "{paths:?}"
+        );
+        assert!(
+            paths.iter().any(|path| path.starts_with("/works/")),
+            "{paths:?}"
+        );
+        assert!(
+            paths
+                .iter()
+                .all(|path| !path.starts_with("/dois/") && !path.starts_with("/records/")),
+            "{paths:?}"
+        );
     }
 }
