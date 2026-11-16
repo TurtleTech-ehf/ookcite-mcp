@@ -32,8 +32,8 @@ pub const FREE_DAILY_LOOKUPS: u32 = 60;
 
 /// Anonymous / no-key: refuse metered batches larger than this.
 /// The daily cap is [`ANON_DAILY_LOOKUPS`].
-/// An audit also uses this cap when a key is present but `/me` did not
-/// confirm `lookups_remaining`.
+/// An audit also uses this cap when `/me` succeeds but omits
+/// `lookups_remaining`. A failed `/me` refuses the audit instead.
 pub const ANON_BATCH_SOFT_CAP: u32 = 40;
 
 /// Largest provider response body the audit will read. A larger body is
@@ -128,31 +128,121 @@ pub fn build_api_client(
 
 /// Client for doi.org, Crossref, DataCite, and Zenodo.
 ///
-/// A redirect is followed only when the next host is one of `allowed_hosts`
-/// (the hosts those providers were configured with) and only for a few hops.
-/// Any other host stops the request. Response bodies are capped separately
-/// by [`PROVIDER_BODY_LIMIT`] at the read.
+/// A redirect is followed only for `https` on port 443, with no userinfo,
+/// and only when the host is one of `allowed_hosts`. The client also refuses
+/// to start on `http`. Response bodies are capped separately by
+/// [`PROVIDER_BODY_LIMIT`] at the read.
 pub fn build_provider_client(
     timeout_secs: u64,
     allowed_hosts: impl IntoIterator<Item = String>,
 ) -> reqwest::Client {
-    let allowed: std::sync::Arc<std::collections::HashSet<String>> = std::sync::Arc::new(
-        allowed_hosts
-            .into_iter()
-            .map(|host| host.to_ascii_lowercase())
-            .collect(),
-    );
+    let allowed = allowed_host_set(allowed_hosts);
     client_builder(timeout_secs)
+        .https_only(true)
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            let host = attempt.url().host_str().unwrap_or("").to_ascii_lowercase();
-            if attempt.previous().len() < 4 && allowed.contains(&host) {
-                attempt.follow()
-            } else {
-                attempt.error("provider redirect refused")
-            }
+            let allow = provider_redirect_target_allowed(attempt.url(), &allowed);
+            redirect_action(attempt, allow)
         }))
         .build()
         .expect("ookcite-mcp: failed to build provider HTTP client")
+}
+
+/// `true` when a redirect target is https on port 443, has no userinfo, and
+/// its host is one of the configured provider hosts.
+pub(crate) fn provider_redirect_target_allowed(
+    url: &reqwest::Url,
+    allowed_hosts: &std::collections::HashSet<String>,
+) -> bool {
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && allowed_hosts.contains(&url.host_str().unwrap_or("").to_ascii_lowercase())
+}
+
+fn allowed_host_set(
+    hosts: impl IntoIterator<Item = String>,
+) -> std::sync::Arc<std::collections::HashSet<String>> {
+    std::sync::Arc::new(
+        hosts
+            .into_iter()
+            .map(|host| host.to_ascii_lowercase())
+            .collect(),
+    )
+}
+
+fn redirect_action(
+    attempt: reqwest::redirect::Attempt<'_>,
+    allow: bool,
+) -> reqwest::redirect::Action {
+    if attempt.previous().len() < 4 && allow {
+        attempt.follow()
+    } else {
+        attempt.error("provider redirect refused")
+    }
+}
+
+/// HTTP client for a test mock. Production [`build_provider_client`] is
+/// https-only on port 443 and does not call this.
+///
+/// The first request may use the mock's own scheme and port. A redirect is
+/// followed only back to that exact origin, or when it passes
+/// [`provider_redirect_target_allowed`] for `allowed_hosts`.
+#[cfg(test)]
+pub(crate) fn build_provider_client_for_tests(
+    timeout_secs: u64,
+    allowed_hosts: impl IntoIterator<Item = String>,
+    mock_origins: impl IntoIterator<Item = TestProviderOrigin>,
+) -> reqwest::Client {
+    let allowed = allowed_host_set(allowed_hosts);
+    let origins: std::sync::Arc<Vec<TestProviderOrigin>> =
+        std::sync::Arc::new(mock_origins.into_iter().collect());
+    client_builder(timeout_secs)
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            let allow = {
+                let url = attempt.url();
+                origins.iter().any(|origin| origin.matches(url))
+                    || provider_redirect_target_allowed(url, &allowed)
+            };
+            redirect_action(attempt, allow)
+        }))
+        .build()
+        .expect("ookcite-mcp: failed to build test provider HTTP client")
+}
+
+/// One mock base URL. Scheme, host, and port must all match.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct TestProviderOrigin {
+    scheme: String,
+    host: String,
+    port: u16,
+}
+
+#[cfg(test)]
+impl TestProviderOrigin {
+    pub(crate) fn parse(base: &str) -> Self {
+        let url = reqwest::Url::parse(base).expect("test provider origin");
+        Self {
+            scheme: url.scheme().to_string(),
+            host: url
+                .host_str()
+                .expect("test provider host")
+                .to_ascii_lowercase(),
+            port: url.port_or_known_default().expect("test provider port"),
+        }
+    }
+
+    fn matches(&self, url: &reqwest::Url) -> bool {
+        url.scheme() == self.scheme
+            && url
+                .host_str()
+                .unwrap_or("")
+                .eq_ignore_ascii_case(&self.host)
+            && url.port_or_known_default() == Some(self.port)
+            && url.username().is_empty()
+            && url.password().is_none()
+    }
 }
 
 fn client_builder(timeout_secs: u64) -> reqwest::ClientBuilder {
@@ -206,5 +296,101 @@ mod tests {
         // reqwest rejects that scheme and every call dies as
         // "error sending request for url".
         reqwest::Proxy::all("socks5h://127.0.0.1:1080").expect("socks5h proxy");
+    }
+
+    #[test]
+    fn provider_redirect_requires_https_on_port_443_without_userinfo() {
+        let hosts = std::collections::HashSet::from(["doi.org".to_string()]);
+        let allowed = |raw: &str| {
+            provider_redirect_target_allowed(&reqwest::Url::parse(raw).unwrap(), &hosts)
+        };
+        assert!(allowed("https://doi.org/api/handles/10.1000/x"));
+        assert!(allowed("https://doi.org:443/api/handles/10.1000/x"));
+        assert!(
+            !allowed("https://doi.org:444/api/handles/10.1000/x"),
+            "an allowed host on another port"
+        );
+        assert!(
+            !allowed("http://doi.org:443/api/handles/10.1000/x"),
+            "https to http downgrade"
+        );
+        assert!(
+            !allowed("http://doi.org/api/handles/10.1000/x"),
+            "an http hop"
+        );
+        assert!(
+            !allowed("https://user@doi.org/api/handles/10.1000/x"),
+            "userinfo in the redirect URL"
+        );
+        assert!(!allowed(
+            "https://user:secret@doi.org/api/handles/10.1000/x"
+        ));
+        assert!(!allowed("https://evil.example/api/handles/10.1000/x"));
+    }
+
+    #[tokio::test]
+    async fn provider_client_refuses_an_http_start() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("body"))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let client = build_provider_client(5, ["127.0.0.1".to_string()]);
+        let error = client
+            .get(format!("{}/handles/10.1000/x", mock.uri()))
+            .send()
+            .await
+            .expect_err("http start must fail before the mock is called");
+        assert!(error.is_builder(), "{error:?}");
+        assert!(
+            error_chain(&error).contains("URL scheme is not allowed"),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_redirect_refuses_another_port_a_downgrade_and_userinfo() {
+        assert_redirect_refused("https://doi.org:444/api/handles/10.1000/x").await;
+        assert_redirect_refused("https://127.0.0.1:444/handles/10.1000/x").await;
+        assert_redirect_refused("http://doi.org:443/api/handles/10.1000/x").await;
+        assert_redirect_refused("http://127.0.0.1:443/handles/10.1000/x").await;
+        assert_redirect_refused("https://user@doi.org/api/handles/10.1000/x").await;
+        assert_redirect_refused("https://user@127.0.0.1/handles/10.1000/x").await;
+    }
+
+    async fn assert_redirect_refused(location: &str) {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(302).insert_header("location", location))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let client = build_provider_client_for_tests(
+            5,
+            ["doi.org".to_string(), "127.0.0.1".to_string()],
+            [TestProviderOrigin::parse(&mock.uri())],
+        );
+        let error = client
+            .get(format!("{}/handles/10.1000/x", mock.uri()))
+            .send()
+            .await
+            .expect_err("redirect must be refused");
+        assert!(error.is_redirect(), "{error:?}");
+        assert!(
+            error_chain(&error).contains("provider redirect refused"),
+            "{error:?}"
+        );
+    }
+
+    fn error_chain(error: &reqwest::Error) -> String {
+        use std::error::Error;
+        let mut parts = vec![error.to_string()];
+        let mut source = error.source();
+        while let Some(err) = source {
+            parts.push(err.to_string());
+            source = err.source();
+        }
+        parts.join(" ")
     }
 }

@@ -92,6 +92,14 @@ impl ProviderBases {
             .filter_map(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
             .collect()
     }
+
+    #[cfg(test)]
+    fn test_origins(&self) -> Vec<crate::constants::TestProviderOrigin> {
+        [&self.crossref, &self.datacite, &self.zenodo, &self.handles]
+            .into_iter()
+            .map(|base| crate::constants::TestProviderOrigin::parse(base))
+            .collect()
+    }
 }
 
 fn provider_client(bases: Option<&ProviderBases>, timeout_secs: u64) -> reqwest::Client {
@@ -1331,9 +1339,10 @@ impl Server {
 
     /// Confirm a presented key with `/me` before any provider call.
     ///
-    /// No key is the anonymous path. A 401 or 403 closes the audit. Any other
-    /// failure leaves the quota unconfirmed: the anonymous cap still applies,
-    /// and a file under that cap is refused here rather than sent to doi.org.
+    /// No key is the anonymous path. A 401 or 403 closes the audit. A
+    /// successful `/me` that omits `lookups_remaining` leaves the quota
+    /// unconfirmed, so the anonymous cap still applies. Any other failure
+    /// refuses the audit before doi.org is called.
     async fn audit_access(&self) -> AuditAccess {
         if !inbound_auth::has_api_key() {
             return AuditAccess::anonymous();
@@ -1369,7 +1378,7 @@ impl Server {
 
     #[tool(
         name = "audit_bibliography",
-        description = "Audit a manuscript .bib for entries that are broken or retracted. Call this when the user has BibTeX and wants a submission check, rather than a list of bare DOIs (verify_references) or a formatted bibliography (import_bibliography). Each entry with a DOI is resolved and compared with the title, authors, year, journal, volume, issue, and pages in the file. OK means the DOI is registered, the publisher record has no retraction, withdrawal, or expression of concern, and every supplied field agrees. MISMATCH is a disagreement. INCOMPLETE means a supplied field is absent from the record. BROKEN means the DOI is not registered or is not a DOI. RETRACTED, WITHDRAWN, and CONCERN are read from the Crossref or DataCite record, not from the DOI merely existing. An entry with no DOI is reported as NO DOI and is not guessed. UNCHECKED means the publisher record could not be read, so the entry is not called clean. A collection membership does not skip the lookup. The anonymous daily cap applies, including when a key is present but the remaining lookups were not confirmed. A key that /me rejects is refused before doi.org is called.",
+        description = "Audit a manuscript .bib for entries that are broken or retracted. Call this when the user has BibTeX and wants a submission check, rather than a list of bare DOIs (verify_references) or a formatted bibliography (import_bibliography). Each entry with a DOI is resolved and compared with the title, authors, year, journal, volume, issue, and pages in the file. OK means the DOI is registered, the publisher record has no retraction, withdrawal, or expression of concern, and every supplied field agrees. MISMATCH is a disagreement. INCOMPLETE means a supplied field is absent from the record. BROKEN means the DOI is not registered or is not a DOI. RETRACTED, WITHDRAWN, and CONCERN are read from the Crossref or DataCite record, not from the DOI merely existing. An entry with no DOI is reported as NO DOI and is not guessed. UNCHECKED means the publisher record could not be read, so the entry is not called clean. A collection membership does not skip the lookup. The anonymous daily cap applies when there is no key, and when /me succeeds but does not report the remaining lookups. If /me fails, or rejects the key, the audit is refused before doi.org is called.",
         annotations(
             title = "Audit manuscript bibliography",
             read_only_hint = true,
@@ -3893,7 +3902,11 @@ impl Server {
 
     fn with_providers(mut self, base: String) -> Self {
         let bases = ProviderBases::shared(base);
-        self.provider_http = provider_client(Some(&bases), 5);
+        self.provider_http = crate::constants::build_provider_client_for_tests(
+            5,
+            std::iter::empty::<String>(),
+            bases.test_origins(),
+        );
         self.providers = Some(bases);
         self
     }

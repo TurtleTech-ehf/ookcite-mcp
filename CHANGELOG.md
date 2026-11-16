@@ -127,7 +127,7 @@ All notable changes to this project will be documented in this file. See [conven
 - (**http**) shared API client with connect timeout, pool reuse, and TCP keepalive
 #### Bugfixes
 - (**mcp**) keep an audit on the anonymous cap until `/me` confirms remaining lookups, and reject a bad key before doi.org
-- (**mcp**) follow provider redirects only onto the configured hosts, cap provider bodies, and treat a handle without `responseCode` 1 as unregistered
+- (**mcp**) follow provider redirects only to https port 443 on the configured hosts, cap provider bodies, and treat a handle without `responseCode` 1 as unregistered
 - (**mcp**) limit bibliography bytes, entries, and field length
 - (**http**) refuse an MCP request body over the documented byte limit
 - (**reverse**) retry `/reverse` once on 503/504 after Retry-After (or 2s); do not fall through to `/resolve`

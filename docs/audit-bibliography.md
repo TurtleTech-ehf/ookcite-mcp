@@ -83,8 +83,8 @@ These are exact limits, not estimates.
 | HTTP request body on the MCP endpoint | 2097152 bytes, refused with HTTP 413 |
 | One provider response (doi.org, Crossref, DataCite, Zenodo) | 1048576 bytes |
 
-A provider redirect is followed only when the next host is one of the configured provider hosts. Any other host is refused.
+A provider redirect is followed only when the next URL is `https` on port 443 and the host is one of the configured provider hosts. Another port, an `http` hop, or userinfo in the URL is refused.
 
 ## Quota
 
-Each distinct DOI is one metered lookup. Repeated DOIs in the same file are looked up once. An anonymous session refuses a file with more than the anonymous batch cap before any lookup. A signed-in session uses the remaining lookups only when `/me` confirms `lookups_remaining`. If that field is missing, or `/me` does not succeed, the anonymous cap applies. A key that `/me` rejects is refused before doi.org is called. `usage` reports what is left.
+Each distinct DOI is one metered lookup. Repeated DOIs in the same file are looked up once. An anonymous session refuses a file with more than the anonymous batch cap before any lookup. A signed-in session uses the remaining lookups only when `/me` confirms `lookups_remaining`. If that field is missing from a successful `/me`, the anonymous cap applies. If `/me` fails, or rejects the key, the audit is refused before doi.org is called. `usage` reports what is left.
