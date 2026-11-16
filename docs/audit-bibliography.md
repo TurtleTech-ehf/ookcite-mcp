@@ -26,7 +26,7 @@ RIS is not accepted. Import RIS with `import_bibliography`, or export BibTeX fir
 
 For every DOI the tool checks three things, in order:
 
-1. The DOI is registered at doi.org (`responseCode` 1). Anything else is `BROKEN`.
+1. The DOI is registered at doi.org (`responseCode` 1). Any other response, including a success that omits that number, is `BROKEN`.
 2. The Crossref or DataCite record. A retraction, withdrawal, or expression of concern is read from that record.
 3. The title, authors, year, journal, volume, issue, and pages written in the `.bib`, against the resolved record. A disagreement is `MISMATCH`. A supplied field the record does not carry is `INCOMPLETE`.
 
@@ -40,7 +40,9 @@ Crossref:
 
 - `update-to[].type` of `retraction`, `withdrawal`, `expression_of_concern`, `correction`, or `erratum`
 - `relation` keys `is-retracted-by`, `is-withdrawn-by`, `is-expression-of-concern`, and `is-corrected-by`
-- a title that begins with `RETRACTED:` or `WITHDRAWN:`
+- a publisher-record title that begins with `RETRACTED:` or `WITHDRAWN:`
+
+A manuscript title with that prefix is a note, or a `MISMATCH` when it disagrees with the record. It does not by itself mark the entry retracted or withdrawn.
 
 DataCite:
 
@@ -69,6 +71,20 @@ Each entry gets one status. The summary counts those statuses. The counts add up
 
 When a retraction and a field disagreement are both present, the status is `RETRACTED` and the field lines are still printed.
 
+## Limits
+
+These are exact limits, not estimates.
+
+| Limit | Value |
+| ----- | ----- |
+| Bibliography bytes | 1048576 |
+| Entries | 2000 |
+| One field, after `#` concatenation | 8192 bytes |
+| HTTP request body on the MCP endpoint | 2097152 bytes, refused with HTTP 413 |
+| One provider response (doi.org, Crossref, DataCite, Zenodo) | 1048576 bytes |
+
+A provider redirect is followed only when the next host is one of the configured provider hosts. Any other host is refused.
+
 ## Quota
 
-Each distinct DOI is one metered lookup. Repeated DOIs in the same file are looked up once. An anonymous session refuses a file with more than the anonymous batch cap before any lookup. A signed-in session refuses when the remaining daily lookups cannot cover the file. `usage` reports what is left.
+Each distinct DOI is one metered lookup. Repeated DOIs in the same file are looked up once. An anonymous session refuses a file with more than the anonymous batch cap before any lookup. A signed-in session uses the remaining lookups only when `/me` confirms `lookups_remaining`. If that field is missing, or `/me` does not succeed, the anonymous cap applies. A key that `/me` rejects is refused before doi.org is called. `usage` reports what is left.

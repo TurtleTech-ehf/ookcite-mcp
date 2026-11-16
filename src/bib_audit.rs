@@ -170,7 +170,34 @@ pub fn audit_quota_refusal(quota: &AuditQuota) -> Option<String> {
     if quota.metered == 0 {
         return None;
     }
-    if !quota.has_api_key && quota.metered > quota.anon_soft_cap {
+    if let (true, Some(remaining)) = (quota.has_api_key, quota.remaining) {
+        if quota.metered > remaining {
+            let plan = if quota.plan.is_empty() {
+                "?"
+            } else {
+                quota.plan.as_str()
+            };
+            let limit_hint = quota.limit.map_or_else(
+                || format!(" (plan {plan})"),
+                |limit| format!(" (plan {plan} limit {limit}/day)"),
+            );
+            return Some(format!(
+                "REFUSED: audit needs {} lookup(s) but only {remaining} remaining{limit_hint}. \
+                 Shrink the bibliography, upgrade the plan, or wait for the daily reset. \
+                 A collection membership does not skip this audit.",
+                quota.metered
+            ));
+        }
+        return None;
+    }
+    if quota.metered > quota.anon_soft_cap {
+        if quota.has_api_key {
+            return Some(format!(
+                "REFUSED: lookup quota was not confirmed, refusing an audit of {} DOIs \
+                 (soft cap {}). A collection membership does not skip this audit.",
+                quota.metered, quota.anon_soft_cap
+            ));
+        }
         return Some(format!(
             "REFUSED: anonymous / no OOKCITE_API_KEY session, refusing an audit of {} DOIs \
              (soft cap {}). Free accounts raise the limit to {}/day: \
@@ -180,31 +207,17 @@ pub fn audit_quota_refusal(quota: &AuditQuota) -> Option<String> {
             quota.metered, quota.anon_soft_cap, quota.free_daily, quota.anon_daily
         ));
     }
-    if quota.has_api_key {
-        if let Some(remaining) = quota.remaining {
-            if quota.metered > remaining {
-                let plan = if quota.plan.is_empty() {
-                    "?"
-                } else {
-                    quota.plan.as_str()
-                };
-                let limit_hint = quota.limit.map_or_else(
-                    || format!(" (plan {plan})"),
-                    |limit| format!(" (plan {plan} limit {limit}/day)"),
-                );
-                return Some(format!(
-                    "REFUSED: audit needs {} lookup(s) but only {remaining} remaining{limit_hint}. \
-                     Shrink the bibliography, upgrade the plan, or wait for the daily reset. \
-                     A collection membership does not skip this audit.",
-                    quota.metered
-                ));
-            }
-        }
-    }
     None
 }
 
 pub fn parse_bibtex(content: &str) -> Result<Vec<BibEntry>, String> {
+    if content.len() > crate::constants::AUDIT_BIB_MAX_BYTES {
+        return Err(format!(
+            "bibliography is {} bytes; the limit is {}",
+            content.len(),
+            crate::constants::AUDIT_BIB_MAX_BYTES
+        ));
+    }
     let mut scan = Scan { src: content, i: 0 };
     let mut entries = Vec::new();
     while scan.i < scan.src.len() {
@@ -239,6 +252,12 @@ pub fn parse_bibtex(content: &str) -> Result<Vec<BibEntry>, String> {
         let key = scan.read_key(closer)?;
         let fields = scan.read_fields(closer)?;
         entries.push(entry_from(entry_type, key, fields));
+        if entries.len() > crate::constants::AUDIT_BIB_MAX_ENTRIES {
+            return Err(format!(
+                "bibliography has more than {} entries",
+                crate::constants::AUDIT_BIB_MAX_ENTRIES
+            ));
+        }
     }
     Ok(entries)
 }
@@ -749,21 +768,13 @@ fn resolved_row(
     provider: Option<&Value>,
     provider_error: Option<&str>,
 ) -> Row {
-    let mut notices = notices_from_provider(provider);
-    if let Some(kind) = entry.title.as_deref().and_then(title_mark) {
-        notices.push(title_notice(kind));
-    }
-    if let Some(kind) = metadata
-        .get("title")
-        .and_then(Value::as_str)
-        .and_then(title_mark)
-    {
-        notices.push(title_notice(kind));
-    }
-    notices = dedup_notices(notices);
+    let notices = notices_from_provider(provider);
     let verdict = claim_verdict(metadata, &entry.claim());
     let retraction_checked = provider.is_some() && provider_error.is_none();
-    let (status, mut details) = classify(notices, &verdict, retraction_checked);
+    let (status, mut details) = classify(&notices, &verdict, retraction_checked);
+    if let Some(note) = manuscript_title_note(entry.title.as_deref(), &notices) {
+        details.push(note);
+    }
     if let Some(error) = provider_error {
         details.push(format!("retraction unchecked: {error}"));
     } else if provider.is_none() {
@@ -783,8 +794,24 @@ fn resolved_row(
     }
 }
 
+fn manuscript_title_note(title: Option<&str>, notices: &[PublisherNotice]) -> Option<String> {
+    let kind = title.and_then(title_mark)?;
+    if notices.iter().any(|notice| notice.kind == kind) {
+        return None;
+    }
+    Some(match kind {
+        NoticeKind::Retraction => {
+            "manuscript title is marked retracted; the publisher record does not say so".into()
+        }
+        NoticeKind::Withdrawal => {
+            "manuscript title is marked withdrawn; the publisher record does not say so".into()
+        }
+        NoticeKind::Concern | NoticeKind::Correction => return None,
+    })
+}
+
 fn classify(
-    notices: Vec<PublisherNotice>,
+    notices: &[PublisherNotice],
     verdict: &crate::bibliographic::ClaimVerdict,
     retraction_checked: bool,
 ) -> (AuditStatus, Vec<String>) {
@@ -958,6 +985,13 @@ impl<'a> Scan<'a> {
             }
             self.skip_trivia();
             let value = self.read_value()?;
+            if value.len() > crate::constants::AUDIT_BIB_MAX_FIELD_BYTES {
+                return Err(format!(
+                    "BibTeX field {name} is {} bytes; the limit is {}",
+                    value.len(),
+                    crate::constants::AUDIT_BIB_MAX_FIELD_BYTES
+                ));
+            }
             fields.insert(name.to_ascii_lowercase(), value);
             self.skip_trivia();
             if self.peek() == Some(',') {
@@ -1092,6 +1126,21 @@ mod tests {
         let refused = audit_quota_refusal(&quota(1, true, Some(0))).unwrap();
         assert!(refused.contains("only 0 remaining"), "{refused}");
         assert!(refused.contains("plan free limit 60/day"), "{refused}");
+        let cap = crate::constants::ANON_BATCH_SOFT_CAP;
+        assert!(audit_quota_refusal(&quota(cap, true, None)).is_none());
+        let unconfirmed = audit_quota_refusal(&quota(cap + 1, true, None)).unwrap();
+        assert!(
+            unconfirmed.contains("quota was not confirmed"),
+            "{unconfirmed}"
+        );
+        assert!(
+            unconfirmed.contains(&format!("soft cap {cap}")),
+            "{unconfirmed}"
+        );
+        assert!(
+            unconfirmed.contains("does not skip this audit"),
+            "{unconfirmed}"
+        );
     }
 
     #[test]
@@ -1313,6 +1362,67 @@ mod tests {
         assert_eq!(named, 0, "the total line is 'Audited N', not a bare count");
         let counts = status_counts(&report);
         assert_eq!(counts.iter().sum::<usize>(), 4);
+    }
+
+    #[test]
+    fn a_manuscript_title_prefix_does_not_retract_the_entry() {
+        let bib = parse_bibtex(
+            "@article{marked, title={RETRACTED: Left}, year={2020}, doi={10.1/marked}}",
+        )
+        .unwrap();
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            "10.1/marked".into(),
+            resolved(
+                json!({"title": "RETRACTED: Left", "date": {"year": 2020}}),
+                json!({"crossref": {"title": ["Left"]}}),
+            ),
+        );
+        let report = render_audit(&bib, &outcomes);
+        assert!(report.contains("| OK |"), "{report}");
+        assert!(!report.contains("| RETRACTED |"), "{report}");
+        assert!(
+            report.contains(
+                "manuscript title is marked retracted; the publisher record does not say so"
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn bibliography_limits_refuse_bytes_entries_and_long_fields() {
+        let bytes = "x".repeat(crate::constants::AUDIT_BIB_MAX_BYTES + 1);
+        let too_big = parse_bibtex(&bytes).unwrap_err();
+        assert!(
+            too_big.contains(&format!(
+                "the limit is {}",
+                crate::constants::AUDIT_BIB_MAX_BYTES
+            )),
+            "{too_big}"
+        );
+
+        let mut entries = String::new();
+        for n in 0..=crate::constants::AUDIT_BIB_MAX_ENTRIES {
+            entries.push_str(&format!("@article{{k{n}, title={{T}}}}\n"));
+        }
+        let too_many = parse_bibtex(&entries).unwrap_err();
+        assert!(
+            too_many.contains(&format!(
+                "more than {} entries",
+                crate::constants::AUDIT_BIB_MAX_ENTRIES
+            )),
+            "{too_many}"
+        );
+
+        let field = "a".repeat(crate::constants::AUDIT_BIB_MAX_FIELD_BYTES + 1);
+        let too_long = parse_bibtex(&format!("@article{{k, title={{{field}}}}}")).unwrap_err();
+        assert!(
+            too_long.contains(&format!(
+                "the limit is {}",
+                crate::constants::AUDIT_BIB_MAX_FIELD_BYTES
+            )),
+            "{too_long}"
+        );
     }
 
     #[test]

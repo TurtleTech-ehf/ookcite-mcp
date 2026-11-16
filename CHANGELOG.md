@@ -126,6 +126,10 @@ All notable changes to this project will be documented in this file. See [conven
 - (**startup**) skip blocking auth/npm probes on MCP connect by default (`OOKCITE_STARTUP_PROBES=1` restores them on stderr)
 - (**http**) shared API client with connect timeout, pool reuse, and TCP keepalive
 #### Bugfixes
+- (**mcp**) keep an audit on the anonymous cap until `/me` confirms remaining lookups, and reject a bad key before doi.org
+- (**mcp**) follow provider redirects only onto the configured hosts, cap provider bodies, and treat a handle without `responseCode` 1 as unregistered
+- (**mcp**) limit bibliography bytes, entries, and field length
+- (**http**) refuse an MCP request body over the documented byte limit
 - (**reverse**) retry `/reverse` once on 503/504 after Retry-After (or 2s); do not fall through to `/resolve`
 #### Refactors
 - (**structure**) split binary `main.rs` into `server`, `tool_args`, `cli`, `collection_entries`, `resolve_helpers`, `http_error`, `constants` (behavior unchanged; see README Source layout)

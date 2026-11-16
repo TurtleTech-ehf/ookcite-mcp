@@ -10,9 +10,11 @@
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
+use axum::middleware::{from_fn, Next};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
+use http_body_util::{BodyExt, Limited};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio_util::sync::CancellationToken;
@@ -75,8 +77,40 @@ impl App {
         Router::new()
             .route("/healthz", get(healthz))
             .fallback(dispatch)
+            .layer(from_fn(limit_http_body))
             .with_state(self)
     }
+}
+
+async fn limit_http_body(req: Request, next: Next) -> axum::response::Response {
+    let advertised = req
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    if advertised.is_some_and(|len| len > crate::constants::HTTP_BODY_LIMIT) {
+        return payload_too_large();
+    }
+    let (parts, body) = req.into_parts();
+    let limited = Limited::new(body, crate::constants::HTTP_BODY_LIMIT);
+    match limited.collect().await {
+        Ok(collected) => {
+            let req = Request::from_parts(parts, axum::body::Body::from(collected.to_bytes()));
+            next.run(req).await
+        }
+        Err(_) => payload_too_large(),
+    }
+}
+
+fn payload_too_large() -> axum::response::Response {
+    (
+        axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+        format!(
+            "request body exceeds the limit of {} bytes",
+            crate::constants::HTTP_BODY_LIMIT
+        ),
+    )
+        .into_response()
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -301,6 +335,27 @@ mod tests {
 
     fn client() -> reqwest::Client {
         reqwest::Client::new()
+    }
+
+    #[tokio::test]
+    async fn a_request_body_over_the_limit_is_refused() {
+        let (url, cancel) = spawn(HttpAuthMode::Bearer).await;
+        let body = vec![b'a'; crate::constants::HTTP_BODY_LIMIT + 1];
+        let response = client()
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer ookc_test")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 413);
+        let text = response.text().await.unwrap();
+        assert!(
+            text.contains(&crate::constants::HTTP_BODY_LIMIT.to_string()),
+            "{text}"
+        );
+        cancel.cancel();
     }
 
     #[tokio::test]

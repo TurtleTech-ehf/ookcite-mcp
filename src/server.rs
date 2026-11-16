@@ -14,9 +14,9 @@ use crate::collection_entries::{
     normalize_doi_token, resolve_entry_id_in_collection,
 };
 use crate::constants::{
-    api_base_url, build_api_client, rate_limit_hint, setup_help_block, ANON_BATCH_SOFT_CAP,
-    ANON_DAILY_LOOKUPS, FREE_DAILY_LOOKUPS, MIN_CONFIDENT_REVERSE_LOOKUP_SCORE,
-    MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
+    api_base_url, build_api_client, build_provider_client, rate_limit_hint, setup_help_block,
+    ANON_BATCH_SOFT_CAP, ANON_DAILY_LOOKUPS, FREE_DAILY_LOOKUPS,
+    MIN_CONFIDENT_REVERSE_LOOKUP_SCORE, MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail, failure_text,
@@ -84,6 +84,93 @@ impl ProviderBases {
             handles: base,
         }
     }
+
+    fn hosts(&self) -> Vec<String> {
+        [&self.crossref, &self.datacite, &self.zenodo, &self.handles]
+            .into_iter()
+            .filter_map(|base| reqwest::Url::parse(base).ok())
+            .filter_map(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+            .collect()
+    }
+}
+
+fn provider_client(bases: Option<&ProviderBases>, timeout_secs: u64) -> reqwest::Client {
+    let hosts = bases.map(ProviderBases::hosts).unwrap_or_default();
+    build_provider_client(timeout_secs, hosts)
+}
+
+enum ProviderRead {
+    TooLarge,
+    Redirect,
+    Failed,
+}
+
+struct AuditAccess {
+    has_key: bool,
+    remaining: Option<u32>,
+    limit: Option<u32>,
+    plan: String,
+    /// `/me` returned 2xx, or there is no key to check.
+    checked: bool,
+    rejected: Option<String>,
+}
+
+impl AuditAccess {
+    fn anonymous() -> Self {
+        Self {
+            has_key: false,
+            remaining: None,
+            limit: None,
+            plan: String::new(),
+            checked: true,
+            rejected: None,
+        }
+    }
+
+    fn unchecked() -> Self {
+        Self {
+            has_key: true,
+            remaining: None,
+            limit: None,
+            plan: String::new(),
+            checked: false,
+            rejected: None,
+        }
+    }
+}
+
+fn provider_failure(doi: &str, error: ProviderRead) -> String {
+    match error {
+        ProviderRead::TooLarge => format!(
+            "ERROR {doi} : provider response exceeded {} bytes",
+            crate::constants::PROVIDER_BODY_LIMIT
+        ),
+        ProviderRead::Redirect => format!("ERROR {doi} : provider redirect refused"),
+        ProviderRead::Failed => format!("ERROR {doi} : error sending request"),
+    }
+}
+
+fn provider_send_error(doi: &str, error: &reqwest::Error) -> String {
+    if error.is_redirect() || error.to_string().contains("provider redirect refused") {
+        provider_failure(doi, ProviderRead::Redirect)
+    } else {
+        provider_failure(doi, ProviderRead::Failed)
+    }
+}
+
+/// Read a provider body until it ends or it passes [`PROVIDER_BODY_LIMIT`].
+async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>, ProviderRead> {
+    let mut buf = Vec::new();
+    loop {
+        let next = response.chunk().await.map_err(|_| ProviderRead::Failed)?;
+        let Some(chunk) = next else {
+            return Ok(buf);
+        };
+        if buf.len().saturating_add(chunk.len()) > crate::constants::PROVIDER_BODY_LIMIT {
+            return Err(ProviderRead::TooLarge);
+        }
+        buf.extend_from_slice(&chunk);
+    }
 }
 
 const PROVIDER_USER_AGENT: &str = "ookcite-mcp (mailto:rgoswami@ieee.org)";
@@ -106,6 +193,8 @@ impl DoiLookup {
 pub struct Server {
     tool_router: ToolRouter<Self>,
     http: reqwest::Client,
+    /// doi.org, Crossref, DataCite, and Zenodo. Redirects stay on their hosts.
+    provider_http: reqwest::Client,
     api_base: String,
     doi_cache: DoiResponseCache,
     /// Crossref, DataCite, Zenodo, and doi.org. Absent in unit tests so they
@@ -123,12 +212,14 @@ impl Server {
     pub fn new() -> Self {
         // The bearer is attached per request. A default header would leak a
         // process key onto HTTP calls that did not present one.
+        let providers = ProviderBases::production();
         Self {
             tool_router: Self::tool_router(),
             http: build_api_client(30, reqwest::header::HeaderMap::new()),
+            provider_http: provider_client(Some(&providers), 30),
             api_base: api_base_url(),
             doi_cache: shared_doi_cache().clone(),
-            providers: Some(ProviderBases::production()),
+            providers: Some(providers),
             overrides: overrides::OverrideStore::Disabled,
             shared_http: false,
         }
@@ -338,8 +429,8 @@ impl Server {
         }
     }
 
-    /// doi.org `responseCode` 1 means the handle is registered. HTTP 404 with
-    /// `responseCode` 100 is an unregistered DOI, not an empty record.
+    /// doi.org `responseCode` 1 means the handle is registered. Any other
+    /// response, including a 2xx body with no numeric `responseCode`, is not.
     async fn require_registered(&self, doi: &str) -> Result<(), String> {
         if self.providers.is_none() {
             return Ok(());
@@ -366,19 +457,13 @@ impl Server {
             .provider_request(&url)
             .send()
             .await
-            .map_err(|_| format!("ERROR {doi} : error sending request"))?;
-        let status = response.status();
-        let body: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
-        if let Some(code) = body.get("responseCode").and_then(|value| value.as_i64()) {
-            return Ok(code == 1);
-        }
-        if status.as_u16() == 404 {
-            return Ok(false);
-        }
-        if status.is_success() {
-            return Ok(true);
-        }
-        Err(format!("ERROR {doi} : error sending request"))
+            .map_err(|error| provider_send_error(doi, &error))?;
+        let bytes = read_capped_body(response)
+            .await
+            .map_err(|error| provider_failure(doi, error))?;
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        Ok(body.get("responseCode").and_then(|value| value.as_i64()) == Some(1))
     }
 
     async fn provider_record(&self, doi: &str) -> Result<Option<serde_json::Value>, String> {
@@ -407,63 +492,80 @@ impl Server {
                     Some(serde_json::json!({ "datacite": attrs }))
                 }
                 Ok(None) => None,
-                Err(_) => return Err(format!("ERROR {doi} : error sending request")),
+                Err(error) => return Err(provider_failure(doi, error)),
             },
-            Err(_) => return Err(format!("ERROR {doi} : error sending request")),
+            Err(error) => return Err(provider_failure(doi, error)),
         };
         if let Some(record) = record.as_mut() {
             if doi.to_ascii_lowercase().starts_with("10.5281/zenodo.") {
-                if let Some(zenodo) = self.zenodo_record(doi).await {
-                    record
-                        .as_object_mut()
-                        .expect("provider record is an object")
-                        .insert("zenodo".into(), zenodo);
+                match self.zenodo_record(doi).await {
+                    Ok(Some(zenodo)) => {
+                        record
+                            .as_object_mut()
+                            .expect("provider record is an object")
+                            .insert("zenodo".into(), zenodo);
+                    }
+                    Ok(None) => {}
+                    Err(error) => return Err(provider_failure(doi, error)),
                 }
             }
         }
         Ok(record)
     }
 
-    async fn zenodo_record(&self, doi: &str) -> Option<serde_json::Value> {
-        let id = doi
-            .to_ascii_lowercase()
-            .strip_prefix("10.5281/zenodo.")?
+    async fn zenodo_record(&self, doi: &str) -> Result<Option<serde_json::Value>, ProviderRead> {
+        let lower = doi.to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("10.5281/zenodo.") else {
+            return Ok(None);
+        };
+        let id = rest
             .chars()
             .take_while(|ch| ch.is_ascii_digit())
             .collect::<String>();
         if id.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let bases = self.providers.as_ref()?;
+        let Some(bases) = self.providers.as_ref() else {
+            return Ok(None);
+        };
         let url = format!("{}/records/{id}", bases.zenodo.trim_end_matches('/'));
-        let body = self.provider_json(&url).await.ok()??;
+        let Some(body) = self.provider_json(&url).await? else {
+            return Ok(None);
+        };
         let version = body
             .pointer("/metadata/version")
             .cloned()
             .or_else(|| body.get("version").cloned());
-        Some(serde_json::json!({
+        Ok(Some(serde_json::json!({
             "doi": body.get("doi").cloned().unwrap_or(serde_json::Value::Null),
             "conceptdoi": body.get("conceptdoi").cloned().unwrap_or(serde_json::Value::Null),
             "version": version.unwrap_or(serde_json::Value::Null),
-        }))
+        })))
     }
 
     fn provider_request(&self, url: &str) -> reqwest::RequestBuilder {
-        self.http
+        self.provider_http
             .get(url)
             .header(reqwest::header::USER_AGENT, PROVIDER_USER_AGENT)
             .header(reqwest::header::ACCEPT, "application/json")
     }
 
-    async fn provider_json(&self, url: &str) -> Result<Option<serde_json::Value>, ()> {
-        let response = self.provider_request(url).send().await.map_err(|_| ())?;
+    async fn provider_json(&self, url: &str) -> Result<Option<serde_json::Value>, ProviderRead> {
+        let response = self.provider_request(url).send().await.map_err(|error| {
+            if error.is_redirect() || error.to_string().contains("provider redirect refused") {
+                ProviderRead::Redirect
+            } else {
+                ProviderRead::Failed
+            }
+        })?;
         if response.status().as_u16() == 404 {
             return Ok(None);
         }
         if !response.status().is_success() {
-            return Err(());
+            return Err(ProviderRead::Failed);
         }
-        match response.json::<serde_json::Value>().await {
+        let bytes = read_capped_body(response).await?;
+        match serde_json::from_slice::<serde_json::Value>(&bytes) {
             Ok(body) if !body.is_null() => Ok(Some(body)),
             _ => Ok(None),
         }
@@ -1227,9 +1329,47 @@ impl Server {
         results.join("\n")
     }
 
+    /// Confirm a presented key with `/me` before any provider call.
+    ///
+    /// No key is the anonymous path. A 401 or 403 closes the audit. Any other
+    /// failure leaves the quota unconfirmed: the anonymous cap still applies,
+    /// and a file under that cap is refused here rather than sent to doi.org.
+    async fn audit_access(&self) -> AuditAccess {
+        if !inbound_auth::has_api_key() {
+            return AuditAccess::anonymous();
+        }
+        let resp = match self.send_read(|| self.request(endpoints::ME, &[])).await {
+            Ok(resp) => resp,
+            Err(_) => return AuditAccess::unchecked(),
+        };
+        let status = resp.status().as_u16();
+        if status == 401 || status == 403 {
+            return AuditAccess {
+                rejected: Some(
+                    "ACCESS DENIED: the API key was rejected, so this audit did not call doi.org."
+                        .into(),
+                ),
+                ..AuditAccess::unchecked()
+            };
+        }
+        if !resp.status().is_success() {
+            return AuditAccess::unchecked();
+        }
+        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        let quota = MeQuota::from_json(&body);
+        AuditAccess {
+            has_key: true,
+            remaining: quota.lookups_remaining,
+            limit: quota.lookups_limit,
+            plan: quota.plan,
+            checked: true,
+            rejected: None,
+        }
+    }
+
     #[tool(
         name = "audit_bibliography",
-        description = "Audit a manuscript .bib for entries that are broken or retracted. Call this when the user has BibTeX and wants a submission check, rather than a list of bare DOIs (verify_references) or a formatted bibliography (import_bibliography). Each entry with a DOI is resolved and compared with the title, authors, year, journal, volume, issue, and pages in the file. OK means the DOI is registered, the publisher record has no retraction, withdrawal, or expression of concern, and every supplied field agrees. MISMATCH is a disagreement. INCOMPLETE means a supplied field is absent from the record. BROKEN means the DOI is not registered or is not a DOI. RETRACTED, WITHDRAWN, and CONCERN are read from the Crossref or DataCite record, not from the DOI merely existing. An entry with no DOI is reported as NO DOI and is not guessed. UNCHECKED means the publisher record could not be read, so the entry is not called clean. A collection membership does not skip the lookup. The anonymous daily cap applies.",
+        description = "Audit a manuscript .bib for entries that are broken or retracted. Call this when the user has BibTeX and wants a submission check, rather than a list of bare DOIs (verify_references) or a formatted bibliography (import_bibliography). Each entry with a DOI is resolved and compared with the title, authors, year, journal, volume, issue, and pages in the file. OK means the DOI is registered, the publisher record has no retraction, withdrawal, or expression of concern, and every supplied field agrees. MISMATCH is a disagreement. INCOMPLETE means a supplied field is absent from the record. BROKEN means the DOI is not registered or is not a DOI. RETRACTED, WITHDRAWN, and CONCERN are read from the Crossref or DataCite record, not from the DOI merely existing. An entry with no DOI is reported as NO DOI and is not guessed. UNCHECKED means the publisher record could not be read, so the entry is not called clean. A collection membership does not skip the lookup. The anonymous daily cap applies, including when a key is present but the remaining lookups were not confirmed. A key that /me rejects is refused before doi.org is called.",
         annotations(
             title = "Audit manuscript bibliography",
             read_only_hint = true,
@@ -1259,23 +1399,30 @@ impl Server {
                 }
             }
         }
-        let has_key = inbound_auth::has_api_key();
-        let quota = self.fetch_me_quota().await;
+        let access = if unique.is_empty() {
+            AuditAccess::anonymous()
+        } else {
+            self.audit_access().await
+        };
+        if let Some(message) = access.rejected {
+            return message;
+        }
         let metered = u32::try_from(unique.len()).unwrap_or(u32::MAX);
         if let Some(message) = audit_quota_refusal(&AuditQuota {
             metered,
-            has_api_key: has_key,
-            remaining: quota.as_ref().and_then(|item| item.lookups_remaining),
-            limit: quota.as_ref().and_then(|item| item.lookups_limit),
-            plan: quota
-                .as_ref()
-                .map(|item| item.plan.clone())
-                .unwrap_or_default(),
+            has_api_key: access.has_key,
+            remaining: access.remaining,
+            limit: access.limit,
+            plan: access.plan,
             anon_soft_cap: ANON_BATCH_SOFT_CAP,
             anon_daily: ANON_DAILY_LOOKUPS,
             free_daily: FREE_DAILY_LOOKUPS,
         }) {
             return message;
+        }
+        if access.has_key && !access.checked {
+            return "REFUSED: the API key could not be checked, so this audit did not call doi.org."
+                .into();
         }
         let conc = read_only_concurrency();
         let futs: Vec<_> = unique
@@ -3735,6 +3882,7 @@ impl Server {
         Self {
             tool_router: Self::tool_router(),
             http: build_api_client(5, reqwest::header::HeaderMap::new()),
+            provider_http: provider_client(None, 5),
             api_base,
             doi_cache: DoiResponseCache::with_default_ttl(),
             providers: None,
@@ -3744,7 +3892,9 @@ impl Server {
     }
 
     fn with_providers(mut self, base: String) -> Self {
-        self.providers = Some(ProviderBases::shared(base));
+        let bases = ProviderBases::shared(base);
+        self.provider_http = provider_client(Some(&bases), 5);
+        self.providers = Some(bases);
         self
     }
 }
@@ -4537,7 +4687,7 @@ mod tests {
     // --- Wiremock integration tests ---
 
     use rmcp::handler::server::wrapper::Parameters;
-    use wiremock::matchers::{body_json, body_string_contains, method, path};
+    use wiremock::matchers::{body_json, body_string_contains, method, path, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_server(base: &str) -> Server {
@@ -6617,6 +6767,248 @@ mod tests {
         assert!(result.contains("RATE LIMITED 10.1038/187493a0"), "{result}");
         assert!(!result.contains("| OK |"), "{result}");
         assert!(crate::http_error::upstream_failure_report(&result).is_some());
+    }
+
+    #[test]
+    fn provider_redirect_allowlist_is_the_fixed_hosts() {
+        let hosts: HashSet<_> = ProviderBases::production().hosts().into_iter().collect();
+        assert_eq!(
+            hosts,
+            HashSet::from([
+                "api.crossref.org".to_string(),
+                "api.datacite.org".to_string(),
+                "zenodo.org".to_string(),
+                "doi.org".to_string(),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_treats_a_success_without_response_code_as_broken() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        let doi = "10.1000/no-code";
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "handle": doi
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: format!("@article{{plain, title={{Left}}, doi={{{doi}}}}}"),
+            }))
+            .await;
+        assert!(
+            result.contains("| BROKEN |") && result.contains("not registered at doi.org"),
+            "{result}"
+        );
+        assert!(!result.contains("| OK |"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_refuses_an_off_host_provider_redirect() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let origin = MockServer::start().await;
+        let other = MockServer::start().await;
+        let doi = "10.1000/redirected";
+        let location = format!(
+            "{}{}",
+            other.uri().replacen("127.0.0.1", "localhost", 1),
+            doi_http_path("/handles", doi)
+        );
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", location.as_str()))
+            .expect(1)
+            .mount(&origin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .expect(0)
+            .mount(&other)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&origin)
+            .await;
+        let result = test_server(&origin.uri())
+            .with_providers(origin.uri())
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: format!("@article{{hop, doi={{{doi}}}}}"),
+            }))
+            .await;
+        assert!(result.contains("provider redirect refused"), "{result}");
+        assert!(!result.contains("| OK |"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_refuses_an_oversized_provider_body() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        let doi = "10.1000/huge";
+        let body = vec![b'x'; crate::constants::PROVIDER_BODY_LIMIT + 1];
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: format!("@article{{huge, doi={{{doi}}}}}"),
+            }))
+            .await;
+        assert!(
+            result.contains(&format!(
+                "exceeded {} bytes",
+                crate::constants::PROVIDER_BODY_LIMIT
+            )),
+            "{result}"
+        );
+        assert!(!result.contains("| OK |"), "{result}");
+    }
+
+    async fn mount_no_provider_calls(mock: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path_regex("^/handles/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .expect(0)
+            .mount(mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(mock)
+            .await;
+    }
+
+    fn cap_bibliography() -> String {
+        let mut content = String::new();
+        for n in 0..=crate::constants::ANON_BATCH_SOFT_CAP {
+            content.push_str(&format!("@article{{k{n}, doi={{10.1000/cap{n}}}}}\n"));
+        }
+        content
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_keeps_the_cap_when_quota_is_not_confirmed() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_unconfirmed");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "authenticated": true,
+                "plan": "free"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        mount_no_provider_calls(&mock).await;
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: cap_bibliography(),
+            }))
+            .await;
+        assert!(result.contains("quota was not confirmed"), "{result}");
+        assert!(
+            result.contains(&format!(
+                "soft cap {}",
+                crate::constants::ANON_BATCH_SOFT_CAP
+            )),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_keeps_the_cap_when_me_fails() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_me_down");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("down"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        mount_no_provider_calls(&mock).await;
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: cap_bibliography(),
+            }))
+            .await;
+        assert!(result.contains("quota was not confirmed"), "{result}");
+        assert!(!result.contains("doi.org"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_rejects_a_bad_key_before_doi_org() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_rejected");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("no"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        mount_no_provider_calls(&mock).await;
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: "@article{one, doi={10.1038/187493a0}}".into(),
+            }))
+            .await;
+        assert!(result.starts_with("ACCESS DENIED"), "{result}");
+        assert!(result.contains("did not call doi.org"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_does_not_call_doi_org_when_the_key_cannot_be_checked() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_unchecked");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("down"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        mount_no_provider_calls(&mock).await;
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: "@article{one, doi={10.1038/187493a0}}".into(),
+            }))
+            .await;
+        assert!(
+            result.starts_with("REFUSED: the API key could not be checked"),
+            "{result}"
+        );
+        assert!(result.contains("did not call doi.org"), "{result}");
     }
 
     #[tokio::test]

@@ -32,7 +32,27 @@ pub const FREE_DAILY_LOOKUPS: u32 = 60;
 
 /// Anonymous / no-key: refuse metered batches larger than this.
 /// The daily cap is [`ANON_DAILY_LOOKUPS`].
+/// An audit also uses this cap when a key is present but `/me` did not
+/// confirm `lookups_remaining`.
 pub const ANON_BATCH_SOFT_CAP: u32 = 40;
+
+/// Largest provider response body the audit will read. A larger body is
+/// refused while it is still streaming, not after it has been buffered.
+pub const PROVIDER_BODY_LIMIT: usize = 1_048_576;
+
+/// Largest manuscript `.bib` `audit_bibliography` will parse, in bytes.
+pub const AUDIT_BIB_MAX_BYTES: usize = 1_048_576;
+
+/// Largest number of BibTeX entries in one audit.
+pub const AUDIT_BIB_MAX_ENTRIES: usize = 2_000;
+
+/// Largest single BibTeX field value, in bytes, after concatenation.
+pub const AUDIT_BIB_MAX_FIELD_BYTES: usize = 8_192;
+
+/// Largest HTTP request body the streamable MCP endpoint accepts.
+/// One bibliography at [`AUDIT_BIB_MAX_BYTES`] still fits inside the JSON
+/// envelope. A larger body is refused with HTTP 413.
+pub const HTTP_BODY_LIMIT: usize = 2_097_152;
 
 /// Inputs the synchronous `/api/v1/resolve/batch` path accepts. The async mode
 /// takes 1000 but answers with a job id, and no tool here polls jobs.
@@ -95,20 +115,53 @@ pub fn setup_help_block() -> String {
     )
 }
 
-/// Shared reqwest settings for API traffic: bounded timeouts, connection reuse.
+/// Shared reqwest settings for OokCite API traffic: bounded timeouts, connection reuse.
 pub fn build_api_client(
     timeout_secs: u64,
     default_headers: reqwest::header::HeaderMap,
 ) -> reqwest::Client {
+    client_builder(timeout_secs)
+        .default_headers(default_headers)
+        .build()
+        .expect("ookcite-mcp: failed to build HTTP client")
+}
+
+/// Client for doi.org, Crossref, DataCite, and Zenodo.
+///
+/// A redirect is followed only when the next host is one of `allowed_hosts`
+/// (the hosts those providers were configured with) and only for a few hops.
+/// Any other host stops the request. Response bodies are capped separately
+/// by [`PROVIDER_BODY_LIMIT`] at the read.
+pub fn build_provider_client(
+    timeout_secs: u64,
+    allowed_hosts: impl IntoIterator<Item = String>,
+) -> reqwest::Client {
+    let allowed: std::sync::Arc<std::collections::HashSet<String>> = std::sync::Arc::new(
+        allowed_hosts
+            .into_iter()
+            .map(|host| host.to_ascii_lowercase())
+            .collect(),
+    );
+    client_builder(timeout_secs)
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            let host = attempt.url().host_str().unwrap_or("").to_ascii_lowercase();
+            if attempt.previous().len() < 4 && allowed.contains(&host) {
+                attempt.follow()
+            } else {
+                attempt.error("provider redirect refused")
+            }
+        }))
+        .build()
+        .expect("ookcite-mcp: failed to build provider HTTP client")
+}
+
+fn client_builder(timeout_secs: u64) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .connect_timeout(std::time::Duration::from_secs(10.min(timeout_secs)))
         .pool_max_idle_per_host(8)
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .tcp_keepalive(std::time::Duration::from_secs(30))
-        .default_headers(default_headers)
-        .build()
-        .expect("ookcite-mcp: failed to build HTTP client")
 }
 
 #[cfg(test)]
