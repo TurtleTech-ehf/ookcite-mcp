@@ -22,6 +22,7 @@
 //! | `http_error` | `error_detail` and status classification helpers |
 //! | `collection_entries` | Entry id / DOI alias resolve + search line format |
 //! | `plaintext` | Pasted-list split and local `.bib` render |
+//! | `bib_audit` | Manuscript `.bib` parse and broken/retracted report |
 //! | `resolve_helpers` | Reverse-lookup / free-text resolve payload helpers |
 //! | `endpoints` | (this crate) contract-backed endpoint table |
 //!

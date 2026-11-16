@@ -113,6 +113,12 @@ pub struct VerifyArgs {
     pub claims: Vec<BibliographicClaim>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AuditBibliographyArgs {
+    /// Manuscript bibliography in BibTeX. Each entry is checked in order. A DOI comes from the `doi` field, or from a `url` that is a doi.org link. Entries without a DOI are reported and not guessed.
+    pub content: String,
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct BatchArgs {
     /// Citation strings to resolve (one per entry)

@@ -128,6 +128,7 @@ fn public_quota_claims_match_the_runtime_contract() {
         "ingest_orcid",
         "update_entry_metadata",
         "merge_entries",
+        "audit_bibliography",
     ] {
         let desc = tool_description(&flat, free)
             .unwrap_or_else(|| panic!("no description found for {free}"));

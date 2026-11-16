@@ -5,6 +5,7 @@ use crate::batch_limits::{
     format_usage_report, plan_metered_batch, read_only_concurrency, BatchLookupItem,
     DoiResponseCache, MeQuota,
 };
+use crate::bib_audit::{audit_quota_refusal, parse_bibtex, render_audit, AuditQuota, DoiOutcome};
 use crate::bib_export::{self, BibOptions};
 use crate::bibliographic::{format_validate_doi, format_verify_line};
 use crate::collection_entries::{
@@ -13,8 +14,9 @@ use crate::collection_entries::{
     normalize_doi_token, resolve_entry_id_in_collection,
 };
 use crate::constants::{
-    api_base_url, build_api_client, rate_limit_hint, setup_help_block,
-    MIN_CONFIDENT_REVERSE_LOOKUP_SCORE, MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
+    api_base_url, build_api_client, rate_limit_hint, setup_help_block, ANON_BATCH_SOFT_CAP,
+    ANON_DAILY_LOOKUPS, FREE_DAILY_LOOKUPS, MIN_CONFIDENT_REVERSE_LOOKUP_SCORE,
+    MUTATE_BATCH_CONCURRENCY, SYNC_BATCH_RESOLVE_LIMIT,
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail, failure_text,
@@ -278,6 +280,62 @@ impl Server {
         self.lookup_doi_with_freshness(doi)
             .await
             .map(|lookup| lookup.metadata)
+    }
+
+    /// Registration, one OokCite lookup, and one publisher record.
+    ///
+    /// A 404 from OokCite is not by itself a broken DOI: the publisher record
+    /// can still name the work and its retraction. A rate limit or a restart
+    /// stops the entry. The process cache is not used, so a retraction read
+    /// for this audit is not a metadata copy from an earlier tool call.
+    async fn inspect_doi(&self, doi: &str) -> DoiOutcome {
+        if self.providers.is_some() {
+            match self.registration_status(doi).await {
+                Ok(false) => {
+                    return DoiOutcome::Broken("not registered at doi.org".into());
+                }
+                Err(error) => return DoiOutcome::Upstream(error),
+                Ok(true) => {}
+            }
+        }
+        let lookup = lookup_doi_with_retry(&self.http, &self.api_base, doi).await;
+        let metadata = match lookup {
+            Ok(resp) if resp.status().is_success() => {
+                resp.json::<serde_json::Value>().await.unwrap_or_default()
+            }
+            Ok(resp) => {
+                let failure = classify_lookup_doi_failure(resp, doi).await;
+                if upstream_failure_report(&failure).is_some() {
+                    return DoiOutcome::Upstream(failure);
+                }
+                serde_json::Value::Null
+            }
+            Err(error) => return DoiOutcome::Upstream(format!("ERROR {doi} : {error}")),
+        };
+        let (provider, provider_error) = match self.provider_record(doi).await {
+            Ok(record) => (record, None),
+            Err(error) => (None, Some(error)),
+        };
+        if !metadata.is_object() && provider.is_none() {
+            if let Some(error) = provider_error {
+                return DoiOutcome::Upstream(error);
+            }
+            return DoiOutcome::Broken(
+                "not in the OokCite corpus and no Crossref or DataCite record".into(),
+            );
+        }
+        let metadata = match &provider {
+            Some(record) if metadata.is_object() => {
+                bib_export::merge_provider_metadata(&metadata, record)
+            }
+            Some(record) => bib_export::merge_provider_metadata(&serde_json::json!({}), record),
+            None => metadata,
+        };
+        DoiOutcome::Resolved {
+            metadata,
+            provider,
+            provider_error,
+        }
     }
 
     /// doi.org `responseCode` 1 means the handle is registered. HTTP 404 with
@@ -1167,6 +1225,76 @@ impl Server {
         let looked_up = stream::iter(futs).buffered(conc).collect::<Vec<_>>().await;
         results.extend(looked_up);
         results.join("\n")
+    }
+
+    #[tool(
+        name = "audit_bibliography",
+        description = "Audit a manuscript .bib for entries that are broken or retracted. Call this when the user has BibTeX and wants a submission check, rather than a list of bare DOIs (verify_references) or a formatted bibliography (import_bibliography). Each entry with a DOI is resolved and compared with the title, authors, year, journal, volume, issue, and pages in the file. OK means the DOI is registered, the publisher record has no retraction, withdrawal, or expression of concern, and every supplied field agrees. MISMATCH is a disagreement. INCOMPLETE means a supplied field is absent from the record. BROKEN means the DOI is not registered or is not a DOI. RETRACTED, WITHDRAWN, and CONCERN are read from the Crossref or DataCite record, not from the DOI merely existing. An entry with no DOI is reported as NO DOI and is not guessed. UNCHECKED means the publisher record could not be read, so the entry is not called clean. A collection membership does not skip the lookup. The anonymous daily cap applies.",
+        annotations(
+            title = "Audit manuscript bibliography",
+            read_only_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    async fn audit_bibliography(
+        &self,
+        Parameters(args): Parameters<AuditBibliographyArgs>,
+    ) -> String {
+        let entries = match parse_bibtex(&args.content) {
+            Ok(entries) => entries,
+            Err(error) => return format!("BibTeX parse error: {error}"),
+        };
+        if entries.is_empty() {
+            if crate::plaintext::looks_like_ris(&args.content) {
+                return "No BibTeX entries found. This text looks like RIS. audit_bibliography reads a manuscript .bib; import RIS with import_bibliography, or export BibTeX first.".into();
+            }
+            return "No BibTeX entries found.".into();
+        }
+        let mut unique = Vec::new();
+        let mut seen = HashSet::new();
+        for entry in &entries {
+            if let Some(doi) = &entry.doi {
+                if seen.insert(doi.clone()) {
+                    unique.push(doi.clone());
+                }
+            }
+        }
+        let has_key = inbound_auth::has_api_key();
+        let quota = self.fetch_me_quota().await;
+        let metered = u32::try_from(unique.len()).unwrap_or(u32::MAX);
+        if let Some(message) = audit_quota_refusal(&AuditQuota {
+            metered,
+            has_api_key: has_key,
+            remaining: quota.as_ref().and_then(|item| item.lookups_remaining),
+            limit: quota.as_ref().and_then(|item| item.lookups_limit),
+            plan: quota
+                .as_ref()
+                .map(|item| item.plan.clone())
+                .unwrap_or_default(),
+            anon_soft_cap: ANON_BATCH_SOFT_CAP,
+            anon_daily: ANON_DAILY_LOOKUPS,
+            free_daily: FREE_DAILY_LOOKUPS,
+        }) {
+            return message;
+        }
+        let conc = read_only_concurrency();
+        let futs: Vec<_> = unique
+            .into_iter()
+            .map(|doi| {
+                let server = self.clone();
+                async move {
+                    let outcome = server.inspect_doi(&doi).await;
+                    (doi, outcome)
+                }
+            })
+            .collect();
+        let outcomes = stream::iter(futs)
+            .buffered(conc)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect();
+        render_audit(&entries, &outcomes)
     }
 
     #[tool(
@@ -3588,6 +3716,8 @@ impl ServerHandler for Server {
                  DOI that looks plausible is not evidence the work exists, and validate_doi is what \
                  separates the two. A DOI that exists can still be a different paper: pass year, journal, \
                  volume, and pages with the claim fields, and treat MISMATCH as a failed check. \
+                 A manuscript .bib is checked with audit_bibliography, which reports a DOI that is not \
+                 registered and a publisher retraction, withdrawal, or expression of concern. \
                  Prefer the batch tools over repeated single calls -- verify_references, batch_format, \
                  batch_add_to_collection, and import_bibliography each take a whole set in one request. \
                  format_citation and a small plaintext import_bibliography (no collection) need no API key. \
@@ -3628,9 +3758,9 @@ mod tests {
     use crate::constants::version_output;
     use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{
-        default_style, BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs, MergeEntriesArgs,
-        OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs, UsageArgs,
-        VerifyArgs,
+        default_style, AuditBibliographyArgs, BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs,
+        MergeEntriesArgs, OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs,
+        UsageArgs, VerifyArgs,
     };
 
     /// Serializes OOKCITE_API_KEY mutations across parallel tokio tests.
@@ -6092,6 +6222,424 @@ mod tests {
             "{result}"
         );
         assert!(result.contains("volume: claimed 93, record 97"), "{result}");
+    }
+
+    fn doi_http_path(prefix: &str, doi: &str) -> String {
+        format!("{prefix}/{}", super::encode_path_segment(doi))
+    }
+
+    async fn mount_registered(mock: &MockServer, doi: &str) {
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .expect(1)
+            .mount(mock)
+            .await;
+    }
+
+    async fn mount_doi_lookup(mock: &MockServer, doi: &str, title: &str, year: i32) {
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains(doi))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": doi,
+                "title": title,
+                "date": {"year": year}
+            })))
+            .expect(1)
+            .mount(mock)
+            .await;
+    }
+
+    fn crossref_article(
+        doi: &str,
+        title: &str,
+        family: &str,
+        year: i32,
+        journal: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "type": "journal-article",
+            "DOI": doi,
+            "title": [title],
+            "author": [{"family": family, "given": "A."}],
+            "container-title": [journal],
+            "issued": {"date-parts": [[year]]}
+        })
+    }
+
+    async fn mount_crossref(mock: &MockServer, doi: &str, message: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": message
+            })))
+            .expect(1)
+            .mount(mock)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_reports_retracted_broken_and_clean_entries() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        let clean = "10.1038/187493a0";
+        let retracted = "10.1000/retracted.paper";
+        let deposited = "10.1234/datacite.retracted";
+        let missing = "10.9999/not-registered";
+        let mismatch = "10.1021/j100134a002";
+        let concern = "10.1000/concern.paper";
+
+        for doi in [clean, retracted, deposited, mismatch, concern] {
+            mount_registered(&mock, doi).await;
+        }
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", missing)))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "responseCode": 100
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains(missing))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "title": "should not be fetched"
+            })))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        mount_doi_lookup(&mock, clean, "Stimulated Optical Radiation in Ruby", 1960).await;
+        mount_doi_lookup(&mock, retracted, "A result that did not hold", 2018).await;
+        mount_doi_lookup(&mock, deposited, "A deposited record", 2019).await;
+        mount_doi_lookup(
+            &mock,
+            mismatch,
+            "Feynman path integral formulation of quantum mechanical transition-state theory",
+            1993,
+        )
+        .await;
+        mount_doi_lookup(&mock, concern, "A finding under review", 2017).await;
+
+        mount_crossref(
+            &mock,
+            clean,
+            crossref_article(
+                clean,
+                "Stimulated Optical Radiation in Ruby",
+                "Maiman",
+                1960,
+                "Nature",
+            ),
+        )
+        .await;
+        let mut retracted_record = crossref_article(
+            retracted,
+            "A result that did not hold",
+            "Smith",
+            2018,
+            "Journal of Examples",
+        );
+        retracted_record["update-to"] = serde_json::json!([{
+            "DOI": "10.5555/retraction-notice",
+            "type": "retraction",
+            "label": "Retraction",
+            "updated": {"date-parts": [[2021, 6, 2]]}
+        }]);
+        mount_crossref(&mock, retracted, retracted_record).await;
+        mount_crossref(
+            &mock,
+            mismatch,
+            crossref_article(
+                mismatch,
+                "Feynman path integral formulation of quantum mechanical transition-state theory",
+                "Voth",
+                1993,
+                "The Journal of Physical Chemistry",
+            ),
+        )
+        .await;
+        let mut concern_record =
+            crossref_article(concern, "A finding under review", "Adey", 2017, "Nature");
+        concern_record["update-to"] = serde_json::json!([{
+            "DOI": "10.5555/concern-notice",
+            "type": "expression_of_concern",
+            "updated": {"date-parts": [[2018, 1, 9]]}
+        }]);
+        mount_crossref(&mock, concern, concern_record).await;
+
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/dois", deposited)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "attributes": {
+                        "doi": deposited,
+                        "titles": [{"title": "A deposited record"}],
+                        "creators": [{
+                            "name": "Lee, Ann",
+                            "givenName": "Ann",
+                            "familyName": "Lee",
+                            "nameType": "Personal"
+                        }],
+                        "publicationYear": 2019,
+                        "types": {"resourceTypeGeneral": "Text"},
+                        "relatedIdentifiers": [{
+                            "relationType": "IsRetractedBy",
+                            "relatedIdentifierType": "DOI",
+                            "relatedIdentifier": "https://doi.org/10.1234/datacite.notice"
+                        }]
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let bib = r#"
+@article{clean,
+  title = {Stimulated Optical Radiation in Ruby},
+  author = {Maiman, Theodore H.},
+  year = {1960},
+  journal = {Nature},
+  doi = {10.1038/187493a0}
+}
+
+@article{pulled,
+  title = {A result that did not hold},
+  author = {Smith, Jane},
+  year = {2018},
+  journal = {Journal of Examples},
+  doi = {10.1000/retracted.paper}
+}
+
+@article{deposited,
+  title = {A deposited record},
+  author = {Lee, Ann},
+  year = {2019},
+  doi = {10.1234/datacite.retracted}
+}
+
+@article{ghost,
+  title = {This DOI was never registered},
+  author = {Nobody, N.},
+  year = {2020},
+  doi = {10.9999/not-registered}
+}
+
+@article{wrongyear,
+  title = {Feynman path integral formulation of quantum mechanical transition-state theory},
+  author = {Voth, Gregory A.},
+  year = {1989},
+  journal = {J. Phys. Chem.},
+  doi = {10.1021/j100134a002}
+}
+
+@article{concerned,
+  title = {A finding under review},
+  author = {Adey, Pat},
+  year = {2017},
+  journal = {Nature},
+  doi = {10.1000/concern.paper}
+}
+
+@article{localnote,
+  title = {A note with no identifier},
+  author = {Author, A.},
+  year = {2021}
+}
+"#;
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: bib.into(),
+            }))
+            .await;
+
+        assert!(
+            result.starts_with("Audited 7 entries, 6 with a DOI.\n1 OK, 2 RETRACTED, 1 CONCERN, 1 BROKEN, 1 MISMATCH, 1 NO DOI."),
+            "{result}"
+        );
+        assert!(
+            result.contains(
+                "clean | OK | doi:10.1038/187493a0 | Stimulated Optical Radiation in Ruby"
+            ),
+            "{result}"
+        );
+        assert!(
+            result.contains("retracted by doi:10.5555/retraction-notice on 2021-06-02"),
+            "{result}"
+        );
+        assert!(
+            result.contains("retracted by doi:10.1234/datacite.notice"),
+            "{result}"
+        );
+        assert!(
+            result.contains(
+                "ghost | BROKEN | doi:10.9999/not-registered | not registered at doi.org"
+            ),
+            "{result}"
+        );
+        assert!(
+            result.contains("year: claimed 1989, record 1993"),
+            "{result}"
+        );
+        assert!(
+            result.contains("expression of concern doi:10.5555/concern-notice on 2018-01-09"),
+            "{result}"
+        );
+        assert!(
+            result.contains("localnote | NO DOI | A note with no identifier"),
+            "{result}"
+        );
+        assert!(
+            result.contains("no DOI in the entry; this audit does not guess one"),
+            "{result}"
+        );
+        assert!(
+            crate::http_error::upstream_failure_report(&result).is_none(),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_does_not_call_a_lookup_clean_without_a_publisher_record() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        mount_doi_lookup(
+            &mock,
+            "10.1038/187493a0",
+            "Stimulated Optical Radiation in Ruby",
+            1960,
+        )
+        .await;
+        let result = test_server(&mock.uri())
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: "@article{clean, title={Stimulated Optical Radiation in Ruby}, year={1960}, doi={10.1038/187493a0}}\n@article{again, doi={10.1038/187493a0}}".into(),
+            }))
+            .await;
+        assert!(
+            result.contains("Audited 2 entries, 2 with a DOI."),
+            "{result}"
+        );
+        assert!(result.contains("| UNCHECKED |"), "{result}");
+        assert!(
+            result.contains("no Crossref or DataCite record was read"),
+            "{result}"
+        );
+        assert!(!result.contains("| OK |"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_refuses_past_the_anonymous_cap_without_a_lookup() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let mut content = String::new();
+        for n in 0..=crate::constants::ANON_BATCH_SOFT_CAP {
+            content.push_str(&format!("@article{{k{n}, doi={{10.1000/cap{n}}}}}\n"));
+        }
+        let result = test_server(&mock.uri())
+            .audit_bibliography(Parameters(AuditBibliographyArgs { content }))
+            .await;
+        assert!(result.starts_with("REFUSED:"), "{result}");
+        assert!(result.contains("does not skip this audit"), "{result}");
+        assert!(crate::http_error::upstream_failure_report(&result).is_some());
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_refuses_when_the_signed_in_quota_is_spent() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_audit_quota");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "authenticated": true,
+                "plan": "free",
+                "lookups_remaining": 0,
+                "lookups_limit": 60
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let result = test_server(&mock.uri())
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: "@article{one, doi={10.1038/187493a0}}".into(),
+            }))
+            .await;
+        assert!(result.contains("only 0 remaining"), "{result}");
+        assert!(result.contains("plan free limit 60/day"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_reports_a_lookup_rate_limit_as_upstream() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        mount_registered(&mock, "10.1038/187493a0").await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "30")
+                    .set_body_string("Daily limit reached."),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", "10.1038/187493a0")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: "@article{slow, title={Ruby}, doi={10.1038/187493a0}}".into(),
+            }))
+            .await;
+        assert!(result.contains("| UPSTREAM |"), "{result}");
+        assert!(result.contains("RATE LIMITED 10.1038/187493a0"), "{result}");
+        assert!(!result.contains("| OK |"), "{result}");
+        assert!(crate::http_error::upstream_failure_report(&result).is_some());
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_rejects_an_empty_file_and_ris() {
+        let server = test_server("http://127.0.0.1:9");
+        let empty = server
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: "   \n".into(),
+            }))
+            .await;
+        assert_eq!(empty, "No BibTeX entries found.");
+        let ris = server
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: "TY  - JOUR\nTI  - Hello\nER  - \n".into(),
+            }))
+            .await;
+        assert!(ris.contains("looks like RIS"), "{ris}");
+        let broken = server
+            .audit_bibliography(Parameters(AuditBibliographyArgs {
+                content: "@article{x, title={nope".into(),
+            }))
+            .await;
+        assert!(broken.starts_with("BibTeX parse error:"), "{broken}");
     }
 
     #[tokio::test]

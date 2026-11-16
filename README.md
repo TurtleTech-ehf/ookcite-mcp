@@ -194,10 +194,11 @@ OokCite installs two ways.
 From this repository, add marketplace `TurtleTech-ehf/ookcite-mcp` and
 install `ookcite@ookcite`. That registers the `ookcite` marketplace and
 enables the plugin in `plugins/ookcite`. The plugin connects to
-`https://ookcite-api.turtletech.us/mcp` and adds three skills: format a
+`https://ookcite-api.turtletech.us/mcp` and adds four skills: format a
 pasted bibliography (`/ookcite:format-bibliography`), verify references
-before submission (`/ookcite:verify-references`), and build and export a
-collection (`/ookcite:build-collection`). Sign in when asked. Formatting
+before submission (`/ookcite:verify-references`), audit a manuscript `.bib`
+for broken or retracted entries (`/ookcite:audit-bibliography`), and build
+and export a collection (`/ookcite:build-collection`). Sign in when asked. Formatting
 one citation and checking a short DOI list also work before sign-in, within
 the anonymous daily cap. Saving a collection requires the signed-in account.
 
@@ -257,8 +258,9 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 
 ### MCP usage tips
 
-- Prefer **batch** tools (`verify_references`, `batch_format`, `batch_add_to_collection`,
-  `import_bibliography`) over many single-citation calls.
+- Prefer **batch** tools (`verify_references`, `audit_bibliography`, `batch_format`, `batch_add_to_collection`,
+  `import_bibliography`) over many single-citation calls. A manuscript `.bib` goes to
+  `audit_bibliography`; a pasted list that is not BibTeX goes to `import_bibliography`.
 - Collection mutations require the signed-in account, or `OOKCITE_API_KEY` on a
   copy you run yourself. Destructive tools
   (`delete_collection`, `remove_from_collection`, `unshare_collection`) are
@@ -285,6 +287,7 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 | ------------------- | --------------------------------------------- |
 | `format_citation`   | Format a DOI in any of 2900+ CSL styles (no API key for a single citation) |
 | `verify_references` | Batch-check DOIs, and any bibliographic claim passed with them |
+| `audit_bibliography` | Audit a manuscript `.bib` for broken DOIs and publisher retractions |
 | `batch_format`      | Format multiple citations at once             |
 | `search_styles`     | Find CSL style IDs by name                    |
 | `list_styles`       | Page through the full CSL style list          |
@@ -393,6 +396,9 @@ Add this to your system prompt:
 
 > Before citing any paper, use validate_doi to confirm the reference exists.
 > If validation fails, do not include the citation.
+>
+> Before submission, run audit_bibliography on the manuscript `.bib`. A DOI
+> that resolves can still be retracted, withdrawn, or a different paper.
 
 For revision workflows, add:
 
@@ -427,6 +433,7 @@ per-collection metadata overrides described in `docs/local-overrides.md`.
 | `src/http_error.rs` | `error_detail` and HTTP status classification for client-facing strings |
 | `src/collection_entries.rs` | Collection entry ids, bare DOI / `doi:` alias resolution, search lines |
 | `src/plaintext.rs` | Pasted-list split and local `.bib` render |
+| `src/bib_audit.rs` | Manuscript `.bib` parse, publisher retraction notices, and the audit report |
 | `src/bib_export.rs` | Collection BibTeX from provider records, stored fields, and text cleanup |
 | `src/overrides.rs` | Local per-collection metadata overrides applied on export |
 | `src/resolve_helpers.rs` | Reverse-lookup and free-text resolve payload helpers |
@@ -437,7 +444,7 @@ per-collection metadata overrides described in `docs/local-overrides.md`.
 | `npm/` | `@turtletech/ookcite-mcp` installer/wrapper (downloads release binary) |
 | `demo/` | Asciinema recording scripts |
 | marketplace catalog | Lists `ookcite` from `./plugins/ookcite` |
-| `plugins/ookcite/` | Plugin manifest, hosted MCP URL, three skills |
+| `plugins/ookcite/` | Plugin manifest, hosted MCP URL, four skills |
 | `scripts/set-version.sh` | Cocogitto pre-bump hook: package, registry, and plugin versions |
 
 **Collections / entry ids:** `search_collection` and `check_duplicates` emit
@@ -470,6 +477,7 @@ bare DOI on a throwaway collection, then `delete_collection`.
 
 ## Documentation
 
+- [Audit a manuscript bibliography](docs/audit-bibliography.md)
 - [Full MCP setup guide](https://ookcite.turtletech.us/docs/howto/mcp-setup/)
 - [OokCite app](https://ookcite.turtletech.us/app)
 - [TurtleTech](https://turtletech.us)

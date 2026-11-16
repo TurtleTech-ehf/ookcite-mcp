@@ -85,6 +85,39 @@ pub fn format_validate_doi(
     out
 }
 
+/// How the resolved record sits against the fields the caller supplied.
+/// An empty claim is a match: there was nothing to disagree with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimStatus {
+    Match,
+    Mismatch,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimVerdict {
+    pub status: ClaimStatus,
+    pub lines: Vec<String>,
+}
+
+pub fn claim_verdict(meta: &Value, claim: &BibliographicClaim) -> ClaimVerdict {
+    if claim.is_empty() {
+        return ClaimVerdict {
+            status: ClaimStatus::Match,
+            lines: Vec::new(),
+        };
+    }
+    let report = compare(meta, claim);
+    ClaimVerdict {
+        status: match report.status {
+            Status::Match => ClaimStatus::Match,
+            Status::Mismatch => ClaimStatus::Mismatch,
+            Status::Incomplete => ClaimStatus::Incomplete,
+        },
+        lines: report.lines,
+    }
+}
+
 fn join_verdict(head: &str, doi: &str, title: &str, lines: &[String]) -> String {
     let mut out = vec![format!("{head} {doi} : {title}")];
     out.extend(lines.iter().cloned());

@@ -264,6 +264,9 @@ pub struct CachedDoiMetadata {
 }
 
 impl CachedDoiMetadata {
+    /// How long ago this process stored the record.
+    /// The lookup line reads the same clock from the retrieval instant.
+    #[allow(dead_code)]
     pub fn age(&self) -> Duration {
         self.retrieved_at.elapsed()
     }
@@ -299,12 +302,6 @@ impl DoiResponseCache {
             metadata: meta,
             retrieved_at: at,
         })
-    }
-
-    /// Return cached metadata only if embedded DOI normalizes to `key`.
-    pub fn get_valid(&self, requested_doi: &str) -> Option<serde_json::Value> {
-        self.get_valid_with_timing(requested_doi)
-            .map(|cached| cached.metadata)
     }
 
     /// Store only when identity matches the request key.
@@ -511,8 +508,9 @@ mod tests {
         let bad = serde_json::json!({"doi": "10.1/other", "title": "Wrong"});
         cache.put_if_identity_ok("10.1038/187493a0", good.clone());
         cache.put_if_identity_ok("10.1038/187493a0", bad);
-        let got = cache.get_valid("10.1038/187493a0").unwrap();
-        assert_eq!(got["title"], "Ruby");
+        let got = cache.get_valid_with_timing("10.1038/187493a0").unwrap();
+        assert_eq!(got.metadata["title"], "Ruby");
+        assert!(got.age().as_secs() < 5);
         assert_eq!(cache.len_for_test(), 1);
     }
 

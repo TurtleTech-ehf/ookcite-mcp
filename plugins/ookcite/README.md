@@ -4,7 +4,7 @@ OokCite checks whether a citation is real, formats a bibliography in a CSL style
 
 ## Install from the marketplace
 
-Add marketplace `TurtleTech-ehf/ookcite-mcp`, then install `ookcite@ookcite`. The plugin connects to `https://ookcite-api.turtletech.us/mcp`. Three skills load: format a pasted bibliography, verify references before submission, and build and export a collection. Sign in when asked. Formatting one citation and checking a short list of DOIs also work before sign-in, within the anonymous daily cap. Saving a collection requires the signed-in account.
+Add marketplace `TurtleTech-ehf/ookcite-mcp`, then install `ookcite@ookcite`. The plugin connects to `https://ookcite-api.turtletech.us/mcp`. Four skills load: format a pasted bibliography, verify references before submission, audit a manuscript `.bib` for broken or retracted entries, and build and export a collection. Sign in when asked. Formatting one citation and checking a short list of DOIs also work before sign-in, within the anonymous daily cap. Saving a collection requires the signed-in account.
 
 ## Install as a directory connector
 

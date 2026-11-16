@@ -8,9 +8,11 @@
 //! Basic usage requires no API key, but adding one unlocks higher rate limits.
 //!
 //! Implementation lives in [`server`]; argument types in [`tool_args`]; pure
-//! helpers in [`collection_entries`], [`resolve_helpers`], and [`http_error`].
+//! helpers in [`collection_entries`], [`resolve_helpers`], [`bib_audit`], and
+//! [`http_error`].
 
 mod batch_limits;
+mod bib_audit;
 mod bib_export;
 mod bibliographic;
 mod cli;
