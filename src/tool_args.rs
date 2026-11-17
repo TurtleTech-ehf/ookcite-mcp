@@ -150,6 +150,19 @@ pub struct GroupCiteArgs {
 pub struct ListCollectionsArgs {}
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveToRidleyArgs {
+    /// Ridley library id (26-character ULID) from the library picker.
+    pub library_id: String,
+    /// CSL-JSON object for one paper. The Ridley client writes this into the library.
+    pub csl: serde_json::Value,
+    /// Stable source reference, usually the DOI.
+    pub source_ref: String,
+    /// Caller-chosen idempotency key. The same key returns the same queued row.
+    pub idempotency_key: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct AddToCollectionArgs {
     /// Collection name (creates if doesn't exist)
     pub collection: String,

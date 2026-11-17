@@ -353,6 +353,7 @@ under the anonymous cap.
 | `merge_entries`            | Merge two entries of one collection into one |
 | `update_tags`              | Set tags on a collection                |
 | `reorder_collection`       | Reorder entries                         |
+| `save_to_ridley`           | Queue a paper for the user's Ridley library |
 
 Typical workflow:
 

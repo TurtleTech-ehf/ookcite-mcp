@@ -763,11 +763,10 @@ async fn inbox_failure(response: reqwest::Response) -> String {
         return dashboard_failure(response, "Failed to add DOI").await;
     }
     let body: serde_json::Value = response.json().await.unwrap_or_default();
-    match body["error"].as_str() {
-        Some("library_not_found" | "ridley_library_not_found") => {
-            "Failed to add DOI: Ridley library not found.".into()
-        }
-        _ => SAVE_INBOX_UNAVAILABLE.into(),
+    if crate::http_error::save_inbox_unavailable(status, body["error"].as_str()) {
+        SAVE_INBOX_UNAVAILABLE.into()
+    } else {
+        "Failed to add DOI: Ridley library not found.".into()
     }
 }
 

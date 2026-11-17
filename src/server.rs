@@ -1744,6 +1744,70 @@ impl Server {
     }
 
     #[tool(
+        name = "save_to_ridley",
+        description = "Queue one paper for the signed-in user's Ridley library. Sends CSL-JSON to the OokCite save inbox. The user's own Ridley client, which already holds the library keys, writes the item on its next sync. The server does not seal the item and this call does not send a user id. The same idempotency_key returns the existing row. Requires OOKCITE_API_KEY.",
+        annotations(
+            title = "Save to Ridley",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn save_to_ridley(&self, Parameters(args): Parameters<SaveToRidleyArgs>) -> String {
+        if let Some(msg) = block_mutate() {
+            return msg;
+        }
+        let library_id = args.library_id.trim();
+        let source_ref = args.source_ref.trim();
+        let idempotency_key = args.idempotency_key.trim();
+        if library_id.is_empty() || source_ref.is_empty() || idempotency_key.is_empty() {
+            return "library_id, source_ref, and idempotency_key are required".into();
+        }
+        if !args.csl.is_object() {
+            return "csl must be a CSL-JSON object".into();
+        }
+        let body = serde_json::json!({
+            "csl": args.csl,
+            "source_ref": source_ref,
+            "idempotency_key": idempotency_key,
+        });
+        let response = self
+            .request(endpoints::RIDLEY_INBOX, &[("id", library_id)])
+            .json(&body)
+            .send()
+            .await;
+        match response {
+            Ok(response) if response.status().is_success() => {
+                let payload: serde_json::Value = response.json().await.unwrap_or_default();
+                let status = payload["status"].as_str().unwrap_or("pending");
+                let id = payload["id"].as_str().unwrap_or("");
+                format!("Queued for Ridley ({status}) {id}")
+            }
+            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+                let body = response.text().await.unwrap_or_default();
+                let code = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("error")
+                            .and_then(|error| error.as_str())
+                            .map(str::to_string)
+                    });
+                if crate::http_error::save_inbox_unavailable(
+                    reqwest::StatusCode::NOT_FOUND,
+                    code.as_deref(),
+                ) {
+                    crate::ridley_library::SAVE_INBOX_UNAVAILABLE.to_string()
+                } else {
+                    "Failed to queue the Ridley save: Ridley library not found.".to_string()
+                }
+            }
+            Ok(response) => prefixed_failure(response, "Failed to queue the Ridley save").await,
+            Err(error) => format!("Failed to queue the Ridley save: {error}"),
+        }
+    }
+
+    #[tool(
         name = "export_collection",
         description = "Export a collection as BibTeX (format=bib, default) or CSL bibliography text (format=csl, or pass a CSL style id such as apa/ieee). BibTeX is rendered here from Crossref or DataCite fields: proceedings get a booktitle, types and numbers follow the provider, a stored citation_key is kept, and a DOI is not repeated as a URL. Local overrides recorded by update_entry_metadata are applied first when this server keeps them (stdio, or HTTP with auth=none); local_overrides=false skips them, and an unreadable override file is skipped with a warning comment. software_entry=misc writes @misc with howpublished instead of @software. eid_as=pages or eid_as=note places an article number where styles that ignore eid, such as elsarticle-num, print it. Call this when the user wants the collection as a file or as formatted copy-out.",
         annotations(
@@ -3937,8 +4001,8 @@ mod tests {
     use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{
         default_style, AuditBibliographyArgs, BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs,
-        MergeEntriesArgs, OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, UpdateEntryMetadataArgs,
-        UsageArgs, VerifyArgs,
+        MergeEntriesArgs, OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, SaveToRidleyArgs,
+        UpdateEntryMetadataArgs, UsageArgs, VerifyArgs,
     };
 
     /// Serializes OOKCITE_API_KEY mutations across parallel tokio tests.
@@ -4720,6 +4784,77 @@ mod tests {
 
     fn test_server(base: &str) -> Server {
         Server::new_with_base(base.to_string())
+    }
+
+    #[tokio::test]
+    async fn save_to_ridley_posts_csl_without_a_user_id() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v1/ridley/libraries/01ARZ3NDEKTSV4RRFFQ69G5FAV/inbox",
+            ))
+            .and(body_string_contains(r#""source_ref":"10.1000/abc""#))
+            .and(body_string_contains(r#""idempotency_key":"ookcite:once""#))
+            .and(|request: &wiremock::Request| {
+                let body = String::from_utf8_lossy(&request.body);
+                !body.contains("user_id") && !body.contains("key_b64")
+            })
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "01BX5ZZKBKACTAV9WEVGEMMVRZ",
+                "status": "pending"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let server = test_server(&mock.uri());
+        let text = server
+            .save_to_ridley(Parameters(SaveToRidleyArgs {
+                library_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+                csl: serde_json::json!({
+                    "type": "article-journal",
+                    "title": "A paper",
+                    "DOI": "10.1000/abc"
+                }),
+                source_ref: "10.1000/abc".into(),
+                idempotency_key: "ookcite:once".into(),
+            }))
+            .await;
+        assert!(text.contains("Queued for Ridley"), "{text}");
+        assert!(text.contains("pending"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn save_to_ridley_uses_the_shared_unavailable_inbox_error() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v1/ridley/libraries/01ARZ3NDEKTSV4RRFFQ69G5FAV/inbox",
+            ))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({ "error": "not_found" })),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let text = test_server(&mock.uri())
+            .save_to_ridley(Parameters(SaveToRidleyArgs {
+                library_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+                csl: serde_json::json!({ "type": "article-journal", "title": "A paper" }),
+                source_ref: "10.1000/abc".into(),
+                idempotency_key: "ookcite:missing".into(),
+            }))
+            .await;
+        assert_eq!(text, crate::ridley_library::SAVE_INBOX_UNAVAILABLE);
+
+        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+        promote_upstream_failure(&mut result);
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["kind"], "ridley_save_inbox_unavailable");
+        assert_eq!(structured["http_status"], 404);
     }
 
     #[tokio::test]

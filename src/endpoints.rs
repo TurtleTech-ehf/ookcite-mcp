@@ -111,8 +111,18 @@ pub const ORCID_SEARCH: Endpoint = Endpoint::new("GET", "/api/v1/orcid/search");
 pub const ORCID_PROFILE: Endpoint = Endpoint::new("GET", "/api/v1/orcid/{orcid_id}");
 pub const INGEST_ORCID: Endpoint = Endpoint::new("POST", "/api/v1/ingest/orcid");
 
-/// Every endpoint this crate calls. The contract test iterates over this
-/// to verify each one exists in the OpenAPI spec.
+/// Cite proxies this to the dashboard save inbox. The body is CSL-JSON for
+/// the signed-in user. It never carries a user id or a library key.
+///
+/// Kept out of [`ALL`] until `./contract/regen.sh` encrypts a spec that
+/// declares this path. `tests/api_contract.rs` checks [`ALL`] when
+/// `OOKCITE_CONTRACT_KEY` is set, and skips when the key is unset.
+pub const RIDLEY_INBOX: Endpoint = Endpoint::new("POST", "/api/v1/ridley/libraries/{id}/inbox");
+
+/// Tools already call these. They join [`ALL`] after `./contract/regen.sh`.
+pub const CONTRACT_AFTER_REGEN: &[Endpoint] = &[RIDLEY_INBOX];
+
+/// Endpoints checked against `contract/openapi.json.age`.
 pub const ALL: &[Endpoint] = &[
     LOOKUP_DOI,
     LOOKUP_ISBN,
@@ -195,6 +205,16 @@ mod tests {
     #[should_panic(expected = "still has unfilled placeholders")]
     fn render_panics_on_missing_substitution() {
         COLLECTION_GET.render(&[]);
+    }
+
+    #[test]
+    fn the_save_inbox_endpoint_waits_for_the_encrypted_contract() {
+        assert!(CONTRACT_AFTER_REGEN.iter().any(|endpoint| {
+            endpoint.method == RIDLEY_INBOX.method && endpoint.path == RIDLEY_INBOX.path
+        }));
+        assert!(ALL.iter().all(|endpoint| {
+            endpoint.method != RIDLEY_INBOX.method || endpoint.path != RIDLEY_INBOX.path
+        }));
     }
 
     #[test]

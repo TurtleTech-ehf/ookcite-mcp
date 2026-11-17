@@ -260,6 +260,20 @@ fn bounded(text: &str) -> String {
     text.chars().take(MAX_ERROR_BODY_CHARS).collect()
 }
 
+/// A 404 that is not a named missing library means the save inbox route
+/// is not on this server.
+///
+/// Callers answer with [`crate::ridley_library::SAVE_INBOX_UNAVAILABLE`].
+/// `promote_upstream_failure` is the only place that sets `is_error` and
+/// the structured 404 for that text.
+pub fn save_inbox_unavailable(status: reqwest::StatusCode, error_code: Option<&str>) -> bool {
+    status == reqwest::StatusCode::NOT_FOUND
+        && !matches!(
+            error_code,
+            Some("library_not_found" | "ridley_library_not_found")
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +284,27 @@ mod tests {
             builder = builder.header("retry-after", retry_after);
         }
         reqwest::Response::from(builder.body(body.to_string()).unwrap())
+    }
+
+    #[test]
+    fn save_inbox_unavailable_is_a_404_that_is_not_a_named_library() {
+        assert!(save_inbox_unavailable(
+            reqwest::StatusCode::NOT_FOUND,
+            Some("not_found")
+        ));
+        assert!(save_inbox_unavailable(reqwest::StatusCode::NOT_FOUND, None));
+        assert!(!save_inbox_unavailable(
+            reqwest::StatusCode::NOT_FOUND,
+            Some("library_not_found")
+        ));
+        assert!(!save_inbox_unavailable(
+            reqwest::StatusCode::NOT_FOUND,
+            Some("ridley_library_not_found")
+        ));
+        assert!(!save_inbox_unavailable(
+            reqwest::StatusCode::FORBIDDEN,
+            None
+        ));
     }
 
     #[tokio::test]
