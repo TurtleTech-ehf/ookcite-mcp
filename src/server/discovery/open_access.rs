@@ -616,6 +616,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_transport_failure_carries_its_cause() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
+        let server = Server::new_with_base("http://127.0.0.1:9".into())
+            .with_discovery(crate::server::discovery::test_support::closed_base());
+
+        let text = server.find_open_access_pdf(args(DOI)).await;
+
+        assert!(
+            text.starts_with("UNREACHABLE Unpaywall : could not connect to 127.0.0.1"),
+            "{text}"
+        );
+        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+        crate::server::promote_upstream_failure(&mut result);
+        assert_eq!(result.structured_content.unwrap()["kind"], "unreachable");
+    }
+
+    #[tokio::test]
     async fn a_402_keeps_its_retry_after_and_is_not_a_miss() {
         let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;

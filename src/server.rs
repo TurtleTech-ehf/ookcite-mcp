@@ -113,7 +113,8 @@ fn provider_client(bases: Option<&ProviderBases>, timeout_secs: u64) -> reqwest:
 enum ProviderRead {
     TooLarge,
     Redirect,
-    Failed,
+    /// The request or the body read failed in transport. Holds the cause.
+    Failed(String),
     /// A non-success answer. It keeps its status and `Retry-After`.
     Status(discovery::ProviderStatus),
 }
@@ -159,16 +160,54 @@ fn provider_failure(doi: &str, error: ProviderRead) -> String {
             crate::constants::PROVIDER_BODY_LIMIT
         ),
         ProviderRead::Redirect => format!("ERROR {doi} : provider redirect refused"),
-        ProviderRead::Failed => format!("ERROR {doi} : error sending request"),
+        ProviderRead::Failed(cause) => format!("UNREACHABLE {doi} : {cause}"),
         ProviderRead::Status(status) => status.text(&format!("{} for doi:{doi}", status.host())),
     }
 }
 
 fn provider_send_error(doi: &str, error: &reqwest::Error) -> String {
+    provider_failure(doi, provider_read_error(error))
+}
+
+fn provider_read_error(error: &reqwest::Error) -> ProviderRead {
     if error.is_redirect() || error.to_string().contains("provider redirect refused") {
-        provider_failure(doi, ProviderRead::Redirect)
+        ProviderRead::Redirect
     } else {
-        provider_failure(doi, ProviderRead::Failed)
+        ProviderRead::Failed(transport_cause(error))
+    }
+}
+
+/// Why a provider request failed, without the URL: what happened, to which
+/// host, and the underlying causes. A timeout, a refused connection and a
+/// DNS failure read differently, and the caller needs to know which.
+pub(crate) fn transport_cause(error: &reqwest::Error) -> String {
+    let host = error
+        .url()
+        .and_then(|url| url.host_str())
+        .unwrap_or("the provider");
+    let what = if error.is_timeout() {
+        format!("timed out reading {host}")
+    } else if error.is_connect() {
+        format!("could not connect to {host}")
+    } else if error.is_body() || error.is_decode() {
+        format!("the response from {host} ended early")
+    } else {
+        format!("the request to {host} failed")
+    };
+    let mut causes: Vec<String> = Vec::new();
+    let mut source = std::error::Error::source(error);
+    while let Some(inner) = source {
+        let text = inner.to_string();
+        if !text.is_empty() && !causes.contains(&text) {
+            causes.push(text);
+        }
+        source = inner.source();
+    }
+    let detail: String = causes.join(": ").chars().take(160).collect();
+    if detail.is_empty() {
+        what
+    } else {
+        format!("{what} ({detail})")
     }
 }
 
@@ -176,7 +215,10 @@ fn provider_send_error(doi: &str, error: &reqwest::Error) -> String {
 async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>, ProviderRead> {
     let mut buf = Vec::new();
     loop {
-        let next = response.chunk().await.map_err(|_| ProviderRead::Failed)?;
+        let next = response
+            .chunk()
+            .await
+            .map_err(|error| provider_read_error(&error))?;
         let Some(chunk) = next else {
             return Ok(buf);
         };
@@ -591,13 +633,11 @@ impl Server {
     }
 
     async fn provider_json(&self, url: &str) -> Result<Option<serde_json::Value>, ProviderRead> {
-        let response = self.provider_request(url).send().await.map_err(|error| {
-            if error.is_redirect() || error.to_string().contains("provider redirect refused") {
-                ProviderRead::Redirect
-            } else {
-                ProviderRead::Failed
-            }
-        })?;
+        let response = self
+            .provider_request(url)
+            .send()
+            .await
+            .map_err(|error| provider_read_error(&error))?;
         if response.status().as_u16() == 404 {
             return Ok(None);
         }

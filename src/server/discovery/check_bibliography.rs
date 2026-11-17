@@ -1572,6 +1572,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_transport_failure_is_an_error_result_that_keeps_the_doi_and_the_cause() {
+        use crate::server::discovery::test_support::{closed_base, handle_ok, split};
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let slow = MockServer::start().await;
+        handle_ok(&slow, "10.5555/t.4").await;
+        Mock::given(method("GET"))
+            .and(path(format!("/works/{}", enc("10.5555/t.4"))))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(3)))
+            .mount(&slow)
+            .await;
+        let bib = "@article{k, title={A paper that exists}, doi={10.5555/t.4}}";
+        for (elsewhere, cause) in [
+            (slow.uri(), "timed out reading 127.0.0.1"),
+            (closed_base(), "could not connect to 127.0.0.1"),
+        ] {
+            let text = split(&slow, &elsewhere)
+                .check_bibliography(Parameters(args(bib)))
+                .await;
+
+            assert!(text.contains("[k] UPSTREAM doi:10.5555/t.4"), "{text}");
+            assert!(
+                text.contains(&format!("UNREACHABLE 10.5555/t.4 : {cause}")),
+                "{text}"
+            );
+            assert!(!text.contains("UNCHECKED"), "{text}");
+            let mut result = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
+            crate::server::promote_upstream_failure(&mut result);
+            assert_eq!(result.is_error, Some(true), "{text}");
+            assert_eq!(result.structured_content.unwrap()["kind"], "unreachable");
+        }
+    }
+
+    #[tokio::test]
     async fn a_doi_org_429_marks_the_entry_upstream_not_broken() {
         let _key = EnvGuard::unset("OOKCITE_API_KEY");
         let mock = MockServer::start().await;

@@ -553,7 +553,9 @@ for an entry, from the publisher record or from doi.org, that entry is
 the result is an error result as described above. If doi.org or a publisher
 refuses the request in another way (400, 401, 403, 409, 422), the entry is
 `UNCHECKED` with that reason. Only a not-found answer from doi.org makes an
-entry `BROKEN`. This tool reads text you
+entry `BROKEN`. A timeout or a connection failure is `UPSTREAM` with its cause
+(`UNREACHABLE <doi> : timed out reading <host>`), keeps the DOI, and makes the
+result an error result. This tool reads text you
 paste and checks the DOIs. For a manuscript `.bib` compared field by field with
 the record, use `audit_bibliography`. RIS is read here only.
 

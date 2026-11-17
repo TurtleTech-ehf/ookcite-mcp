@@ -156,6 +156,7 @@ fn is_severe_lookup(text: &str) -> bool {
     text.contains("RATE LIMITED")
         || text.contains("TIMEOUT")
         || text.contains("TEMPORARY ERROR")
+        || text.contains("UNREACHABLE")
         || text.contains("PAYMENT REQUIRED")
         || text.contains("ACCESS DENIED")
         || text.starts_with("ERROR ")
@@ -174,6 +175,8 @@ pub fn upstream_failure_report(text: &str) -> Option<UpstreamFailureReport> {
         ("rate_limited", Some(429), Some("RATE LIMITED"))
     } else if text.contains("PAYMENT REQUIRED") {
         ("payment_required", Some(402), Some("PAYMENT REQUIRED"))
+    } else if text.contains("UNREACHABLE") {
+        ("unreachable", None, None)
     } else if text.contains("TIMEOUT") {
         ("timeout", Some(timeout_status(text)), Some("TIMEOUT"))
     } else if text.contains("TEMPORARY ERROR") {
@@ -209,7 +212,7 @@ pub fn is_stopping_failure(text: &str) -> bool {
     upstream_failure_report(text).is_some_and(|report| {
         matches!(
             report.kind,
-            "rate_limited" | "payment_required" | "timeout" | "temporary_error"
+            "rate_limited" | "payment_required" | "timeout" | "temporary_error" | "unreachable"
         )
     })
 }
@@ -544,6 +547,22 @@ mod payment_required_tests {
             detail.chars().filter(|c| *c == 'x').count(),
             MAX_ERROR_BODY_CHARS
         );
+    }
+
+    #[test]
+    fn an_unreachable_provider_is_an_error_with_no_http_status() {
+        let text =
+            "[k] UPSTREAM doi:10.1/x\n    UNREACHABLE 10.1/x : timed out reading api.crossref.org";
+        let report = upstream_failure_report(text).unwrap();
+        assert_eq!(report.kind, "unreachable");
+        assert_eq!(report.http_status, None);
+        assert!(is_stopping_failure(text));
+        assert!(!is_stopping_failure(
+            "ACCESS DENIED h for doi:10.1/x : 403 Forbidden"
+        ));
+        assert!(is_severe_lookup(
+            "UNREACHABLE 10.1/x : could not connect to doi.org"
+        ));
     }
 
     #[test]

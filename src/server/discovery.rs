@@ -202,7 +202,12 @@ impl Server {
             {
                 return Err(format!("ERROR {source} : provider redirect refused"));
             }
-            Err(_) => return Err(format!("ERROR {source} : error sending request")),
+            Err(error) => {
+                return Err(format!(
+                    "UNREACHABLE {source} : {}",
+                    super::transport_cause(&error)
+                ));
+            }
         };
         if response.status().as_u16() == 404 {
             return Ok(None);
@@ -221,8 +226,8 @@ impl Server {
             Err(ProviderRead::Redirect) => {
                 return Err(format!("ERROR {source} : provider redirect refused"));
             }
-            Err(ProviderRead::Failed) => {
-                return Err(format!("ERROR {source} : error reading response"));
+            Err(ProviderRead::Failed(cause)) => {
+                return Err(format!("UNREACHABLE {source} : {cause}"));
             }
             Err(ProviderRead::Status(status)) => return Err(status.text(source)),
         };
@@ -664,5 +669,132 @@ mod registration_tests {
 
         assert!(text.contains("k | UNCHECKED | doi:10.5555/r.5"), "{text}");
         assert!(!text.contains("BROKEN"), "{text}");
+    }
+}
+
+#[cfg(test)]
+pub(super) mod test_support {
+    use super::*;
+    use crate::server::ProviderBases;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    pub(in crate::server) fn closed_base() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// doi.org answers on `handles`; Crossref, DataCite and Zenodo are at
+    /// `elsewhere`. The client gives up after one second.
+    pub(in crate::server) fn split(handles: &MockServer, elsewhere: &str) -> Server {
+        let mut server = Server::new_with_base(handles.uri());
+        let bases = ProviderBases {
+            crossref: elsewhere.to_string(),
+            datacite: elsewhere.to_string(),
+            zenodo: elsewhere.to_string(),
+            handles: handles.uri(),
+        };
+        server.provider_http = crate::constants::build_provider_client_for_tests(
+            1,
+            std::iter::empty::<String>(),
+            bases.test_origins(),
+        );
+        server.providers = Some(bases);
+        server
+    }
+
+    pub(in crate::server) async fn handle_ok(mock: &MockServer, doi: &str) {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/handles/{}",
+                crate::server::encode_path_segment(doi)
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"responseCode": 1})))
+            .mount(mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"doi": doi})))
+            .mount(mock)
+            .await;
+    }
+
+    pub(in crate::server) async fn slow_everything() -> MockServer {
+        let slow = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(3)))
+            .mount(&slow)
+            .await;
+        slow
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::test_support::{closed_base, slow_everything, split};
+    use wiremock::MockServer;
+
+    fn kind(text: &str) -> &'static str {
+        crate::http_error::upstream_failure_report(text)
+            .expect(text)
+            .kind
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_to_crossref_names_the_doi_and_the_cause() {
+        let mock = MockServer::start().await;
+        let error = split(&mock, &closed_base())
+            .provider_record("10.5555/t.1")
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.starts_with("UNREACHABLE 10.5555/t.1 : could not connect to 127.0.0.1"),
+            "{error}"
+        );
+        assert!(!error.contains("error sending request"), "{error}");
+        assert_eq!(kind(&error), "unreachable");
+    }
+
+    #[tokio::test]
+    async fn a_timeout_reading_crossref_says_it_timed_out() {
+        let mock = MockServer::start().await;
+        let slow = slow_everything().await;
+
+        let error = split(&mock, &slow.uri())
+            .provider_record("10.5555/t.2")
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.starts_with("UNREACHABLE 10.5555/t.2 : timed out reading 127.0.0.1"),
+            "{error}"
+        );
+        assert_eq!(kind(&error), "unreachable");
+    }
+
+    #[tokio::test]
+    async fn a_timeout_or_refusal_at_doi_org_is_unreachable_not_unregistered() {
+        let slow = slow_everything().await;
+        let error = split(&slow, &closed_base())
+            .registration_status("10.5555/t.3")
+            .await
+            .unwrap_err();
+        assert!(
+            error.starts_with("UNREACHABLE 10.5555/t.3 : timed out reading 127.0.0.1"),
+            "{error}"
+        );
+
+        let mut refused = split(&slow, &closed_base());
+        refused.providers.as_mut().unwrap().handles = closed_base();
+        let error = refused
+            .registration_status("10.5555/t.3")
+            .await
+            .unwrap_err();
+        assert!(error.contains("could not connect to 127.0.0.1"), "{error}");
+        assert_eq!(kind(&error), "unreachable");
     }
 }
