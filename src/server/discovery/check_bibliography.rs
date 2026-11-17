@@ -1423,6 +1423,189 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_registered_doi_with_no_corpus_or_publisher_record_is_broken() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let doi = "10.5555/no.record";
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/handles/{}", enc(doi))))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"responseCode": 1})))
+            .mount(&mock)
+            .await;
+        for (verb, route) in [
+            ("POST", "/api/v1/lookup/doi".to_string()),
+            ("GET", format!("/works/{}", enc(doi))),
+            ("GET", format!("/dois/{}", enc(doi))),
+        ] {
+            Mock::given(method(verb))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&mock)
+                .await;
+        }
+        let bib =
+            format!("@article{{k, title={{Registered, but nobody holds it}}, doi={{{doi}}}}}");
+
+        let text = server(&mock)
+            .check_bibliography(Parameters(args(&bib)))
+            .await;
+
+        assert!(text.contains(&format!("[k] BROKEN doi:{doi}")), "{text}");
+        assert!(
+            text.contains("not in the OokCite corpus and no Crossref or DataCite record"),
+            "{text}"
+        );
+        assert!(!text.contains("not registered"), "{text}");
+        assert!(
+            !text.contains("UPSTREAM") && !text.contains("UNCHECKED"),
+            "{text}"
+        );
+    }
+
+    /// The places that produce a BROKEN verdict, counted in the non-test
+    /// source. A new producer changes a count and fails here until the README
+    /// list and the pin tests are updated.
+    #[test]
+    fn the_broken_producers_are_the_three_the_readme_lists() {
+        fn production(source: &str) -> &str {
+            source.split("\n#[cfg(test)]\nmod tests").next().unwrap()
+        }
+        let server = production(include_str!("../../server.rs"));
+        let audit = production(include_str!("../../bib_audit.rs"));
+        let check = production(include_str!("check_bibliography.rs"));
+        assert_eq!(
+            server.matches("DoiOutcome::Broken(").count(),
+            2,
+            "doi.org 100; no record"
+        );
+        assert_eq!(
+            audit.matches("status: AuditStatus::Broken").count(),
+            2,
+            "malformed; outcome"
+        );
+        assert_eq!(
+            check.matches("row.status = Status::Broken;").count(),
+            2,
+            "malformed; state"
+        );
+        assert_eq!(
+            check.matches("DoiState::Broken(").count(),
+            2,
+            "built from an outcome; matched"
+        );
+
+        for readme in [
+            include_str!("../../../README.md"),
+            include_str!("../../../npm/README.md"),
+        ] {
+            let flat = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                flat.contains("`BROKEN` in exactly three cases"),
+                "README lacks the BROKEN list"
+            );
+            assert!(flat.contains("its `doi` field is not a DOI"));
+            for reason in [
+                crate::bib_audit::BROKEN_NOT_REGISTERED,
+                crate::bib_audit::BROKEN_NO_RECORD,
+            ] {
+                assert!(
+                    flat.contains(&format!("`{reason}`")),
+                    "README lacks `{reason}`"
+                );
+            }
+            assert!(
+                flat.contains("A 404 from doi.org whose body is not the `responseCode` 100 verdict is `UPSTREAM`."),
+            );
+            assert!(
+                !flat.contains("only `responseCode` 100"),
+                "stale, too broad"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_malformed_doi_field_is_broken_without_any_request() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let bib = "@article{k, title={Not a real identifier}, doi={soon}}";
+
+        let text = server(&mock)
+            .check_bibliography(Parameters(args(bib)))
+            .await;
+
+        assert!(text.contains("[k] BROKEN"), "{text}");
+        assert!(text.contains("the doi field `soon` is not a DOI"), "{text}");
+        assert!(
+            !text.contains("UPSTREAM") && !text.contains("UNCHECKED"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_publisher_refusal_with_a_corpus_record_is_an_unchecked_success_row() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let doi = "10.5555/publisher.refused";
+        let table: [(&str, u16, &str); 4] = [
+            ("crossref", 403, "ACCESS DENIED"),
+            ("crossref", 401, "ACCESS DENIED"),
+            ("datacite", 403, "ACCESS DENIED"),
+            ("datacite", 422, "ERROR"),
+        ];
+        for (publisher, status, marker) in table {
+            let mock = MockServer::start().await;
+            mount_registered_and_in_corpus(&mock, doi).await;
+            let refusing = if publisher == "crossref" {
+                format!("/works/{}", enc(doi))
+            } else {
+                Mock::given(method("GET"))
+                    .and(path(format!("/works/{}", enc(doi))))
+                    .respond_with(ResponseTemplate::new(404))
+                    .mount(&mock)
+                    .await;
+                format!("/dois/{}", enc(doi))
+            };
+            Mock::given(method("GET"))
+                .and(path(refusing))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(json!({"message": "nope"})),
+                )
+                .mount(&mock)
+                .await;
+            let bib = format!("@article{{k, title={{A mock record}}, doi={{{doi}}}}}");
+
+            let text = server(&mock)
+                .check_bibliography(Parameters(args(&bib)))
+                .await;
+
+            let case = format!("{publisher} {status}: {text}");
+            assert!(text.contains(&format!("[k] UNCHECKED doi:{doi}")), "{case}");
+            assert!(text.contains(&format!("not checked: {marker}")), "{case}");
+            assert!(text.contains(&format!("{status} ")), "{case}");
+            assert!(
+                !text.contains("UPSTREAM") && !text.contains("BROKEN") && !text.contains("] OK"),
+                "{case}"
+            );
+            assert!(
+                crate::http_error::upstream_failure_report(&text).is_none(),
+                "a publisher refusal on a registered DOI is a success result: {case}"
+            );
+            let mut result = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
+            crate::server::promote_upstream_failure(&mut result);
+            assert_ne!(result.is_error, Some(true), "{case}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_crossref_429_marks_the_entry_upstream_and_the_result_an_error() {
         let _key = EnvGuard::unset("OOKCITE_API_KEY");
         let mock = MockServer::start().await;

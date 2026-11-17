@@ -563,8 +563,12 @@ the 1 MiB cap, redirects off its host, or is not a handle verdict (not JSON, no
 numeric `responseCode`, or a code other than 1 and 100): the entry is
 `UPSTREAM` with the DOI and the cause, and the structured result carries the
 status the host sent (`access_denied` for 401 and 403, `error` for the others),
-so a 401 is reported as 401. Only a not-found answer from doi.org (a 404, or
-`responseCode` 100) makes an entry `BROKEN`. If a Crossref or DataCite record
+so a 401 is reported as 401. An entry is `BROKEN` in exactly three cases: its `doi` field is not a DOI;
+doi.org answers `responseCode` 100 (sent with a 404), reported as
+`not registered at doi.org`; or the DOI is registered but neither the OokCite
+corpus, Crossref nor DataCite holds a record of it, reported as
+`not in the OokCite corpus and no Crossref or DataCite record`. A 404 from
+doi.org whose body is not the `responseCode` 100 verdict is `UPSTREAM`. If a Crossref or DataCite record
 refuses the read in another way, the entry is `UNCHECKED` with that reason,
 because the DOI itself was confirmed. A timeout or a connection failure is
 `UPSTREAM` with its cause (`UNREACHABLE <doi> : timed out reading <host>`),

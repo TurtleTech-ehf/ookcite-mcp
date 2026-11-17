@@ -680,6 +680,28 @@ mod registration_tests {
     }
 
     #[tokio::test]
+    async fn audit_bibliography_marks_a_malformed_doi_field_broken_without_a_request() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let args = AuditBibliographyArgs {
+            content: "@article{k, title={Not a real identifier}, doi={soon}}".into(),
+        };
+
+        let text = server(&mock).audit_bibliography(Parameters(args)).await;
+
+        assert!(
+            text.contains("k | BROKEN | doi field is not a DOI: soon"),
+            "{text}"
+        );
+        assert!(!text.contains("UPSTREAM"), "{text}");
+    }
+
+    #[tokio::test]
     async fn a_handle_answer_that_is_not_a_registration_verdict_is_an_error() {
         let doi = "10.5555/q.1";
         let errors: [(u16, &str); 6] = [

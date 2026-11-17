@@ -475,7 +475,7 @@ impl Server {
         if self.providers.is_some() {
             match self.registration_status(doi).await {
                 Ok(false) => {
-                    return DoiOutcome::Broken("not registered at doi.org".into());
+                    return DoiOutcome::Broken(crate::bib_audit::BROKEN_NOT_REGISTERED.into());
                 }
                 // doi.org gave no answer about this DOI: a throttle, a refusal
                 // (400, 401, 403, 409, 422), a body past the cap, a refused
@@ -508,9 +508,7 @@ impl Server {
             if let Some(error) = provider_error {
                 return DoiOutcome::Upstream(error);
             }
-            return DoiOutcome::Broken(
-                "not in the OokCite corpus and no Crossref or DataCite record".into(),
-            );
+            return DoiOutcome::Broken(crate::bib_audit::BROKEN_NO_RECORD.into());
         }
         let metadata = match &provider {
             Some(record) if metadata.is_object() => {
@@ -526,8 +524,10 @@ impl Server {
         }
     }
 
-    /// doi.org `responseCode` 1 means the handle is registered. Any other
-    /// response, including a 2xx body with no numeric `responseCode`, is not.
+    /// Ok when doi.org's handle answer says the DOI is registered
+    /// (`responseCode` 1). `UNREGISTERED` only for `responseCode` 100. Any
+    /// other answer, such as a refusal, a throttle, or a body that is not a
+    /// handle verdict, is the error `registration_status` built for it.
     async fn require_registered(&self, doi: &str) -> Result<(), String> {
         if self.providers.is_none() {
             return Ok(());
@@ -7086,7 +7086,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn audit_bibliography_treats_a_success_without_response_code_as_unchecked_never_ok() {
+    async fn audit_bibliography_treats_a_success_without_response_code_as_upstream_never_ok_or_broken(
+    ) {
         let _key = EnvGuard::unset("OOKCITE_API_KEY");
         let mock = MockServer::start().await;
         let doi = "10.1000/no-code";

@@ -88,6 +88,13 @@ impl PublisherNotice {
     }
 }
 
+/// Why an entry is BROKEN when doi.org answers `responseCode` 100.
+pub const BROKEN_NOT_REGISTERED: &str = "not registered at doi.org";
+
+/// Why an entry is BROKEN when the DOI is registered but the OokCite corpus,
+/// Crossref and DataCite all lack a record of it.
+pub const BROKEN_NO_RECORD: &str = "not in the OokCite corpus and no Crossref or DataCite record";
+
 /// What one DOI lookup produced. The server fills this; the report does not
 /// call the network.
 #[derive(Debug, Clone)]
