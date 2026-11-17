@@ -500,7 +500,10 @@ Metadata only. Check a DOI with validate_doi before citing it, and format it wit
 
 Input: `{"claim": "<sentence>", "limit": 1-10, "year_from": 1000-2100, "check_retractions": true}`.
 Only `claim` is required (12 to 2000 characters). `limit` defaults to 5 and
-`check_retractions` to true.
+`check_retractions` to true. `year_from` must be between 1000 and next year;
+anything else is refused as invalid params (JSON-RPC -32602, naming the value
+and the range) before any request is made, not run as a search that drops
+every hit.
 
 The corpus answer is read like every provider answer: a body over 1 MiB is
 refused while it streams, and a body that is not JSON is an error

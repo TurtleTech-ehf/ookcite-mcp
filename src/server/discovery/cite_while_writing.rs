@@ -34,6 +34,8 @@ const CLAIM_ECHO_CHARS: usize = 140;
 /// too old, or are held back for a notice are replaced from this reserve.
 const HITS_PER_CANDIDATE: u32 = 4;
 const MAX_HITS: u32 = 40;
+const MIN_YEAR_FROM: i32 = 1000;
+const MAX_YEAR_FROM: i32 = 2100;
 
 fn default_limit() -> u32 {
     DEFAULT_LIMIT
@@ -53,7 +55,7 @@ pub struct CiteWhileWritingArgs {
     #[serde(default = "default_limit")]
     #[schemars(range(min = 1, max = 10))]
     pub limit: u32,
-    /// Drop candidates published before this year.
+    /// Drop candidates published before this year, 1000 to next year.
     #[serde(default)]
     #[schemars(range(min = 1000, max = 2100))]
     pub year_from: Option<i32>,
@@ -387,6 +389,53 @@ pub(super) enum Screen {
     Skipped,
 }
 
+/// The calendar year in UTC for a Unix time, by the civil-from-days rule
+/// (proleptic Gregorian), so no date crate is needed for one range check.
+fn year_of_unix_secs(secs: u64) -> i32 {
+    let days = (secs / 86_400) as i64 + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let year = year_of_era + era * 400 + i64::from(month_index >= 10);
+    year as i32
+}
+
+fn current_year() -> i32 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    year_of_unix_secs(secs)
+}
+
+/// `year_from` must be a year the corpus can hold: 1000 to 2100, and no later
+/// than next year (a paper can be dated ahead of its issue). Anything else
+/// would only ever filter out every hit, so it is refused as invalid
+/// parameters before a request is made.
+fn check_year_from(year_from: Option<i32>) -> Result<(), rmcp::ErrorData> {
+    let Some(year) = year_from else {
+        return Ok(());
+    };
+    let latest = current_year().saturating_add(1).min(MAX_YEAR_FROM);
+    if (MIN_YEAR_FROM..=latest).contains(&year) {
+        return Ok(());
+    }
+    Err(rmcp::ErrorData::invalid_params(
+        format!(
+            "year_from must be a year between {MIN_YEAR_FROM} and {latest}; got {year}. \
+             Drop it to search every year."
+        ),
+        Some(serde_json::json!({
+            "parameter": "year_from",
+            "value": year,
+            "minimum": MIN_YEAR_FROM,
+            "maximum": latest,
+        })),
+    ))
+}
+
 /// Read the corpus answer, refusing a body past [`PROVIDER_BODY_LIMIT`] while
 /// it streams, as every provider read does, and refusing one that is not JSON
 /// rather than reading it as an empty result.
@@ -547,7 +596,14 @@ impl Server {
     async fn cite_while_writing(
         &self,
         Parameters(args): Parameters<CiteWhileWritingArgs>,
-    ) -> String {
+    ) -> Result<String, rmcp::ErrorData> {
+        check_year_from(args.year_from)?;
+        Ok(self.cite(args).await)
+    }
+}
+
+impl Server {
+    async fn cite(&self, args: CiteWhileWritingArgs) -> String {
         let claim = args.claim.trim();
         let chars = claim.chars().count();
         if !(MIN_CLAIM_CHARS..=MAX_CLAIM_CHARS).contains(&chars) {
@@ -630,6 +686,14 @@ mod tests {
 
     const CLAIM: &str =
         "Sheared colloidal glasses nucleate crystals faster than quiescent suspensions do.";
+
+    impl Server {
+        async fn cite_text(&self, Parameters(args): Parameters<CiteWhileWritingArgs>) -> String {
+            self.cite_while_writing(Parameters(args))
+                .await
+                .expect("valid arguments")
+        }
+    }
 
     fn server(mock: &MockServer) -> Server {
         Server::new_with_base(mock.uri()).with_providers(mock.uri())
@@ -744,9 +808,7 @@ mod tests {
         )
         .await;
 
-        let text = server(&mock)
-            .cite_while_writing(Parameters(args(CLAIM)))
-            .await;
+        let text = server(&mock).cite_text(Parameters(args(CLAIM))).await;
 
         let a = text
             .find("1. Crystal nucleation in sheared colloidal glasses (2021)")
@@ -793,9 +855,7 @@ mod tests {
         request.year_from = Some(2000);
         request.check_retractions = false;
 
-        let text = plain_server(&mock)
-            .cite_while_writing(Parameters(request))
-            .await;
+        let text = plain_server(&mock).cite_text(Parameters(request)).await;
 
         assert!(!text.contains("Early shear experiments"), "{text}");
         assert!(
@@ -829,9 +889,7 @@ mod tests {
         )
         .await;
 
-        let text = server(&mock)
-            .cite_while_writing(Parameters(args(CLAIM)))
-            .await;
+        let text = server(&mock).cite_text(Parameters(args(CLAIM))).await;
 
         assert!(
             text.contains("HELD BACK doi:10.5555/demo.a \"Crystal nucleation in sheared colloidal glasses\": retracted by doi:10.5555/notice on 2022-03"),
@@ -860,7 +918,7 @@ mod tests {
         let mut request = args(CLAIM);
         request.limit = 1;
 
-        let text = server(&mock).cite_while_writing(Parameters(request)).await;
+        let text = server(&mock).cite_text(Parameters(request)).await;
 
         assert!(text.contains("UNCHECKED (RATE LIMITED 127.0.0.1 for doi:10.5555/demo.a : 429 Too Many Requests: Slow down (Retry-After: 30))"), "{text}");
         assert!(text.contains("candidate(s) above are UNCHECKED"), "{text}");
@@ -887,9 +945,7 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let text = plain_server(&mock)
-            .cite_while_writing(Parameters(args(CLAIM)))
-            .await;
+        let text = plain_server(&mock).cite_text(Parameters(args(CLAIM))).await;
 
         assert!(
             text.starts_with(
@@ -917,9 +973,7 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let text = plain_server(&mock)
-            .cite_while_writing(Parameters(args(CLAIM)))
-            .await;
+        let text = plain_server(&mock).cite_text(Parameters(args(CLAIM))).await;
 
         assert_eq!(
             text,
@@ -938,9 +992,7 @@ mod tests {
         let mock = MockServer::start().await;
         mount_corpus(&mock, json!({"total": 0, "matches": []})).await;
 
-        let text = plain_server(&mock)
-            .cite_while_writing(Parameters(args(CLAIM)))
-            .await;
+        let text = plain_server(&mock).cite_text(Parameters(args(CLAIM))).await;
 
         assert!(text.contains("No usable candidates."), "{text}");
         assert!(
@@ -956,9 +1008,7 @@ mod tests {
         body["padding"] = json!("x".repeat(crate::constants::PROVIDER_BODY_LIMIT + 1024));
         mount_corpus(&mock, body).await;
 
-        let text = plain_server(&mock)
-            .cite_while_writing(Parameters(args(CLAIM)))
-            .await;
+        let text = plain_server(&mock).cite_text(Parameters(args(CLAIM))).await;
 
         assert!(
             text.starts_with("ERROR corpus : provider response exceeded"),
@@ -985,12 +1035,66 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let text = plain_server(&mock)
-            .cite_while_writing(Parameters(args(CLAIM)))
-            .await;
+        let text = plain_server(&mock).cite_text(Parameters(args(CLAIM))).await;
 
         assert!(text.starts_with("ERROR corpus : "), "{text}");
         assert!(!text.contains("No usable candidates"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_out_of_range_year_from_is_invalid_params_before_any_request() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let s = plain_server(&mock);
+
+        for year in [-5, 0, 999, 2101, 99_999, current_year() + 2] {
+            let mut request = args(CLAIM);
+            request.year_from = Some(year);
+            let outcome = s.cite_while_writing(Parameters(request)).await;
+            let error = match outcome {
+                Err(error) => error,
+                Ok(_) => panic!("year_from {year} was accepted"),
+            };
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{year}");
+            assert!(error.message.contains("year_from"), "{}", error.message);
+            assert!(
+                error.message.contains(&year.to_string()),
+                "{}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn the_year_comes_from_the_civil_calendar_not_a_mean_year() {
+        for (secs, year) in [
+            (0, 1970),
+            (946_684_799, 1999),
+            (946_684_800, 2000),
+            (1_709_164_800, 2024),
+            (1_704_067_199, 2023),
+            (1_704_067_200, 2024),
+            (1_798_761_599, 2026),
+            (1_798_761_600, 2027),
+            (4_102_444_800, 2100),
+        ] {
+            assert_eq!(year_of_unix_secs(secs), year, "{secs}");
+        }
+        assert!((2026..=2200).contains(&current_year()));
+    }
+
+    #[tokio::test]
+    async fn the_edges_of_year_from_are_accepted() {
+        let mock = MockServer::start().await;
+        mount_corpus(&mock, json!({"total": 0, "matches": []})).await;
+        let mut request = args(CLAIM);
+        request.year_from = Some(current_year() + 1);
+        let text = plain_server(&mock).cite_text(Parameters(request)).await;
+        assert!(text.contains("No usable candidates."), "{text}");
     }
 
     #[tokio::test]
@@ -1004,12 +1108,12 @@ mod tests {
         let s = plain_server(&mock);
 
         for claim in ["too short", "It is what it is, and so it is."] {
-            let text = s.cite_while_writing(Parameters(args(claim))).await;
+            let text = s.cite_text(Parameters(args(claim))).await;
             assert!(text.starts_with("CLIENT ERROR:"), "{claim}: {text}");
         }
         let mut request = args(CLAIM);
         request.limit = 11;
-        let text = s.cite_while_writing(Parameters(request)).await;
+        let text = s.cite_text(Parameters(request)).await;
         assert!(
             text.starts_with("CLIENT ERROR: limit must be between 1 and 10"),
             "{text}"
