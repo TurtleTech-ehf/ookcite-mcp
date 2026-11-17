@@ -205,11 +205,13 @@ pub(super) fn render_related(
 /// The request parameters every OpenAlex call carries, after `extra`.
 fn openalex_params(
     extra: &[(&'static str, String)],
-    email: &str,
+    email: Option<&str>,
     api_key: Option<&str>,
 ) -> Vec<(&'static str, String)> {
     let mut query = extra.to_vec();
-    query.push(("mailto", email.to_string()));
+    if let Some(email) = email {
+        query.push(("mailto", email.to_string()));
+    }
     if let Some(key) = api_key.map(str::trim).filter(|key| !key.is_empty()) {
         query.push(("api_key", key.to_string()));
     }
@@ -223,7 +225,7 @@ impl Server {
         extra: &[(&'static str, String)],
     ) -> Result<Option<Value>, String> {
         let api_key = std::env::var("OPENALEX_API_KEY").ok();
-        let query = openalex_params(extra, &contact_email(), api_key.as_deref());
+        let query = openalex_params(extra, contact_email().as_deref(), api_key.as_deref());
         self.discovery_json(SOURCE, url, &query).await
     }
 }
@@ -354,6 +356,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::tests::EnvGuard;
     use rmcp::model::{CallToolResult, ContentBlock};
     use rmcp::ServerHandler;
     use serde_json::json;
@@ -434,7 +437,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn without_a_contact_email_no_mailto_is_sent() {
+        let _email = EnvGuard::unset("OOKCITE_MCP_CONTACT_EMAIL");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/works/doi:{SEED_DOI}")))
+            .and(wiremock::matchers::query_param_is_missing("mailto"))
+            .and(wiremock::matchers::header("user-agent", "ookcite-mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(seed()))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/works"))
+            .and(wiremock::matchers::query_param_is_missing("mailto"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "meta": {"count": 1},
+                "results": [work("W201", "First Related Study", 2020, Some("10.5555/demo.rel1"), 41)]
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let text = server(&mock)
+            .related_papers(args(Relation::Related, 1))
+            .await;
+
+        assert!(text.contains("1. First Related Study (2020)"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_operators_address_is_sent_as_mailto_on_every_request() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(seed()))
+            .mount(&mock)
+            .await;
+
+        let _ = server(&mock)
+            .related_papers(args(Relation::References, 1))
+            .await;
+
+        let requests = mock.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2, "seed and list");
+        for request in requests {
+            assert!(
+                request
+                    .url
+                    .query_pairs()
+                    .any(|(key, value)| key == "mailto" && value == "ops@example.org"),
+                "{}",
+                request.url
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn related_works_come_back_in_openalex_rank_order() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         mount_seed(&mock).await;
         Mock::given(method("GET"))
@@ -483,6 +544,7 @@ mod tests {
 
     #[tokio::test]
     async fn references_use_the_referenced_list_and_flag_a_work_without_a_doi() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         mount_seed(&mock).await;
         Mock::given(method("GET"))
@@ -517,6 +579,7 @@ mod tests {
 
     #[tokio::test]
     async fn cited_by_asks_for_the_most_cited_citers_and_reports_the_total() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         mount_seed(&mock).await;
         Mock::given(method("GET"))
@@ -552,6 +615,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_listed_work_that_openalex_does_not_return_is_counted_not_hidden() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         mount_seed(&mock).await;
         Mock::given(method("GET"))
@@ -575,6 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_seed_with_no_related_works_makes_no_second_request() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(format!("/works/doi:{SEED_DOI}")))
@@ -606,6 +671,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_seed_is_not_found_and_reads_nothing_else() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(format!("/works/doi:{SEED_DOI}")))
@@ -633,6 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_429_on_the_seed_keeps_its_retry_after() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(
@@ -662,6 +729,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_402_on_the_second_request_is_reported_not_an_empty_list() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         mount_seed(&mock).await;
         Mock::given(method("GET"))
@@ -691,6 +759,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_limit_outside_one_to_twenty_five_is_refused_before_any_request() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200))
@@ -724,7 +793,7 @@ mod tests {
     #[test]
     fn the_key_and_contact_address_are_added_only_when_present() {
         let extra = [("select", "id".to_string())];
-        let keyless = openalex_params(&extra, "a@example.org", None);
+        let keyless = openalex_params(&extra, Some("a@example.org"), None);
         assert_eq!(
             keyless,
             vec![
@@ -732,9 +801,9 @@ mod tests {
                 ("mailto", "a@example.org".to_string())
             ]
         );
-        let blank = openalex_params(&extra, "a@example.org", Some("  "));
+        let blank = openalex_params(&extra, Some("a@example.org"), Some("  "));
         assert_eq!(blank, keyless);
-        let keyed = openalex_params(&extra, "a@example.org", Some(" k-123 "));
+        let keyed = openalex_params(&extra, Some("a@example.org"), Some(" k-123 "));
         assert_eq!(keyed.last(), Some(&("api_key", "k-123".to_string())));
     }
 

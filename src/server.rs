@@ -186,8 +186,6 @@ async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>, Pr
     }
 }
 
-const PROVIDER_USER_AGENT: &str = "ookcite-mcp (mailto:rgoswami@ieee.org)";
-
 struct DoiLookup {
     metadata: serde_json::Value,
     retrieved_at: Instant,
@@ -580,7 +578,10 @@ impl Server {
     fn provider_request(&self, url: &str) -> reqwest::RequestBuilder {
         self.provider_http
             .get(url)
-            .header(reqwest::header::USER_AGENT, PROVIDER_USER_AGENT)
+            .header(
+                reqwest::header::USER_AGENT,
+                discovery::provider_user_agent(),
+            )
             .header(reqwest::header::ACCEPT, "application/json")
     }
 

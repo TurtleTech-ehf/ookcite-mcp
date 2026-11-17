@@ -65,6 +65,7 @@ class Client:
     def __init__(self, base):
         env = dict(os.environ, OOKCITE_DEMO_MOCK_BASE=base)
         env.pop("OOKCITE_API_KEY", None)
+        env["OOKCITE_MCP_CONTACT_EMAIL"] = "demo@example.org"
         self.proc = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
         self.next_id = 0
 

@@ -10,7 +10,7 @@
 
 use serde_json::Value;
 
-use super::{read_capped_body, ProviderRead, Server, PROVIDER_USER_AGENT};
+use super::{read_capped_body, ProviderRead, Server};
 use crate::http_error::error_detail;
 
 mod check_bibliography;
@@ -18,17 +18,39 @@ mod cite_while_writing;
 mod open_access;
 mod related_papers;
 
-/// Contact address sent to Unpaywall and OpenAlex. Both ask for one so they
-/// can write to an operator whose traffic misbehaves. `OOKCITE_MCP_CONTACT_EMAIL`
-/// replaces it for a deployment that has its own.
-const DEFAULT_CONTACT_EMAIL: &str = "rgoswami@ieee.org";
-
-pub(super) fn contact_email() -> String {
+/// The operator's contact address from `OOKCITE_MCP_CONTACT_EMAIL`. Unpaywall
+/// requires one and OpenAlex and Crossref ask for one, so they can write to an
+/// operator whose traffic misbehaves. There is no default: the address must
+/// be the operator's own. A value that is not an address counts as unset.
+pub(super) fn contact_email() -> Option<String> {
     std::env::var("OOKCITE_MCP_CONTACT_EMAIL")
         .ok()
         .map(|value| value.trim().to_string())
-        .filter(|value| value.contains('@') && !value.contains(char::is_whitespace))
-        .unwrap_or_else(|| DEFAULT_CONTACT_EMAIL.to_string())
+        .filter(|value| {
+            let valid = value
+                .split_once('@')
+                .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'));
+            valid && !value.contains(char::is_whitespace)
+        })
+}
+
+/// User-Agent for every provider request. It names the operator's address when
+/// one is set, and carries no address otherwise.
+pub(super) fn provider_user_agent() -> String {
+    match contact_email() {
+        Some(email) => format!("ookcite-mcp (mailto:{email})"),
+        None => "ookcite-mcp".to_string(),
+    }
+}
+
+/// Tool text when a provider needs the operator's address and none is set.
+pub(super) fn contact_email_missing(source: &str) -> String {
+    format!(
+        "ERROR {source} : OOKCITE_MCP_CONTACT_EMAIL is not set to an email address. {source} \
+         requires a contact address with each request, and this server does not send one \
+         unless you set it. Set OOKCITE_MCP_CONTACT_EMAIL to your own address in the server's \
+         environment, then retry. No request was made."
+    )
 }
 
 #[derive(Clone)]
@@ -168,7 +190,7 @@ impl Server {
             self.discovery_http
                 .get(url)
                 .query(query)
-                .header(reqwest::header::USER_AGENT, PROVIDER_USER_AGENT)
+                .header(reqwest::header::USER_AGENT, provider_user_agent())
                 .header(reqwest::header::ACCEPT, "application/json")
         })
         .await;
@@ -492,5 +514,79 @@ mod provider_status_tests {
             .unwrap();
 
         assert_eq!(lookup.metadata["title"], "From the OokCite record");
+    }
+}
+
+#[cfg(test)]
+mod contact_email_tests {
+    use super::*;
+    use crate::server::tests::EnvGuard;
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn only_a_real_address_counts_and_there_is_no_default() {
+        for (value, expected) in [
+            (Some("ops@example.org"), Some("ops@example.org")),
+            (Some("  ops@example.org\n"), Some("ops@example.org")),
+            (Some(""), None),
+            (Some("ops"), None),
+            (Some("@example.org"), None),
+            (Some("ops@localhost"), None),
+            (Some("o ps@example.org"), None),
+            (None, None),
+        ] {
+            let _guard = match value {
+                Some(value) => EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", value),
+                None => EnvGuard::unset("OOKCITE_MCP_CONTACT_EMAIL"),
+            };
+            assert_eq!(contact_email().as_deref(), expected, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn the_user_agent_carries_the_operators_address_or_none() {
+        {
+            let _guard = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
+            assert_eq!(
+                provider_user_agent(),
+                "ookcite-mcp (mailto:ops@example.org)"
+            );
+        }
+        let _guard = EnvGuard::unset("OOKCITE_MCP_CONTACT_EMAIL");
+        assert_eq!(provider_user_agent(), "ookcite-mcp");
+    }
+
+    #[tokio::test]
+    async fn the_crossref_read_uses_the_same_user_agent() {
+        for (value, agent) in [
+            (
+                Some("ops@example.org"),
+                "ookcite-mcp (mailto:ops@example.org)",
+            ),
+            (None, "ookcite-mcp"),
+        ] {
+            let _guard = match value {
+                Some(value) => EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", value),
+                None => EnvGuard::unset("OOKCITE_MCP_CONTACT_EMAIL"),
+            };
+            let mock = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/works/10.5555%2Fua.1"))
+                .and(header("user-agent", agent))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"message": {"DOI": "10.5555/ua.1"}})),
+                )
+                .expect(1)
+                .mount(&mock)
+                .await;
+            let server = Server::new_with_base(mock.uri()).with_providers(mock.uri());
+
+            let record = server.provider_record("10.5555/ua.1").await.unwrap();
+
+            assert!(record.is_some(), "{value:?}");
+        }
     }
 }

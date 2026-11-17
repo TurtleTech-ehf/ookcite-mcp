@@ -10,7 +10,7 @@ use rmcp::{tool, tool_router};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{contact_email, doi_path, parse_doi_arg};
+use super::{contact_email, contact_email_missing, doi_path, parse_doi_arg};
 use crate::server::Server;
 
 /// How many alternative copies the answer lists after the best one.
@@ -233,7 +233,7 @@ fn source_line() -> String {
 impl Server {
     #[tool(
         name = "find_open_access_pdf",
-        description = "Find a legal open-access copy of a paper by DOI. Returns the best free PDF or landing-page link with its host (publisher or repository), version (published, accepted, or submitted), and licence, plus other legal copies. Call this when the user wants to read a paper they cannot get through a paywall. Only copies that Unpaywall records as open access are returned, and nothing is downloaded: the result is a link. NOT OPEN ACCESS means no free legal copy is recorded, which is a real answer and not a failure. A 429 or 402 from the provider is reported with its Retry-After and is not a miss. Use validate_doi first when the DOI itself is in doubt.",
+        description = "Find a legal open-access copy of a paper by DOI. Returns the best free PDF or landing-page link with its host (publisher or repository), version (published, accepted, or submitted), and licence, plus other legal copies. Call this when the user wants to read a paper they cannot get through a paywall. Unpaywall requires a contact address, so the server needs OOKCITE_MCP_CONTACT_EMAIL set to the operator's own email, and says so when it is not. Only copies that Unpaywall records as open access are returned, and nothing is downloaded: the result is a link. NOT OPEN ACCESS means no free legal copy is recorded, which is a real answer and not a failure. A 429 or 402 from the provider is reported with its Retry-After and is not a miss. Use validate_doi first when the DOI itself is in doubt.",
         annotations(
             title = "Find open-access PDF",
             read_only_hint = true,
@@ -252,13 +252,16 @@ impl Server {
         let Some(bases) = self.discovery_bases() else {
             return "ERROR Unpaywall : provider access is disabled".into();
         };
+        let Some(email) = contact_email() else {
+            return contact_email_missing("Unpaywall");
+        };
         let url = format!(
             "{}/v2/{}",
             bases.unpaywall.trim_end_matches('/'),
             doi_path(&doi)
         );
         match self
-            .discovery_json("Unpaywall", &url, &[("email", contact_email())])
+            .discovery_json("Unpaywall", &url, &[("email", email)])
             .await
         {
             Ok(Some(body)) if body["error"].as_bool() == Some(true) => {
@@ -276,10 +279,11 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::tests::EnvGuard;
     use rmcp::model::{CallToolResult, ContentBlock};
     use rmcp::ServerHandler;
     use serde_json::json;
-    use wiremock::matchers::{header_exists, method, path};
+    use wiremock::matchers::{header, header_exists, method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     const DOI: &str = "10.5555/demo.oa.2024";
@@ -336,6 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_the_best_pdf_other_copies_and_no_download_notice() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(format!("/v2/{DOI}")))
@@ -390,6 +395,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_landing_page_only_copy_says_there_is_no_direct_pdf() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v2/10.1000/green.1"))
@@ -424,6 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_closed_paper_is_a_not_open_access_answer_not_an_error() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v2/10.1038/187493a0"))
@@ -457,6 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_doi_is_not_found() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(404).set_body_json(json!({
@@ -479,6 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_doi_url_and_a_doi_prefix_reach_the_same_provider_path() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(format!("/v2/{DOI}")))
@@ -499,6 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_malformed_doi_is_refused_before_any_request() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200))
@@ -515,6 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_429_keeps_its_retry_after_and_is_not_a_miss() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(
@@ -547,7 +558,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn without_a_contact_email_it_says_so_and_makes_no_request() {
+        for value in [
+            None,
+            Some("not-an-email"),
+            Some("a b@example.org"),
+            Some("ops@localhost"),
+        ] {
+            let _email = match value {
+                Some(value) => EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", value),
+                None => EnvGuard::unset("OOKCITE_MCP_CONTACT_EMAIL"),
+            };
+            let mock = MockServer::start().await;
+            Mock::given(wiremock::matchers::any())
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount(&mock)
+                .await;
+
+            let text = server(&mock).find_open_access_pdf(args(DOI)).await;
+
+            assert!(
+                text.starts_with(
+                    "ERROR Unpaywall : OOKCITE_MCP_CONTACT_EMAIL is not set to an email address."
+                ),
+                "{value:?}: {text}"
+            );
+            assert!(text.contains("No request was made."), "{text}");
+            assert!(!text.contains("rgoswami"), "{text}");
+            let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+            crate::server::promote_upstream_failure(&mut result);
+            assert_eq!(result.is_error, Some(true));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_operators_address_is_sent_as_email_and_in_the_user_agent() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", " ops@example.org ");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/{DOI}")))
+            .and(|request: &Request| {
+                request
+                    .url
+                    .query_pairs()
+                    .any(|(key, value)| key == "email" && value == "ops@example.org")
+            })
+            .and(header("user-agent", "ookcite-mcp (mailto:ops@example.org)"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(unpaywall_gold()))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let text = server(&mock).find_open_access_pdf(args(DOI)).await;
+
+        assert!(text.starts_with("OPEN ACCESS doi:"), "{text}");
+    }
+
+    #[tokio::test]
     async fn a_402_keeps_its_retry_after_and_is_not_a_miss() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(
@@ -581,6 +651,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_restart_is_retried_then_reported_as_temporary() {
+        let _email = EnvGuard::set("OOKCITE_MCP_CONTACT_EMAIL", "ops@example.org");
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(503).insert_header("retry-after", "0"))

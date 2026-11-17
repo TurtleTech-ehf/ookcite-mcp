@@ -181,6 +181,7 @@ Optional env (stdio MCP, all clients):
 | `OOKCITE_MCP_READ_ONLY` | `1` hard-disables collection mutations (review / CI automation) |
 | `OOKCITE_MCP_ALLOW_MUTATE` | `0` denies mutations; unset or `1` allows (API key still required server-side) |
 | `OOKCITE_STARTUP_PROBES` | `1` runs auth + npm update checks on **stderr** before accepting MCP connections (default off for faster connect) |
+| `OOKCITE_MCP_CONTACT_EMAIL` | Your email address. Required by `find_open_access_pdf` (Unpaywall); sent as `mailto` to OpenAlex and in the User-Agent of provider requests. No default; nothing is sent when unset |
 | `OOKCITE_API_KEY_COMMAND` | Command printing the key on stdout; stdin is closed |
 | `OOKCITE_API_KEY_FILE` | Owner-protected file whose first line is the key |
 | `OOKCITE_API_KEY_TIMEOUT` | Seconds allowed for credential retrieval (default 10) |
@@ -416,9 +417,17 @@ These three require an Academic or Business plan.
 `find_open_access_pdf` and `related_papers` read two public indexes next to the
 OokCite API: Unpaywall for open-access locations and OpenAlex for the citation
 graph. They return links and metadata, never files. Those calls go out over
-https to those two hosts only, with redirects pinned to the same hosts, and a response is read to at most
-1 MiB. They send a contact address, `rgoswami@ieee.org` by default, because
-both services ask for one; set `OOKCITE_MCP_CONTACT_EMAIL` to use your own.
+https to those two hosts only, with redirects pinned to the same hosts, and a
+response is read to at most 1 MiB.
+
+Set `OOKCITE_MCP_CONTACT_EMAIL` to your own email address. Unpaywall requires a
+contact address with every request, so `find_open_access_pdf` returns an error
+that names this variable, and makes no request, until it is set. OpenAlex and
+Crossref ask for an address too: when it is set it is sent as `mailto` to
+OpenAlex and in the User-Agent of every Crossref, DataCite, Zenodo, doi.org,
+Unpaywall and OpenAlex request. When it is unset, no address is sent and
+`related_papers` and the other tools still work. There is no default address;
+the server never sends one that is not yours.
 
 Every tool takes a closed JSON object: an unknown field is refused, and each
 field carries its type, length, range, or pattern in the tool schema.
@@ -576,8 +585,9 @@ Metadata only. This does not compare titles, authors, or pages with the record: 
 Unpaywall and OpenAlex. A build with the off-by-default `demo-mock` feature
 sends all of its calls to the host named in `OOKCITE_DEMO_MOCK_BASE`; a normal
 build ignores that variable and the feature is never part of a release.
-`demo/mcp_tools_demo.py` starts both, speaks MCP over stdio, and calls each new
-tool once:
+`demo/mcp_tools_demo.py` starts both, sets `OOKCITE_MCP_CONTACT_EMAIL` to
+`demo@example.org` for the server it starts, speaks MCP over stdio, and calls
+each new tool once:
 
 ```
 cargo build --features demo-mock
