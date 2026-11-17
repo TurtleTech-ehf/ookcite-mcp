@@ -322,7 +322,7 @@ fn doi_from_fields(fields: &HashMap<String, String>) -> (Option<String>, Option<
     (None, None)
 }
 
-fn clean_doi(raw: &str) -> Option<String> {
+pub(crate) fn clean_doi(raw: &str) -> Option<String> {
     let glued: String = raw.split_whitespace().collect();
     let trimmed = glued.trim().trim_end_matches(['.', ',', ';', ')']);
     let lower = trimmed.to_ascii_lowercase();

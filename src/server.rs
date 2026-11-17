@@ -50,6 +50,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Instant;
 
+mod discovery;
+
 /// Process-wide identity-safe exact-DOI cache (shared across Server clones).
 fn shared_doi_cache() -> &'static DoiResponseCache {
     static CACHE: OnceLock<DoiResponseCache> = OnceLock::new();
@@ -203,6 +205,10 @@ pub struct Server {
     pub(crate) http: reqwest::Client,
     /// doi.org, Crossref, DataCite, and Zenodo. Redirects stay on their hosts.
     provider_http: reqwest::Client,
+    /// Unpaywall and OpenAlex, for the discovery tools. Absent in unit
+    /// tests until [`Server::with_discovery`] points them at a mock.
+    discovery_http: reqwest::Client,
+    discovery: Option<discovery::DiscoveryBases>,
     api_base: String,
     doi_cache: DoiResponseCache,
     /// Crossref, DataCite, Zenodo, and doi.org. Absent in unit tests so they
@@ -221,10 +227,15 @@ impl Server {
         // The bearer is attached per request. A default header would leak a
         // process key onto HTTP calls that did not present one.
         let providers = ProviderBases::production();
+        let discovery = discovery::DiscoveryBases::production();
         Self {
-            tool_router: Self::tool_router() + Self::ridley_tool_router(),
+            tool_router: Self::tool_router()
+                + Self::ridley_tool_router()
+                + discovery::discovery_routers(),
             http: build_api_client(30, reqwest::header::HeaderMap::new()),
             provider_http: provider_client(Some(&providers), 30),
+            discovery_http: discovery::discovery_client(Some(&discovery), 30),
+            discovery: Some(discovery),
             api_base: api_base_url(),
             doi_cache: shared_doi_cache().clone(),
             providers: Some(providers),
@@ -3968,9 +3979,13 @@ impl ServerHandler for Server {
 impl Server {
     fn new_with_base(api_base: String) -> Self {
         Self {
-            tool_router: Self::tool_router() + Self::ridley_tool_router(),
+            tool_router: Self::tool_router()
+                + Self::ridley_tool_router()
+                + discovery::discovery_routers(),
             http: build_api_client(5, reqwest::header::HeaderMap::new()),
             provider_http: provider_client(None, 5),
+            discovery_http: discovery::discovery_client(None, 5),
+            discovery: None,
             api_base,
             doi_cache: DoiResponseCache::with_default_ttl(),
             providers: None,

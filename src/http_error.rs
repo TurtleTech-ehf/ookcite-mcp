@@ -3,6 +3,8 @@
 use crate::constants::rate_limit_hint;
 
 const MAX_ERROR_BODY_CHARS: usize = 120;
+/// Enough for four bytes per kept character plus a JSON wrapper.
+const MAX_ERROR_BODY_READ_BYTES: usize = 4096;
 const MAX_RETRY_AFTER_CHARS: usize = 128;
 
 /// Extract a useful error message from a failed HTTP response.
@@ -13,7 +15,7 @@ const MAX_RETRY_AFTER_CHARS: usize = 128;
 pub async fn error_detail(resp: reqwest::Response) -> String {
     let status = resp.status();
     let retry_after = retry_after_header(resp.headers());
-    let body = resp.text().await.unwrap_or_default();
+    let body = read_error_body(resp).await;
     let mut detail = format_error_detail(status, &body);
     if let Some(retry_after) = retry_after {
         detail.push_str(" (Retry-After: ");
@@ -23,11 +25,30 @@ pub async fn error_detail(resp: reqwest::Response) -> String {
     detail
 }
 
+/// The start of an error body. Only the first [`MAX_ERROR_BODY_CHARS`] characters
+/// reach the tool text, so a hostile or broken upstream that streams without
+/// end is not read past a few kilobytes.
+async fn read_error_body(mut resp: reqwest::Response) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() < MAX_ERROR_BODY_READ_BYTES {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = MAX_ERROR_BODY_READ_BYTES - buf.len();
+                buf.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
+            _ => break,
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 pub async fn classify_lookup_doi_failure(resp: reqwest::Response, doi: &str) -> String {
     let status = resp.status();
     let detail = error_detail(resp).await;
     if status.as_u16() == 429 {
         format!("RATE LIMITED {doi} : {detail}\n{}", rate_limit_hint())
+    } else if status.as_u16() == 402 {
+        format!("PAYMENT REQUIRED {doi} : {detail}")
     } else if matches!(status.as_u16(), 401 | 403) {
         format!("ACCESS DENIED {doi} : {detail}")
     } else if matches!(status.as_u16(), 408 | 504) {
@@ -60,7 +81,7 @@ pub async fn classify_collection_create_failure(resp: reqwest::Response, name: &
 /// A status the caller must see as itself. A miss and a throttle are not
 /// the same answer, and a restart's 503 is not a missing citation.
 pub fn is_promoted_status(status: reqwest::StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 429 | 500..=599)
+    matches!(status.as_u16(), 402 | 408 | 429 | 500..=599)
 }
 
 /// Tool text for a failed response. Promoted statuses name the failure.
@@ -88,6 +109,7 @@ pub async fn prefixed_failure(resp: reqwest::Response, prefix: &str) -> String {
 
 fn promoted_failure_text(status: reqwest::StatusCode, detail: &str) -> String {
     match status.as_u16() {
+        402 => format!("PAYMENT REQUIRED: {detail}"),
         429 => format!("RATE LIMITED: {detail}\n{}", rate_limit_hint()),
         408 | 504 => format!("TIMEOUT: {detail}"),
         500..=599 => format!("TEMPORARY ERROR: {detail}"),
@@ -123,7 +145,7 @@ pub fn failure_rank(text: &str) -> u8 {
         1
     } else if text.contains("TEMPORARY ERROR") {
         2
-    } else if text.contains("ACCESS DENIED") {
+    } else if text.contains("PAYMENT REQUIRED") || text.contains("ACCESS DENIED") {
         3
     } else {
         4
@@ -134,6 +156,7 @@ fn is_severe_lookup(text: &str) -> bool {
     text.contains("RATE LIMITED")
         || text.contains("TIMEOUT")
         || text.contains("TEMPORARY ERROR")
+        || text.contains("PAYMENT REQUIRED")
         || text.contains("ACCESS DENIED")
         || text.starts_with("ERROR ")
 }
@@ -149,6 +172,8 @@ pub struct UpstreamFailureReport {
 pub fn upstream_failure_report(text: &str) -> Option<UpstreamFailureReport> {
     let (kind, http_status, marker) = if text.contains("RATE LIMITED") {
         ("rate_limited", Some(429), Some("RATE LIMITED"))
+    } else if text.contains("PAYMENT REQUIRED") {
+        ("payment_required", Some(402), Some("PAYMENT REQUIRED"))
     } else if text.contains("TIMEOUT") {
         ("timeout", Some(timeout_status(text)), Some("TIMEOUT"))
     } else if text.contains("TEMPORARY ERROR") {
@@ -424,5 +449,95 @@ mod timeout_status_regression_tests {
             super::upstream_failure_report("TIMEOUT: 408 Request Timeout: request expired")
                 .unwrap();
         assert_eq!(report.http_status, Some(408));
+    }
+}
+
+#[cfg(test)]
+mod payment_required_tests {
+    use super::*;
+
+    fn response(status: u16, retry_after: Option<&str>, body: &str) -> reqwest::Response {
+        let mut builder = http::Response::builder().status(status);
+        if let Some(retry_after) = retry_after {
+            builder = builder.header("retry-after", retry_after);
+        }
+        reqwest::Response::from(builder.body(body.to_string()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_402_is_named_and_keeps_its_retry_after() {
+        let text = failure_text(
+            response(402, Some("3600"), r#"{"message":"plan required"}"#),
+            "Lookup failed",
+        )
+        .await;
+        assert_eq!(
+            text,
+            "PAYMENT REQUIRED: 402 Payment Required: plan required (Retry-After: 3600)"
+        );
+        let report = upstream_failure_report(&text).unwrap();
+        assert_eq!(report.kind, "payment_required");
+        assert_eq!(report.http_status, Some(402));
+        assert_eq!(report.retry_after.as_deref(), Some("3600"));
+    }
+
+    #[tokio::test]
+    async fn a_doi_lookup_402_is_not_a_client_error() {
+        let text = classify_lookup_doi_failure(response(402, None, "quota"), "10.1/x").await;
+        assert!(text.starts_with("PAYMENT REQUIRED 10.1/x : 402"), "{text}");
+        assert_eq!(
+            upstream_failure_report(&text).unwrap().kind,
+            "payment_required"
+        );
+        assert!(severe_lookup_message(&[text]).is_some());
+    }
+
+    #[test]
+    fn a_402_is_found_anywhere_in_the_text_like_a_429() {
+        let text = "[k] UNCHECKED doi:10.1/x: PAYMENT REQUIRED api.crossref.org : 402 Payment Required (Retry-After: 60)";
+        let report = upstream_failure_report(text).unwrap();
+        assert_eq!(report.kind, "payment_required");
+        assert_eq!(report.http_status, Some(402));
+        assert_eq!(report.retry_after.as_deref(), Some("60"));
+        let throttle = text.replace("PAYMENT REQUIRED", "RATE LIMITED");
+        assert_eq!(
+            upstream_failure_report(&throttle).unwrap().kind,
+            "rate_limited"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_endless_error_body_is_not_read_to_its_end() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let head = "HTTP/1.1 502 Bad Gateway\r\ntransfer-encoding: chunked\r\n\r\n";
+            if socket.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let chunk = format!("400\r\n{}\r\n", "x".repeat(1024));
+            while socket.write_all(chunk.as_bytes()).await.is_ok() {}
+        });
+        let resp = reqwest::get(format!("http://{addr}/")).await.unwrap();
+
+        let detail = tokio::time::timeout(std::time::Duration::from_secs(10), error_detail(resp))
+            .await
+            .expect("error_detail kept reading an endless body");
+
+        assert_eq!(
+            detail.chars().filter(|c| *c == 'x').count(),
+            MAX_ERROR_BODY_CHARS
+        );
+    }
+
+    #[test]
+    fn a_numbered_batch_line_still_reports_a_402() {
+        let report =
+            upstream_failure_report("[3] PAYMENT REQUIRED 10.1/x : 402 Payment Required").unwrap();
+        assert_eq!(report.http_status, Some(402));
     }
 }

@@ -6,7 +6,8 @@
 
 Give MCP-capable tools the ability to validate DOIs, format citations, manage
 bibliography collections, and catch fabricated references. Returns citation
-metadata only -- not PDFs or full-text articles. Desktop clients can run it
+metadata only -- not PDFs or full-text articles. `find_open_access_pdf` returns
+a link to a legal open-access copy; the server never downloads a file. Desktop clients can run it
 over standard input and output. Remote clients use
 `https://ookcite-api.turtletech.us/mcp`.
 
@@ -296,6 +297,14 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 | `list_styles`       | Page through the full CSL style list          |
 | `group_cite`        | Generate grouped in-text markers (e.g. [1-3]) |
 
+### Discovery
+
+| Tool                   | Purpose                                                 |
+| ---------------------- | ------------------------------------------------------- |
+| `find_open_access_pdf` | Link to a legal open-access copy of a DOI (Unpaywall)   |
+
+See [Discovery tools](#discovery-tools) for inputs, errors, and example calls.
+
 ### Account
 
 | Tool     | Purpose                                                  |
@@ -398,6 +407,57 @@ Merge and batch-move require an Academic or Business plan.
 | `normalize_bibliography`  | Re-render BibTeX or RIS as canonical BibTeX   |
 
 These three require an Academic or Business plan.
+
+## Discovery tools
+
+These tools read two public indexes next to the OokCite API: Unpaywall for
+open-access locations and OpenAlex for the citation graph. They return links
+and metadata, never files. Calls go out over https to those two hosts only,
+with redirects pinned to the same hosts, and a response is read to at most
+1 MiB. They send a contact address, `rgoswami@ieee.org` by default, because
+both services ask for one; set `OOKCITE_MCP_CONTACT_EMAIL` to use your own.
+
+Every tool takes a closed JSON object: an unknown field is refused, and each
+field carries its type, length, range, or pattern in the tool schema.
+
+Errors keep their identity. A `402 Payment Required` or `429 Too Many
+Requests` from a provider or from OokCite comes back as an error result that
+starts with `PAYMENT REQUIRED` or `RATE LIMITED`, carries the `Retry-After`
+value the server sent, and sets `structuredContent.http_status` and
+`structuredContent.retry_after`. A throttle is never reported as "not found".
+
+### find_open_access_pdf
+
+Input: `{"doi": "<bare DOI, doi: form, or doi.org URL>"}`.
+
+Only locations Unpaywall records as open access are returned, each with its
+host (publisher or repository), version (published, accepted, or submitted),
+and licence. `NOT OPEN ACCESS` means no free legal copy is recorded; it is an
+answer, not an error. The tool does not query shadow libraries.
+
+Example (mock data):
+
+```
+> find_open_access_pdf {"doi": "10.5555/demo.oa.2024"}
+OPEN ACCESS doi:10.5555/demo.oa.2024
+Title: A Mock Study of Open Access Links
+Venue: Journal of Mock Results (2024)
+OA status: gold
+Best copy (PDF): https://journals.example.org/article/demo.oa.2024.pdf
+Landing page: https://journals.example.org/article/demo.oa.2024
+  host: publisher | version: published version | licence: cc-by
+Other legal copies (1):
+  - page https://repo.example.edu/handle/demo/2024 (host: repository (Example University) | version: published version | licence: not stated)
+Source: Unpaywall. Links only: no file was downloaded, and no shadow library was consulted.
+```
+
+A throttled call:
+
+```
+> find_open_access_pdf {"doi": "10.5555/demo.oa.2024"}
+RATE LIMITED Unpaywall : 429 Too Many Requests: Too many requests (Retry-After: 120)
+This limit belongs to Unpaywall, not to OokCite. Wait for Retry-After before calling again.
+```
 
 ## Plans & Pricing
 
