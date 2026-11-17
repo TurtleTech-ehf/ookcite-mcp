@@ -755,6 +755,8 @@ impl Server {
         &self,
         dois: &[String],
     ) -> Result<Vec<serde_json::Value>, String> {
+        let normalized = crate::collection_entries::accepted_dois(dois)?;
+        let dois = normalized.as_slice();
         let has_key = inbound_auth::has_api_key();
         let quota = self.fetch_me_quota().await;
         let (member_dois, member_titles) = if has_key {
@@ -936,10 +938,14 @@ impl Server {
         annotations(title = "Validate DOI", read_only_hint = true, idempotent_hint = true)
     )]
     async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
-        match self.lookup_doi_with_freshness(&args.doi).await {
+        let doi = match crate::collection_entries::accepted_doi(&args.doi) {
+            Ok(doi) => doi,
+            Err(error) => return error,
+        };
+        match self.lookup_doi_with_freshness(&doi).await {
             Ok(lookup) => format!(
                 "{}\n{}",
-                format_validate_doi(&args.doi, &lookup.metadata, &args.claim),
+                format_validate_doi(&doi, &lookup.metadata, &args.claim),
                 lookup.freshness_line()
             ),
             Err(msg) => msg,
@@ -1307,7 +1313,11 @@ impl Server {
         )
     )]
     async fn format_citation(&self, Parameters(args): Parameters<FormatArgs>) -> String {
-        let meta = match self.lookup_doi_json_cached(&args.doi).await {
+        let doi = match crate::collection_entries::accepted_doi(&args.doi) {
+            Ok(doi) => doi,
+            Err(error) => return error,
+        };
+        let meta = match self.lookup_doi_json_cached(&doi).await {
             Ok(meta) => meta,
             Err(error) => return error,
         };
@@ -1390,6 +1400,10 @@ impl Server {
         )
     )]
     async fn verify_references(&self, Parameters(args): Parameters<VerifyArgs>) -> String {
+        let dois = match crate::collection_entries::accepted_dois(&args.dois) {
+            Ok(dois) => dois,
+            Err(error) => return error,
+        };
         let has_key = inbound_auth::has_api_key();
         let quota = self.fetch_me_quota().await;
         let (mut member_dois, member_titles) = if has_key {
@@ -1399,7 +1413,7 @@ impl Server {
         };
         // A claim needs the resolved record. Membership knows the DOI is
         // in a collection, not that the year and pages agree.
-        for (index, doi) in args.dois.iter().enumerate() {
+        for (index, doi) in dois.iter().enumerate() {
             if args
                 .claims
                 .get(index)
@@ -1408,13 +1422,7 @@ impl Server {
                 member_dois.remove(&normalize_doi_token(doi));
             }
         }
-        let pf = plan_metered_batch(
-            &args.dois,
-            &member_dois,
-            &member_titles,
-            quota.as_ref(),
-            has_key,
-        );
+        let pf = plan_metered_batch(&dois, &member_dois, &member_titles, quota.as_ref(), has_key);
         if let Some(msg) = pf.refuse_message {
             let mut out = vec![msg];
             out.extend(format_member_valid_lines(&pf.members));
@@ -1572,6 +1580,11 @@ impl Server {
         )
     )]
     async fn batch_format(&self, Parameters(args): Parameters<BatchArgs>) -> String {
+        if let Err(error) =
+            crate::collection_entries::screen_shaped_dois(args.citations.iter().map(String::as_str))
+        {
+            return error;
+        }
         let has_key = inbound_auth::has_api_key();
         let quota = self.fetch_me_quota().await;
         let (member_dois, member_titles) = if has_key {
@@ -1781,6 +1794,9 @@ impl Server {
         if let Some(msg) = block_mutate() {
             return msg;
         }
+        if let Err(error) = crate::collection_entries::screen_shaped_doi(&args.query) {
+            return error;
+        }
         let col_id = match self.resolve_or_create_collection(&args.collection).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -1788,8 +1804,12 @@ impl Server {
 
         let metadata = {
             let q = args.query.trim();
-            if q.starts_with("10.") {
-                match self.metadata_for_query(q, args.use_live_queries).await {
+            if crate::collection_entries::doi_shaped(q) {
+                let doi = match crate::collection_entries::accepted_doi(q) {
+                    Ok(doi) => doi,
+                    Err(error) => return error,
+                };
+                match self.metadata_for_query(&doi, args.use_live_queries).await {
                     Ok(metadata) => metadata,
                     Err(error) => return error,
                 }
@@ -1863,8 +1883,16 @@ impl Server {
             return msg;
         }
         let library_id = args.library_id.trim();
-        let source_ref = args.source_ref.trim();
-        let idempotency_key = args.idempotency_key.trim();
+        let source_ref = match crate::collection_entries::accepted_doi_or_text(&args.source_ref) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let mut csl = args.csl.clone();
+        if let Err(error) = crate::collection_entries::rewrite_csl_dois(&mut csl) {
+            return error;
+        }
+        let idempotency_key =
+            crate::collection_entries::bounded_idempotency_key(args.idempotency_key.trim());
         if library_id.is_empty() || source_ref.is_empty() || idempotency_key.is_empty() {
             return "library_id, source_ref, and idempotency_key are required".into();
         }
@@ -1872,7 +1900,7 @@ impl Server {
             return "csl must be a CSL-JSON object".into();
         }
         let body = serde_json::json!({
-            "csl": args.csl,
+            "csl": csl,
             "source_ref": source_ref,
             "idempotency_key": idempotency_key,
         });
@@ -2183,22 +2211,27 @@ impl Server {
         query: &str,
         use_live_queries: bool,
     ) -> Result<Option<serde_json::Value>, String> {
-        let q = query.trim();
-        if q.starts_with("10.") {
+        let compact = crate::collection_entries::compact_tool_doi(query);
+        if crate::collection_entries::doi_shaped(&compact) {
+            let q = match crate::collection_entries::accepted_doi(query) {
+                Ok(doi) => doi,
+                Err(error) => return Err(error),
+            };
             // A DOI lookup only reads. The same three-attempt schedule as a
             // collection list keeps a restart from dropping the citation
             // before a batch add is posted.
-            let r = lookup_doi_with_retry(&self.http, &self.api_base, q).await;
+            let r = lookup_doi_with_retry(&self.http, &self.api_base, &q).await;
             return match r {
                 Ok(r) if r.status().is_success() => Ok(Some(
                     r.json::<serde_json::Value>().await.unwrap_or_default(),
                 )),
                 Ok(r) if r.status().as_u16() == 404 => Ok(None),
-                Ok(r) => Err(classify_lookup_doi_failure(r, q).await),
+                Ok(r) => Err(classify_lookup_doi_failure(r, &q).await),
                 Err(error) => Err(format!("ERROR {q} : {error}")),
             };
         }
 
+        let q = query.trim();
         let mut failures = Vec::new();
         let resolve = crate::resolve_helpers::send_idempotent_with_retry(|| {
             self.request(endpoints::RESOLVE, &[])
@@ -2601,6 +2634,9 @@ impl Server {
         )
     )]
     async fn check_duplicates(&self, Parameters(args): Parameters<CheckDuplicatesArgs>) -> String {
+        if let Err(error) = crate::collection_entries::screen_shaped_doi(&args.query) {
+            return error;
+        }
         let col_id = match self.resolve_collection_id(&args.collection).await {
             Ok(id) => id,
             Err(e) => return e,
@@ -2656,6 +2692,11 @@ impl Server {
     async fn batch_add_to_collection(&self, Parameters(args): Parameters<BatchAddArgs>) -> String {
         if let Some(msg) = block_mutate() {
             return msg;
+        }
+        if let Err(error) =
+            crate::collection_entries::screen_shaped_dois(args.queries.iter().map(String::as_str))
+        {
+            return error;
         }
         let col_id = match self.resolve_or_create_collection(&args.collection).await {
             Ok(id) => id,
@@ -3353,6 +3394,11 @@ impl Server {
         )
     )]
     async fn batch_resolve(&self, Parameters(args): Parameters<BatchResolveArgs>) -> String {
+        if let Err(error) =
+            crate::collection_entries::screen_shaped_dois(args.citations.iter().map(String::as_str))
+        {
+            return error;
+        }
         if args.citations.is_empty() {
             return "No citations supplied.".into();
         }
@@ -3623,10 +3669,18 @@ impl Server {
     )]
     async fn update_entry_metadata(
         &self,
-        Parameters(args): Parameters<UpdateEntryMetadataArgs>,
+        Parameters(mut args): Parameters<UpdateEntryMetadataArgs>,
     ) -> String {
         if let Some(msg) = block_mutate() {
             return msg;
+        }
+        if let Some(doi) = args.doi.clone() {
+            if !doi.trim().is_empty() {
+                match crate::collection_entries::accepted_doi(&doi) {
+                    Ok(doi) => args.doi = Some(doi),
+                    Err(error) => return error,
+                }
+            }
         }
         if !entry_metadata_overrides_present(&args) {
             return "Nothing to update. Provide at least one field to set or clear.".into();
@@ -4341,6 +4395,136 @@ mod tests {
         assert!(a.contains("VALID") && a.contains("Ruby"), "first: {a}");
         assert!(b.contains("VALID") && b.contains("Ruby"), "second: {b}");
         // second must not trigger another POST — enforced by mock expect(1)
+    }
+
+    #[tokio::test]
+    async fn doi_tools_reject_an_overlong_doi_without_a_request() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let server = Server::new_with_base(mock.uri());
+        let doi = format!("https://doi.org/10.1000/{}", "a".repeat(505));
+        let bare = crate::collection_entries::compact_tool_doi(&doi);
+        assert_eq!(bare.len(), 513);
+        let mut answers = Vec::new();
+        answers.push(
+            server
+                .validate_doi(Parameters(DoiArgs {
+                    doi: doi.clone(),
+                    claim: BibliographicClaim::default(),
+                }))
+                .await,
+        );
+        answers.push(
+            server
+                .format_citation(Parameters(FormatArgs {
+                    doi: doi.clone(),
+                    style: "apa".into(),
+                }))
+                .await,
+        );
+        answers.push(
+            server
+                .group_cite(Parameters(GroupCiteArgs {
+                    dois: vec![doi.clone()],
+                    style: "apa".into(),
+                }))
+                .await,
+        );
+        answers.push(
+            server
+                .verify_references(Parameters(VerifyArgs {
+                    dois: vec![doi.clone()],
+                    ..Default::default()
+                }))
+                .await,
+        );
+        answers.push(
+            server
+                .generate_citation_keys(Parameters(GenerateCitationKeysArgs {
+                    dois: vec![doi.clone()],
+                }))
+                .await,
+        );
+        answers.push(
+            server
+                .batch_format(Parameters(BatchArgs {
+                    citations: vec![doi.clone()],
+                    style: "apa".into(),
+                    use_live_queries: false,
+                }))
+                .await,
+        );
+        answers.push(
+            server
+                .add_to_collection(Parameters(AddToCollectionArgs {
+                    collection: "Lab".into(),
+                    query: doi.clone(),
+                    use_live_queries: false,
+                }))
+                .await,
+        );
+        answers.push(
+            server
+                .check_duplicates(Parameters(CheckDuplicatesArgs {
+                    collection: "Lab".into(),
+                    query: doi.clone(),
+                    use_live_queries: false,
+                }))
+                .await,
+        );
+        answers.push(
+            server
+                .batch_add_to_collection(Parameters(BatchAddArgs {
+                    collection: "Lab".into(),
+                    queries: vec![doi.clone()],
+                    use_live_queries: false,
+                }))
+                .await,
+        );
+        answers.push(
+            server
+                .batch_resolve(Parameters(BatchResolveArgs {
+                    citations: vec![doi.clone()],
+                    use_live_queries: false,
+                }))
+                .await,
+        );
+        answers.push(
+            server
+                .save_to_ridley(Parameters(SaveToRidleyArgs {
+                    library_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+                    csl: serde_json::json!({"title": "Paper", "DOI": doi}),
+                    source_ref: doi.clone(),
+                    idempotency_key: "ookcite:short".into(),
+                }))
+                .await,
+        );
+        answers.push(
+            server
+                .update_entry_metadata(Parameters(UpdateEntryMetadataArgs {
+                    collection: "Lab".into(),
+                    entry_id: "entry-1".into(),
+                    doi: Some(doi),
+                    ..Default::default()
+                }))
+                .await,
+        );
+        assert_eq!(answers.len(), 12, "one assertion per DOI-taking tool");
+        for answer in &answers {
+            assert!(
+                answer.starts_with("CLIENT ERROR") && answer.contains("512"),
+                "{answer}"
+            );
+        }
     }
 
     #[tokio::test]

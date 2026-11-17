@@ -18,6 +18,105 @@ pub fn looks_like_doi_token(raw: &str) -> bool {
     n.starts_with("10.") && n.contains('/')
 }
 
+/// A DOI argument, after whitespace and a resolver prefix are removed.
+pub const DOI_MAX_BYTES: usize = 512;
+
+/// Strip whitespace and a `doi:` or doi.org prefix. The remainder keeps its
+/// case. Length is measured on this value, not on the URL wrapped around it.
+pub fn compact_tool_doi(raw: &str) -> String {
+    let value: String = raw.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let lower = value.to_ascii_lowercase();
+    for prefix in [
+        "https://doi.org/",
+        "http://doi.org/",
+        "https://dx.doi.org/",
+        "http://dx.doi.org/",
+        "doi:",
+    ] {
+        if lower.starts_with(prefix) {
+            return value[prefix.len()..].to_string();
+        }
+    }
+    value
+}
+
+pub fn doi_shaped(raw: &str) -> bool {
+    let compact = compact_tool_doi(raw);
+    compact.starts_with("10.") && compact.contains('/')
+}
+
+/// One forwarded DOI. A value that is not a DOI, or one longer than 512
+/// bytes, is a client error and must not be sent upstream.
+pub fn accepted_doi(raw: &str) -> Result<String, String> {
+    let doi = compact_tool_doi(raw);
+    if doi_shaped(&doi) && doi.len() > DOI_MAX_BYTES {
+        return Err("CLIENT ERROR: DOI is longer than 512 bytes.".into());
+    }
+    if !doi.starts_with("10.") || !doi.contains('/') {
+        return Err(format!("CLIENT ERROR: Invalid DOI '{raw}'."));
+    }
+    Ok(doi)
+}
+
+pub fn accepted_dois(dois: &[String]) -> Result<Vec<String>, String> {
+    dois.iter().map(|doi| accepted_doi(doi)).collect()
+}
+
+/// Leave free text alone. A DOI-shaped value still has to pass [`accepted_doi`].
+pub fn screen_shaped_doi(raw: &str) -> Result<(), String> {
+    if doi_shaped(raw) {
+        accepted_doi(raw)?;
+    }
+    Ok(())
+}
+
+pub fn screen_shaped_dois<'a>(values: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    for value in values {
+        screen_shaped_doi(value)?;
+    }
+    Ok(())
+}
+
+/// A DOI-shaped reference is canonicalized. Anything else is trimmed only.
+pub fn accepted_doi_or_text(raw: &str) -> Result<String, String> {
+    if doi_shaped(raw) {
+        accepted_doi(raw)
+    } else {
+        Ok(raw.trim().to_string())
+    }
+}
+
+/// A key longer than the dashboard's 200 bytes is the sha256 of the whole
+/// key. Cutting it at 200 would treat two DOIs that share that prefix as one.
+pub fn bounded_idempotency_key(raw: &str) -> String {
+    let key: String = raw.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if key.len() <= 200 {
+        return key;
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(key.as_bytes());
+    format!("ookcite:{digest:x}")
+}
+
+pub fn rewrite_csl_dois(csl: &mut serde_json::Value) -> Result<(), String> {
+    let Some(obj) = csl.as_object_mut() else {
+        return Ok(());
+    };
+    for key in ["DOI", "doi"] {
+        let current = match obj.get(key) {
+            Some(serde_json::Value::String(text)) if doi_shaped(text) => Some(text.clone()),
+            _ => None,
+        };
+        if let Some(text) = current {
+            obj.insert(
+                key.to_string(),
+                serde_json::Value::String(accepted_doi(&text)?),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Canonical entry id from a collection entry object (`id` field, else `doi:<doi>`).
 pub fn entry_canonical_id(entry: &serde_json::Value) -> Option<String> {
     if let Some(id) = entry["id"].as_str().filter(|s| !s.is_empty()) {

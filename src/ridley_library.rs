@@ -576,6 +576,10 @@ impl Server {
     }
 
     async fn remote_add_by_doi(&self, args: &AddByDoiArgs) -> String {
+        let doi = match crate::collection_entries::accepted_doi(&args.doi) {
+            Ok(doi) => doi,
+            Err(error) => return error,
+        };
         if !inbound_auth::has_api_key() {
             return inbound_auth::auth_required_text().into();
         }
@@ -603,21 +607,12 @@ impl Server {
             1 => matches.remove(0),
             _ => return "More than one Ridley library matched; pass its library id.".into(),
         };
-        let doi = args
-            .doi
-            .trim()
-            .trim_start_matches("https://doi.org/")
-            .trim_start_matches("doi:")
-            .trim();
-        if !doi.starts_with("10.") || !doi.contains('/') {
-            return format!("Invalid DOI '{}'.", args.doi);
-        }
         let response = self
             .dashboard_request(
                 "POST",
                 &format!("/ridley/libraries/{}/inbox", encode(&library.library_id)),
             )
-            .json(&inbox_enqueue_body(&library.library_id, doi))
+            .json(&inbox_enqueue_body(&library.library_id, &doi))
             .send()
             .await;
         match response {
@@ -746,22 +741,15 @@ fn encode(value: &str) -> String {
 /// `source`, `source_ref`, and `idempotency_key`. A top-level `doi` is
 /// rejected. The DOI lives inside `csl`.
 fn inbox_enqueue_body(library_id: &str, doi: &str) -> serde_json::Value {
-    let source_ref: String = doi.chars().take(512).collect();
-    let mut idempotency_key = format!("ookcite:{library_id}:{doi}");
-    if idempotency_key.len() > 200 {
-        let mut end = 200;
-        while !idempotency_key.is_char_boundary(end) {
-            end -= 1;
-        }
-        idempotency_key.truncate(end);
-    }
+    let idempotency_key =
+        crate::collection_entries::bounded_idempotency_key(&format!("ookcite:{library_id}:{doi}"));
     serde_json::json!({
         "csl": {
             "type": "article-journal",
             "DOI": doi,
         },
         "source": "ookcite",
-        "source_ref": source_ref,
+        "source_ref": doi,
         "idempotency_key": idempotency_key,
     })
 }
@@ -1123,29 +1111,12 @@ mod tests {
     async fn add_by_doi_posts_only_to_the_ridley_save_inbox() {
         let mock = MockServer::start().await;
         mount_ridley_home(&mock).await;
-        let body = inbox_enqueue_body("lib-lab", "10.1000/transformer");
-        let mut keys = body
-            .as_object()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        keys.sort();
-        assert_eq!(
-            keys,
-            ["csl", "idempotency_key", "source", "source_ref"],
-            "dashboard EnqueueBody rejects unknown fields such as doi or user_id"
-        );
-        assert!(body.get("doi").is_none());
-        assert!(body.get("user_id").is_none());
-        assert!(body.get("key_b64").is_none());
-        assert_eq!(body["csl"]["DOI"], "10.1000/transformer");
-        assert_eq!(body["source"], "ookcite");
-        assert_eq!(body["source_ref"], "10.1000/transformer");
-        assert_eq!(
-            body["idempotency_key"],
-            "ookcite:lib-lab:10.1000/transformer"
-        );
+        let body = serde_json::json!({
+            "csl": { "type": "article-journal", "DOI": "10.1000/transformer" },
+            "source": "ookcite",
+            "source_ref": "10.1000/transformer",
+            "idempotency_key": "ookcite:lib-lab:10.1000/transformer"
+        });
         Mock::given(method("POST"))
             .and(path("/ridley/libraries/lib-lab/inbox"))
             .and(header("authorization", format!("Bearer {KEY}")))
@@ -1168,6 +1139,250 @@ mod tests {
         .await;
         assert!(result.contains("10.1000/transformer"));
         assert!(result.contains("\"queued\":true"));
+    }
+
+    #[tokio::test]
+    async fn add_by_doi_strips_internal_whitespace_before_enqueue() {
+        let mock = MockServer::start().await;
+        mount_ridley_home(&mock).await;
+        Mock::given(method("POST"))
+            .and(path("/ridley/libraries/lib-lab/inbox"))
+            .and(header("authorization", format!("Bearer {KEY}")))
+            .and(body_json(serde_json::json!({
+                "csl": { "type": "article-journal", "DOI": "10.1000/transformer" },
+                "source": "ookcite",
+                "source_ref": "10.1000/transformer",
+                "idempotency_key": "ookcite:lib-lab:10.1000/transformer"
+            })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "queued": true,
+                "id": "save-space"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let server = Server::new();
+        let result = authenticated(
+            mock.uri(),
+            server.remote_add_by_doi(&AddByDoiArgs {
+                library: "lib-lab".into(),
+                doi: "https://doi.org/10.1000/trans former".into(),
+            }),
+        )
+        .await;
+        assert!(result.contains("10.1000/transformer"), "{result}");
+        assert!(!result.contains("trans former"), "{result}");
+        assert!(result.contains("\"queued\":true"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn add_by_doi_rejects_a_doi_longer_than_512_bytes() {
+        let mock = MockServer::start().await;
+        mount_ridley_home(&mock).await;
+        Mock::given(method("POST"))
+            .and(path("/ridley/libraries/lib-lab/inbox"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "queued": true
+            })))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let doi = format!("10.1000/{}", "a".repeat(505));
+        assert_eq!(doi.len(), 513);
+        let server = Server::new();
+        let result = authenticated(
+            mock.uri(),
+            server.remote_add_by_doi(&AddByDoiArgs {
+                library: "lib-lab".into(),
+                doi,
+            }),
+        )
+        .await;
+        assert!(
+            result.starts_with("CLIENT ERROR") && result.contains("512"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_by_doi_queues_a_doi_of_exactly_512_bytes() {
+        let doi = format!("10.1000/{}", "a".repeat(504));
+        assert_eq!(doi.len(), 512);
+        let key =
+            crate::collection_entries::bounded_idempotency_key(&format!("ookcite:lib-lab:{doi}"));
+        let full = format!("ookcite:lib-lab:{doi}");
+        assert!(full.len() > 200);
+        assert_ne!(key, &full[..200]);
+        let mock = MockServer::start().await;
+        mount_ridley_home(&mock).await;
+        Mock::given(method("POST"))
+            .and(path("/ridley/libraries/lib-lab/inbox"))
+            .and(header("authorization", format!("Bearer {KEY}")))
+            .and(body_json(serde_json::json!({
+                "csl": { "type": "article-journal", "DOI": doi },
+                "source": "ookcite",
+                "source_ref": doi,
+                "idempotency_key": key
+            })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "queued": true
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let server = Server::new();
+        let result = authenticated(
+            mock.uri(),
+            server.remote_add_by_doi(&AddByDoiArgs {
+                library: "lib-lab".into(),
+                doi: format!("https://doi.org/{doi}"),
+            }),
+        )
+        .await;
+        assert!(result.contains(&doi), "{result}");
+        assert!(!result.contains("doi.org"), "{result}");
+    }
+
+    #[test]
+    fn two_long_dois_that_share_a_200_byte_key_prefix_stay_distinct() {
+        let doi_a = format!("10.1000/{}", "a".repeat(500));
+        let doi_b = format!("10.1000/{}b", "a".repeat(499));
+        assert_ne!(doi_a, doi_b);
+        let full_a = format!("ookcite:lib-lab:{doi_a}");
+        let full_b = format!("ookcite:lib-lab:{doi_b}");
+        assert_eq!(&full_a[..200], &full_b[..200]);
+        let body_a = inbox_enqueue_body("lib-lab", &doi_a);
+        let body_b = inbox_enqueue_body("lib-lab", &doi_b);
+        let key_a = body_a["idempotency_key"].as_str().unwrap();
+        let key_b = body_b["idempotency_key"].as_str().unwrap();
+        assert_ne!(key_a, key_b);
+        assert!(key_a.len() <= 200 && key_b.len() <= 200, "{key_a} {key_b}");
+        assert_eq!(body_a["source_ref"], doi_a);
+        assert_eq!(body_b["source_ref"], doi_b);
+    }
+
+    async fn write_mcp_line(
+        writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+        value: serde_json::Value,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        let mut bytes = serde_json::to_vec(&value).expect("json");
+        bytes.push(b'\n');
+        writer.write_all(&bytes).await.expect("write");
+    }
+
+    async fn read_mcp_id(
+        reader: &mut tokio::io::BufReader<impl tokio::io::AsyncRead + Unpin>,
+        id: i64,
+    ) -> serde_json::Value {
+        use tokio::io::AsyncBufReadExt;
+        for _ in 0..8 {
+            let mut line = String::new();
+            let read = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                reader.read_line(&mut line),
+            )
+            .await
+            .expect("mcp read timed out")
+            .expect("mcp read");
+            assert!(read > 0, "mcp closed");
+            let value: serde_json::Value =
+                serde_json::from_str(line.trim()).unwrap_or_else(|error| panic!("{error}: {line}"));
+            if value.get("id").and_then(serde_json::Value::as_i64) == Some(id) {
+                return value;
+            }
+        }
+        panic!("no mcp response for id {id}");
+    }
+
+    #[tokio::test]
+    async fn add_by_doi_call_tool_marks_an_overlong_doi_as_an_error() {
+        use rmcp::ServiceExt;
+
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let previous = std::env::var("OOKCITE_DASHBOARD_API").ok();
+        // SAFETY: this test is the only caller, and the value is restored
+        // before it returns. A leaked request hits the mock, not a live host.
+        unsafe { std::env::set_var("OOKCITE_DASHBOARD_API", mock.uri()) };
+        let (client_read, server_write) = tokio::io::duplex(64 * 1024);
+        let (server_read, client_write) = tokio::io::duplex(64 * 1024);
+        let server = Server::new();
+        tokio::spawn(async move {
+            let running = server
+                .serve((server_read, server_write))
+                .await
+                .expect("mcp server");
+            let _ = running.waiting().await;
+        });
+        let mut writer = client_write;
+        let mut reader = tokio::io::BufReader::new(client_read);
+        write_mcp_line(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "doi-test", "version": "0" }
+                }
+            }),
+        )
+        .await;
+        let init = read_mcp_id(&mut reader, 1).await;
+        assert!(init["result"].is_object(), "{init}");
+        write_mcp_line(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            }),
+        )
+        .await;
+        let doi = format!("doi:10.1000/{}", "a".repeat(505));
+        write_mcp_line(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "add_by_doi",
+                    "arguments": { "library": "lib-lab", "doi": doi }
+                }
+            }),
+        )
+        .await;
+        let response = read_mcp_id(&mut reader, 2).await;
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("OOKCITE_DASHBOARD_API", value),
+                None => std::env::remove_var("OOKCITE_DASHBOARD_API"),
+            }
+        }
+        let text = response["result"]["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert!(
+            text.starts_with("CLIENT ERROR") && text.contains("512"),
+            "{response}"
+        );
     }
 
     async fn add_by_doi_failure(status: u16, body: serde_json::Value) -> String {
