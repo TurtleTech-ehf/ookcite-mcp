@@ -246,6 +246,10 @@ impl Server {
         self
     }
 
+    pub(crate) fn is_shared_http(&self) -> bool {
+        self.shared_http
+    }
+
     /// Run one tool call under the credential its request carried.
     ///
     /// `inbound` is `Some` when the request arrived over HTTP with its

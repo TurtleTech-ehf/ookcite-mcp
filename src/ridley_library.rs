@@ -77,26 +77,49 @@ enum LibraryMode {
 }
 
 impl LibraryMode {
-    fn from_environment() -> Result<Self, String> {
-        let mode = std::env::var("OOKCITE_RIDLEY_MODE")
-            .unwrap_or_else(|_| "local".into())
-            .trim()
-            .to_ascii_lowercase();
+    fn from_environment(shared_http: bool) -> Result<Self, String> {
+        let mode = std::env::var("OOKCITE_RIDLEY_MODE").ok();
+        let replica = std::env::var("OOKCITE_RIDLEY_REPLICA")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty());
+        let tt = std::env::var("OOKCITE_RIDLEY_TT")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty());
+        Self::from_config(shared_http, mode.as_deref(), replica, tt)
+    }
+
+    fn from_config(
+        shared_http: bool,
+        mode: Option<&str>,
+        replica: Option<PathBuf>,
+        tt: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        if shared_http {
+            if replica.is_some()
+                || mode.is_some_and(|value| {
+                    matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "local" | "replica"
+                    )
+                })
+            {
+                eprintln!(
+                    "ookcite-mcp warning: ignoring local Ridley replica configuration \
+                     on a shared HTTP server"
+                );
+            }
+            return Ok(Self::Remote);
+        }
+        let mode = mode.unwrap_or("local").trim().to_ascii_lowercase();
         match mode.as_str() {
             "" | "remote" | "dashboard" => Ok(Self::Remote),
             "local" | "replica" => {
-                let replica = std::env::var("OOKCITE_RIDLEY_REPLICA")
-                    .ok()
-                    .map(PathBuf::from)
-                    .filter(|path| !path.as_os_str().is_empty())
-                    .ok_or_else(|| {
-                        "Local Ridley mode requires OOKCITE_RIDLEY_REPLICA.".to_string()
-                    })?;
-                let tt = std::env::var("OOKCITE_RIDLEY_TT")
-                    .ok()
-                    .map(PathBuf::from)
-                    .filter(|path| !path.as_os_str().is_empty())
-                    .unwrap_or_else(|| PathBuf::from("tt"));
+                let replica = replica.ok_or_else(|| {
+                    "Local Ridley mode requires OOKCITE_RIDLEY_REPLICA.".to_string()
+                })?;
+                let tt = tt.unwrap_or_else(|| PathBuf::from("tt"));
                 Ok(Self::Local { replica, tt })
             }
             other => Err(format!(
@@ -219,7 +242,7 @@ impl Server {
         )
     )]
     async fn search_library(&self, Parameters(args): Parameters<SearchLibraryArgs>) -> String {
-        match LibraryMode::from_environment() {
+        match LibraryMode::from_environment(self.is_shared_http()) {
             Ok(LibraryMode::Remote) => self.remote_search_library(&args).await,
             Ok(LibraryMode::Local { replica, tt }) => {
                 let query = combined_query(&args);
@@ -251,7 +274,7 @@ impl Server {
         )
     )]
     async fn get_library_item(&self, Parameters(args): Parameters<GetLibraryItemArgs>) -> String {
-        match LibraryMode::from_environment() {
+        match LibraryMode::from_environment(self.is_shared_http()) {
             Ok(LibraryMode::Remote) => self.remote_get_item(&args).await,
             Ok(LibraryMode::Local { replica, tt }) => {
                 run_tt(
@@ -302,7 +325,7 @@ impl Server {
         &self,
         Parameters(args): Parameters<ExportLibraryBibArgs>,
     ) -> String {
-        match LibraryMode::from_environment() {
+        match LibraryMode::from_environment(self.is_shared_http()) {
             Ok(LibraryMode::Remote) => self.remote_export_bib(&args).await,
             Ok(LibraryMode::Local { replica, tt }) => {
                 run_tt(
@@ -600,7 +623,7 @@ impl Server {
                 let body: serde_json::Value = response.json().await.unwrap_or_default();
                 format!("Queued DOI {} for '{}': {}", doi, library.library_id, body)
             }
-            Ok(response) => dashboard_failure(response, "Failed to add DOI").await,
+            Ok(response) => inbox_failure(response).await,
             Err(error) => format!("Failed to add DOI: {error}"),
         }
     }
@@ -721,9 +744,28 @@ async fn dashboard_failure(response: reqwest::Response, prefix: &str) -> String 
     let code = body["error"].as_str().unwrap_or("dashboard_error");
     match status.as_u16() {
         401 => inbound_auth::auth_required_text().into(),
-        403 => format!("{prefix}: access denied ({code})."),
+        403 if inbound_auth::api_key().is_some_and(|key| key.starts_with("ookc_")) => format!(
+            "{prefix}: Ridley dashboard access requires the OAuth/session bearer from `ookcite-mcp setup --connect`; OokCite API keys are not accepted."
+        ),
+        403 => format!(
+            "{prefix}: access denied ({code}). Reconnect with `ookcite-mcp setup --connect` to refresh the OAuth/session bearer."
+        ),
         404 => format!("{prefix}: library or item not found."),
         _ => format!("{prefix}: dashboard returned HTTP {status} ({code})."),
+    }
+}
+
+async fn inbox_failure(response: reqwest::Response) -> String {
+    let status = response.status();
+    if status != reqwest::StatusCode::NOT_FOUND {
+        return dashboard_failure(response, "Failed to add DOI").await;
+    }
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    match body["error"].as_str() {
+        Some("library_not_found" | "ridley_library_not_found") => {
+            "Failed to add DOI: Ridley library not found.".into()
+        }
+        _ => "Ridley save inbox isn't available on this server yet.".into(),
     }
 }
 
@@ -841,6 +883,18 @@ mod tests {
     }
 
     #[test]
+    fn shared_http_forces_remote_mode_even_when_a_replica_is_configured() {
+        let mode = LibraryMode::from_config(
+            true,
+            None,
+            Some(PathBuf::from("/srv/operator/library.redb")),
+            Some(PathBuf::from("tt")),
+        )
+        .unwrap();
+        assert!(matches!(mode, LibraryMode::Remote));
+    }
+
+    #[test]
     fn ridley_router_registers_all_five_tools() {
         let names = Server::ridley_tool_router()
             .list_all()
@@ -907,6 +961,36 @@ mod tests {
         .await;
         assert!(result.contains("Attention Is All You Need"));
         assert!(result.contains("metadata only"));
+    }
+
+    #[tokio::test]
+    async fn api_key_only_remote_mode_requests_setup_connect_session_bearer() {
+        let mock = MockServer::start().await;
+        mount_home(&mock).await;
+        Mock::given(method("GET"))
+            .and(path("/libraries/lib-lab/table"))
+            .and(header("authorization", format!("Bearer {KEY}")))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(serde_json::json!({"error": "forbidden"})),
+            )
+            .mount(&mock)
+            .await;
+        let server = Server::new();
+        let result = authenticated(
+            mock.uri(),
+            server.remote_search_library(&SearchLibraryArgs {
+                library: "Lab".into(),
+                query: "transformer".into(),
+                title: None,
+                author: None,
+                tag: None,
+                full_text: false,
+            }),
+        )
+        .await;
+        assert!(result.contains("OAuth/session bearer"));
+        assert!(result.contains("setup --connect"));
+        assert!(!result.contains("access denied (forbidden)"));
     }
 
     #[tokio::test]
@@ -1034,6 +1118,58 @@ mod tests {
         .await;
         assert!(result.contains("10.1000/transformer"));
         assert!(result.contains("\"queued\":true"));
+    }
+
+    async fn add_by_doi_failure(status: u16, body: serde_json::Value) -> String {
+        let mock = MockServer::start().await;
+        mount_ridley_home(&mock).await;
+        Mock::given(method("POST"))
+            .and(path("/ridley/libraries/lib-lab/inbox"))
+            .and(header("authorization", format!("Bearer {KEY}")))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let server = Server::new();
+        authenticated(
+            mock.uri(),
+            server.remote_add_by_doi(&AddByDoiArgs {
+                library: "lib-lab".into(),
+                doi: "10.1000/transformer".into(),
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn add_by_doi_404_reports_an_unavailable_save_inbox() {
+        let result = add_by_doi_failure(404, serde_json::json!({"error": "route_not_found"})).await;
+        assert_eq!(
+            result,
+            "Ridley save inbox isn't available on this server yet."
+        );
+    }
+
+    #[tokio::test]
+    async fn add_by_doi_404_preserves_explicit_library_not_found() {
+        let result =
+            add_by_doi_failure(404, serde_json::json!({"error": "library_not_found"})).await;
+        assert_eq!(result, "Failed to add DOI: Ridley library not found.");
+    }
+
+    #[tokio::test]
+    async fn add_by_doi_403_requests_setup_connect_session_bearer() {
+        let result = add_by_doi_failure(403, serde_json::json!({"error": "forbidden"})).await;
+        assert!(result.contains("OAuth/session bearer"));
+        assert!(result.contains("setup --connect"));
+    }
+
+    #[tokio::test]
+    async fn add_by_doi_5xx_reports_the_dashboard_status() {
+        let result =
+            add_by_doi_failure(503, serde_json::json!({"error": "temporarily_unavailable"})).await;
+        assert!(result.contains("HTTP 503"));
+        assert!(result.contains("temporarily_unavailable"));
     }
 
     #[tokio::test]

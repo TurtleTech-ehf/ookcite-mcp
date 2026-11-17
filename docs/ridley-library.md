@@ -59,3 +59,8 @@ In this mode `search_library`, `get_item`, and `export_bib` use
 `POST /libraries/{id}/table/export`. Responses are scoped by the bearer from
 `setup --connect`. `get_item` labels notes, highlights and full text as
 unavailable instead of pretending the catalogue is the synced library.
+
+Shared HTTP servers always use this remote mode and ignore local replica
+configuration, so one caller can never read the host operator's replica.
+Ridley dashboard routes require the OAuth/session bearer installed by
+`ookcite-mcp setup --connect`; an OokCite API key is not accepted there.
