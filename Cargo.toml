@@ -48,6 +48,11 @@ rsa = "0.9"
 http = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
+[features]
+# Demo only, off by default. Lets the binary talk to one plain-http mock host
+# named by OOKCITE_DEMO_MOCK_BASE. A release build never enables it.
+demo-mock = []
+
 [lib]
 name = "ookcite_mcp"
 path = "src/lib.rs"

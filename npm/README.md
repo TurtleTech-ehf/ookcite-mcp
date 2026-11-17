@@ -570,6 +570,21 @@ Duplicates:
 Metadata only. This does not compare titles, authors, or pages with the record: run audit_bibliography on the corrected .bib for that.
 ```
 
+### Try the new tools without a network
+
+`demo/mock_upstream.py` is one plain-http mock for OokCite, Crossref, DataCite,
+Unpaywall and OpenAlex. A build with the off-by-default `demo-mock` feature
+sends all of its calls to the host named in `OOKCITE_DEMO_MOCK_BASE`; a normal
+build ignores that variable and the feature is never part of a release.
+`demo/mcp_tools_demo.py` starts both, speaks MCP over stdio, and calls each new
+tool once:
+
+```
+cargo build --features demo-mock
+demo/mcp_tools_demo.py                       # all four tools
+demo/mcp_tools_demo.py --tool check_bibliography | demo/ansi_to_png.py out.png
+```
+
 ## Plans & Pricing
 
 | Tier      | Price     | Lookups/day | API calls/month | Collections | Entries/collection |

@@ -76,7 +76,7 @@ impl ProviderBases {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "demo-mock"))]
     fn shared(base: impl Into<String>) -> Self {
         let base = base.into().trim_end_matches('/').to_string();
         Self {
@@ -3981,6 +3981,36 @@ impl ServerHandler for Server {
                  Tools annotated as destructive change or revoke data permanently -- confirm which \
                  collection or entry is meant before calling one.",
             )
+    }
+}
+
+#[cfg(feature = "demo-mock")]
+impl Server {
+    /// A server whose OokCite, Crossref, DataCite, Zenodo, doi.org, Unpaywall
+    /// and OpenAlex calls all go to one mock base URL over plain http. Built
+    /// only with the `demo-mock` feature, for the recorded demo.
+    pub fn new_demo(base: String) -> Self {
+        let base = base.trim_end_matches('/').to_string();
+        let client = || {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("ookcite-mcp: failed to build demo HTTP client")
+        };
+        Self {
+            tool_router: Self::tool_router()
+                + Self::ridley_tool_router()
+                + discovery::discovery_routers(),
+            http: client(),
+            provider_http: client(),
+            discovery_http: client(),
+            discovery: Some(discovery::DiscoveryBases::shared(base.clone())),
+            api_base: base.clone(),
+            doi_cache: DoiResponseCache::with_default_ttl(),
+            providers: Some(ProviderBases::shared(base)),
+            overrides: overrides::OverrideStore::Disabled,
+            shared_http: false,
+        }
     }
 }
 

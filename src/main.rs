@@ -53,6 +53,14 @@ async fn main() -> anyhow::Result<()> {
         http_serve::serve(&inbound_auth::bind_from_args(&args)).await?;
         return Ok(());
     }
+    #[cfg(feature = "demo-mock")]
+    if let Ok(base) = std::env::var("OOKCITE_DEMO_MOCK_BASE") {
+        let service = Server::new_demo(base)
+            .serve(rmcp::transport::io::stdio())
+            .await?;
+        service.waiting().await?;
+        return Ok(());
+    }
     load_configured_auth().await?;
     if args.iter().any(|a| a == "doctor") {
         // Stdout OK for human CLI; MCP never uses this path for JSON-RPC.

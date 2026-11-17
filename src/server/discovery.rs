@@ -53,7 +53,7 @@ impl DiscoveryBases {
             .collect()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "demo-mock"))]
     pub(super) fn shared(base: impl Into<String>) -> Self {
         let base = base.into().trim_end_matches('/').to_string();
         Self {
