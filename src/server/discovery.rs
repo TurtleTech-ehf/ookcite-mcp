@@ -13,6 +13,7 @@ use serde_json::Value;
 use super::{read_capped_body, ProviderRead, Server, PROVIDER_USER_AGENT};
 use crate::http_error::error_detail;
 
+mod cite_while_writing;
 mod open_access;
 mod related_papers;
 
@@ -174,6 +175,7 @@ impl Server {
             Err(ProviderRead::Failed) => {
                 return Err(format!("ERROR {source} : error reading response"));
             }
+            Err(ProviderRead::Status(text)) => return Err(text),
         };
         match serde_json::from_slice::<Value>(&bytes) {
             Ok(body) => Ok(Some(body)),
@@ -203,7 +205,9 @@ impl Server {
 }
 
 pub(super) fn discovery_routers() -> rmcp::handler::server::tool::ToolRouter<Server> {
-    Server::open_access_tool_router() + Server::related_papers_tool_router()
+    Server::open_access_tool_router()
+        + Server::related_papers_tool_router()
+        + Server::cite_while_writing_tool_router()
 }
 
 #[cfg(test)]

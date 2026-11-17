@@ -113,6 +113,8 @@ enum ProviderRead {
     TooLarge,
     Redirect,
     Failed,
+    /// A non-success answer, already worded with its marker and `Retry-After`.
+    Status(String),
 }
 
 struct AuditAccess {
@@ -157,6 +159,7 @@ fn provider_failure(doi: &str, error: ProviderRead) -> String {
         ),
         ProviderRead::Redirect => format!("ERROR {doi} : provider redirect refused"),
         ProviderRead::Failed => format!("ERROR {doi} : error sending request"),
+        ProviderRead::Status(text) => text,
     }
 }
 
@@ -585,7 +588,13 @@ impl Server {
             return Ok(None);
         }
         if !response.status().is_success() {
-            return Err(ProviderRead::Failed);
+            // A throttle or a payment wall names itself and keeps its
+            // Retry-After. Folding it into a transport failure told the
+            // caller nothing about when to try again.
+            let host = response.url().host_str().unwrap_or("provider").to_string();
+            return Err(ProviderRead::Status(
+                discovery::provider_status_text(&host, response).await,
+            ));
         }
         let bytes = read_capped_body(response).await?;
         match serde_json::from_slice::<serde_json::Value>(&bytes) {

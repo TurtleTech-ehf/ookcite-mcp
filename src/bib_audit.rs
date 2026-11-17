@@ -64,7 +64,7 @@ pub struct PublisherNotice {
 }
 
 impl PublisherNotice {
-    fn line(&self) -> String {
+    pub(crate) fn line(&self) -> String {
         if self.from_title {
             return match self.kind {
                 NoticeKind::Retraction => "title marked retracted".into(),

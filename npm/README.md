@@ -303,6 +303,7 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 | ---------------------- | ------------------------------------------------------- |
 | `find_open_access_pdf` | Link to a legal open-access copy of a DOI (Unpaywall)   |
 | `related_papers`       | Related works, references, or citing works of a DOI (OpenAlex) |
+| `cite_while_writing`   | Candidate citations for one claim sentence, with reasons |
 
 See [Discovery tools](#discovery-tools) for inputs, errors, and example calls.
 
@@ -483,6 +484,39 @@ Seed: A Mock Seed Paper (2021) | cited by 120
 Showing 2 of 3 related works.
 OpenAlex ranks related works by shared concepts and citations. Treat them as leads to read, not as papers that agree with the seed.
 Metadata only. Check a DOI with validate_doi before citing it, and format it with format_citation.
+```
+
+### cite_while_writing
+
+Input: `{"claim": "<sentence>", "limit": 1-10, "year_from": 1000-2100, "check_retractions": true}`.
+Only `claim` is required (12 to 2000 characters). `limit` defaults to 5 and
+`check_retractions` to true.
+
+The claim is cut to its content words and searched in the OokCite corpus. Each
+candidate lists the claim words its title and venue share, its corpus score,
+year, venue, and DOI, so the reason for each suggestion is something you can
+read, not a verdict. A candidate whose Crossref or DataCite record carries a
+retraction, withdrawal, or expression of concern is held back and named
+(`HELD BACK doi:... retracted by doi:...`), and the next hit takes its place.
+If the publisher record cannot be read, the candidate is shown as `UNCHECKED`
+rather than called clean. Matching is by keyword: no candidate is evidence that
+the paper supports the claim, so read it before citing, then use
+`validate_doi` and `format_citation` on the one you pick.
+
+Example (mock data):
+
+```
+> cite_while_writing {"claim": "Sheared colloidal glasses nucleate crystals faster than quiescent suspensions do.", "limit": 2}
+CITATION CANDIDATES for: "Sheared colloidal glasses nucleate crystals faster than quiescent suspensions do."
+Searched the OokCite corpus for: sheared colloidal glasses nucleate crystals faster quiescent suspensions
+1. Crystal nucleation in sheared colloidal glasses (2021) | Journal of Mock Physics | doi:10.5555/demo.a
+   Why: title and venue share 5 of 8 claim words (sheared, colloidal, glasses, nucleate, crystals), title match high; corpus score 40
+   Notices: no retraction, withdrawal, or concern in the publisher record
+2. Quiescent suspensions of hard spheres (2015) | Soft Matter Demo | doi:10.5555/demo.b
+   Why: title and venue share 2 of 8 claim words (quiescent, suspensions), title match medium; corpus score 90
+   Notices: no retraction, withdrawal, or concern in the publisher record
+Left out: 1 hit(s) with no DOI, 0 older than year_from.
+These are keyword matches on titles and the corpus index. None is evidence that the paper supports the claim: read it, then validate_doi and format_citation the one you use.
 ```
 
 ## Plans & Pricing
