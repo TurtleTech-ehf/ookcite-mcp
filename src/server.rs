@@ -200,7 +200,7 @@ impl DoiLookup {
 #[derive(Clone)]
 pub struct Server {
     tool_router: ToolRouter<Self>,
-    http: reqwest::Client,
+    pub(crate) http: reqwest::Client,
     /// doi.org, Crossref, DataCite, and Zenodo. Redirects stay on their hosts.
     provider_http: reqwest::Client,
     api_base: String,
@@ -222,7 +222,7 @@ impl Server {
         // process key onto HTTP calls that did not present one.
         let providers = ProviderBases::production();
         Self {
-            tool_router: Self::tool_router(),
+            tool_router: Self::tool_router() + Self::ridley_tool_router(),
             http: build_api_client(30, reqwest::header::HeaderMap::new()),
             provider_http: provider_client(Some(&providers), 30),
             api_base: api_base_url(),
@@ -3865,9 +3865,10 @@ impl ServerHandler for Server {
             ))
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_instructions(
-                "OokCite resolves and formats citation METADATA: it returns structured fields (title, \
-                 authors, year, journal, DOI) and formatted bibliography entries. It does NOT fetch PDFs, \
-                 full-text articles, or paper content, so do not reach for it to read a paper. \
+                "OokCite citation tools resolve and format citation METADATA: they return structured fields \
+                 (title, authors, year, journal, DOI) and formatted bibliography entries. OokCite does NOT fetch PDFs \
+                 or paper content. Ridley library tools are different: local search_library and get_item may read \
+                 notes, highlights, and indexed full text from the user's configured ridley-core replica. \
                  Resolve citation metadata through these tools rather than from memory or a web search: a \
                  DOI that looks plausible is not evidence the work exists, and validate_doi is what \
                  separates the two. A DOI that exists can still be a different paper: pass year, journal, \
@@ -3889,7 +3890,7 @@ impl ServerHandler for Server {
 impl Server {
     fn new_with_base(api_base: String) -> Self {
         Self {
-            tool_router: Self::tool_router(),
+            tool_router: Self::tool_router() + Self::ridley_tool_router(),
             http: build_api_client(5, reqwest::header::HeaderMap::new()),
             provider_http: provider_client(None, 5),
             api_base,

@@ -186,6 +186,9 @@ Optional env (stdio MCP, all clients):
 | `OOKCITE_CREDENTIAL_STORE` | `platform` to load a platform credential reference |
 | `OOKCITE_CREDENTIAL_SERVICE` | Platform credential service name (default `ookcite-mcp`) |
 | `OOKCITE_CREDENTIAL_ACCOUNT` | Platform credential account name (default `default`) |
+| `OOKCITE_RIDLEY_MODE` | Ridley read mode: `local` (default) or metadata-only `remote` |
+| `OOKCITE_RIDLEY_REPLICA` | Path to the local ridley-core replica; required in local mode |
+| `OOKCITE_RIDLEY_TT` | Path to `tt` when it is not on `PATH` |
 
 ## Marketplace plugin
 
@@ -306,6 +309,26 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 | `orcid_search`   | Find ORCID profiles by name, affiliation, or ORCID ID  |
 | `orcid_profile`  | Fetch one ORCID profile by ID                          |
 | `ingest_orcid`   | Index an ORCID profile's publications so they are searchable |
+
+### Ridley library
+
+Ridley reads are local by default because the dashboard cannot open sealed
+library objects. Configure `OOKCITE_RIDLEY_REPLICA`; the server delegates to
+`tt library`, which opens the replica through ridley-core. The signed-in
+credential from `setup --connect` is reused for library discovery and the
+save inbox.
+
+| Tool               | Purpose |
+| ------------------ | ------- |
+| `list_libraries`   | List visible Ridley libraries |
+| `search_library`   | Search title, author, tag, notes, highlights and full text |
+| `get_item`         | Return metadata, notes and highlights |
+| `add_by_doi`       | Queue a DOI in the Ridley save inbox |
+| `export_bib`       | Export one local Ridley collection as BibTeX |
+
+Set `OOKCITE_RIDLEY_MODE=remote` only for the dashboard's metadata-only
+catalogue view. See [Ridley library tools](docs/ridley-library.md) for the
+security boundary and both mode configurations.
 
 ### Collections (requires sign-in)
 

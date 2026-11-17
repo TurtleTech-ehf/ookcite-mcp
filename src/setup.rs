@@ -77,6 +77,9 @@ fn print_manual_config(api_key: Option<&str>) {
     );
     println!("  OOKCITE_MCP_READ_ONLY=1  hard-disable collection mutations (review automation)");
     println!("  OOKCITE_MCP_ALLOW_MUTATE=0 deny mutations; omit or =1 to allow (default allow)");
+    println!("  OOKCITE_RIDLEY_MODE      local (default) or metadata-only remote");
+    println!("  OOKCITE_RIDLEY_REPLICA   local ridley-core replica path");
+    println!("  OOKCITE_RIDLEY_TT        tt executable path (default: tt on PATH)");
     println!("  ookcite-mcp doctor       CLI readiness report (policy + API health + /me)");
 }
 

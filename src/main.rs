@@ -26,6 +26,7 @@ mod overrides;
 mod plaintext;
 mod policy;
 mod resolve_helpers;
+mod ridley_library;
 mod server;
 mod setup;
 mod tool_args;
