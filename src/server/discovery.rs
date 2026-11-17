@@ -14,6 +14,7 @@ use super::{read_capped_body, ProviderRead, Server, PROVIDER_USER_AGENT};
 use crate::http_error::error_detail;
 
 mod open_access;
+mod related_papers;
 
 /// Contact address sent to Unpaywall and OpenAlex. Both ask for one so they
 /// can write to an operator whose traffic misbehaves. `OOKCITE_MCP_CONTACT_EMAIL`
@@ -202,7 +203,7 @@ impl Server {
 }
 
 pub(super) fn discovery_routers() -> rmcp::handler::server::tool::ToolRouter<Server> {
-    Server::open_access_tool_router()
+    Server::open_access_tool_router() + Server::related_papers_tool_router()
 }
 
 #[cfg(test)]

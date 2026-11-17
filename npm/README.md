@@ -302,6 +302,7 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 | Tool                   | Purpose                                                 |
 | ---------------------- | ------------------------------------------------------- |
 | `find_open_access_pdf` | Link to a legal open-access copy of a DOI (Unpaywall)   |
+| `related_papers`       | Related works, references, or citing works of a DOI (OpenAlex) |
 
 See [Discovery tools](#discovery-tools) for inputs, errors, and example calls.
 
@@ -457,6 +458,31 @@ A throttled call:
 > find_open_access_pdf {"doi": "10.5555/demo.oa.2024"}
 RATE LIMITED Unpaywall : 429 Too Many Requests: Too many requests (Retry-After: 120)
 This limit belongs to Unpaywall, not to OokCite. Wait for Retry-After before calling again.
+```
+
+### related_papers
+
+Input: `{"doi": "...", "relation": "related" | "references" | "cited_by", "limit": 1-25}`.
+`relation` defaults to `related` and `limit` to 10.
+
+`related` is OpenAlex's own similarity ranking, so treat it as a list of leads
+to read. `references` is what the paper cites, and `cited_by` is what cites it,
+most cited first. Each result has the title, year, first authors, venue, DOI,
+and citation count. It is metadata only: run `validate_doi` on a DOI before you
+cite it. If you have an OpenAlex key, set `OPENALEX_API_KEY` and it is sent
+with each request.
+
+Example (mock data):
+
+```
+> related_papers {"doi": "10.5555/demo.seed", "relation": "related", "limit": 2}
+RELATED WORKS for doi:10.5555/demo.seed (source: OpenAlex)
+Seed: A Mock Seed Paper (2021) | cited by 120
+1. First Related Study (2020) -- Ada Example, Ben Sample, Chi Mock et al. | Journal of Mock Results | doi:10.5555/demo.rel1 | cited by 41
+2. Second Related Study (2019) -- Ada Example, Ben Sample, Chi Mock et al. | Journal of Mock Results | doi:10.5555/demo.rel2 | cited by 8
+Showing 2 of 3 related works.
+OpenAlex ranks related works by shared concepts and citations. Treat them as leads to read, not as papers that agree with the seed.
+Metadata only. Check a DOI with validate_doi before citing it, and format it with format_citation.
 ```
 
 ## Plans & Pricing
