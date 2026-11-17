@@ -850,7 +850,7 @@ mod tests {
 
         let text = server(&mock).cite_while_writing(Parameters(request)).await;
 
-        assert!(text.contains("UNCHECKED (RATE LIMITED 127.0.0.1 : 429 Too Many Requests: Slow down (Retry-After: 30))"), "{text}");
+        assert!(text.contains("UNCHECKED (RATE LIMITED 127.0.0.1 for doi:10.5555/demo.a : 429 Too Many Requests: Slow down (Retry-After: 30))"), "{text}");
         assert!(text.contains("candidate(s) above are UNCHECKED"), "{text}");
         let report = crate::http_error::upstream_failure_report(&text).unwrap();
         assert_eq!(report.http_status, Some(429));

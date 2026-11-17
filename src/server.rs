@@ -113,8 +113,8 @@ enum ProviderRead {
     TooLarge,
     Redirect,
     Failed,
-    /// A non-success answer, already worded with its marker and `Retry-After`.
-    Status(String),
+    /// A non-success answer. It keeps its status and `Retry-After`.
+    Status(discovery::ProviderStatus),
 }
 
 struct AuditAccess {
@@ -159,7 +159,7 @@ fn provider_failure(doi: &str, error: ProviderRead) -> String {
         ),
         ProviderRead::Redirect => format!("ERROR {doi} : provider redirect refused"),
         ProviderRead::Failed => format!("ERROR {doi} : error sending request"),
-        ProviderRead::Status(text) => text,
+        ProviderRead::Status(status) => status.text(&format!("{} for doi:{doi}", status.host())),
     }
 }
 
@@ -484,6 +484,14 @@ impl Server {
             .send()
             .await
             .map_err(|error| provider_send_error(doi, &error))?;
+        if is_promoted_status(response.status()) {
+            // A throttle or a restart is not an answer about the DOI. Reading
+            // its body for a responseCode called every such DOI unregistered.
+            return Err(provider_failure(
+                doi,
+                ProviderRead::Status(discovery::read_provider_status(response).await),
+            ));
+        }
         let bytes = read_capped_body(response)
             .await
             .map_err(|error| provider_failure(doi, error))?;
@@ -591,9 +599,8 @@ impl Server {
             // A throttle or a payment wall names itself and keeps its
             // Retry-After. Folding it into a transport failure told the
             // caller nothing about when to try again.
-            let host = response.url().host_str().unwrap_or("provider").to_string();
             return Err(ProviderRead::Status(
-                discovery::provider_status_text(&host, response).await,
+                discovery::read_provider_status(response).await,
             ));
         }
         let bytes = read_capped_body(response).await?;

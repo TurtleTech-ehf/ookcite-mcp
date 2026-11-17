@@ -1549,6 +1549,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_doi_org_429_marks_the_entry_upstream_not_broken() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/handles/{}", enc("10.5555/handle.429"))))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "15"))
+            .mount(&mock)
+            .await;
+        let bib = "@article{h429, title={Throttled at doi.org}, doi={10.5555/handle.429}}";
+
+        let text = server(&mock)
+            .check_bibliography(Parameters(args(bib)))
+            .await;
+
+        assert!(!text.contains("BROKEN"), "{text}");
+        assert_provider_stop(&text, "h429", "RATE LIMITED", "rate_limited", 429, "15").await;
+    }
+
+    #[tokio::test]
     async fn a_402_on_a_title_lookup_makes_the_result_an_error() {
         let _key = EnvGuard::unset("OOKCITE_API_KEY");
         let mock = MockServer::start().await;

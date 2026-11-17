@@ -100,27 +100,53 @@ pub(super) fn doi_path(doi: &str) -> String {
         .join("/")
 }
 
-/// Tool text for a non-success provider response. The marker and the
-/// `Retry-After` value survive, so `call_tool` can mark the result as an
-/// error and report the status.
-pub(super) async fn provider_status_text(source: &str, resp: reqwest::Response) -> String {
-    let status = resp.status();
-    let detail = error_detail(resp).await;
-    match status.as_u16() {
-        402 => format!(
-            "PAYMENT REQUIRED {source} : {detail}\n{source} answered 402, which its public API \
-             does not document. This server did not retry it. Wait for Retry-After if one was \
-             given; the OokCite quota is not involved."
-        ),
-        429 => format!(
-            "RATE LIMITED {source} : {detail}\nThis limit belongs to {source}, not to OokCite. \
-             Wait for Retry-After before calling again."
-        ),
-        408 | 504 => format!("TIMEOUT {source} : {detail}"),
-        401 | 403 => format!("ACCESS DENIED {source} : {detail}"),
-        500..=599 => format!("TEMPORARY ERROR {source} : {detail}"),
-        _ => format!("ERROR {source} : {detail}"),
+/// A non-success provider answer: the status, and the body and `Retry-After`
+/// as `error_detail` words them.
+pub(super) struct ProviderStatus {
+    host: String,
+    status: u16,
+    detail: String,
+}
+
+pub(super) async fn read_provider_status(resp: reqwest::Response) -> ProviderStatus {
+    ProviderStatus {
+        host: resp.url().host_str().unwrap_or("provider").to_string(),
+        status: resp.status().as_u16(),
+        detail: error_detail(resp).await,
     }
+}
+
+impl ProviderStatus {
+    /// The host that answered, for a caller that adds the DOI it was reading.
+    pub(super) fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Tool text. The marker and the `Retry-After` value survive on the first
+    /// line, so `call_tool` can mark the result as an error and report the
+    /// status. `source` names who answered, and the DOI when there is one.
+    pub(super) fn text(&self, source: &str) -> String {
+        let detail = &self.detail;
+        match self.status {
+            402 => format!(
+                "PAYMENT REQUIRED {source} : {detail}\n{source} answered 402, which its public \
+                 API does not document. This server did not retry it. Wait for Retry-After if \
+                 one was given; the OokCite quota is not involved."
+            ),
+            429 => format!(
+                "RATE LIMITED {source} : {detail}\nThis limit belongs to {source}, not to \
+                 OokCite. Wait for Retry-After before calling again."
+            ),
+            408 | 504 => format!("TIMEOUT {source} : {detail}"),
+            401 | 403 => format!("ACCESS DENIED {source} : {detail}"),
+            500..=599 => format!("TEMPORARY ERROR {source} : {detail}"),
+            _ => format!("ERROR {source} : {detail}"),
+        }
+    }
+}
+
+pub(super) async fn provider_status_text(source: &str, resp: reqwest::Response) -> String {
+    read_provider_status(resp).await.text(source)
 }
 
 impl Server {
@@ -176,7 +202,7 @@ impl Server {
             Err(ProviderRead::Failed) => {
                 return Err(format!("ERROR {source} : error reading response"));
             }
-            Err(ProviderRead::Status(text)) => return Err(text),
+            Err(ProviderRead::Status(status)) => return Err(status.text(source)),
         };
         match serde_json::from_slice::<Value>(&bytes) {
             Ok(body) => Ok(Some(body)),
@@ -257,5 +283,214 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, "ERROR Unpaywall : provider access is disabled");
+    }
+}
+
+#[cfg(test)]
+mod provider_status_tests {
+    use super::*;
+    use crate::server::tests::EnvGuard;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn server(mock: &MockServer) -> Server {
+        Server::new_with_base(mock.uri()).with_providers(mock.uri())
+    }
+
+    fn enc(doi: &str) -> String {
+        crate::server::encode_path_segment(doi)
+    }
+
+    async fn registered(mock: &MockServer, doi: &str) {
+        Mock::given(method("GET"))
+            .and(path(format!("/handles/{}", enc(doi))))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"responseCode": 1})))
+            .mount(mock)
+            .await;
+    }
+
+    async fn answer(mock: &MockServer, route: String, status: u16, retry_after: &str) {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("retry-after", retry_after)
+                    .set_body_json(json!({"message": "walled"})),
+            )
+            .mount(mock)
+            .await;
+    }
+
+    fn report(text: &str) -> (&'static str, Option<u16>, Option<String>) {
+        let report = crate::http_error::upstream_failure_report(text).expect(text);
+        (report.kind, report.http_status, report.retry_after)
+    }
+
+    #[tokio::test]
+    async fn a_crossref_429_and_402_name_the_doi_and_keep_retry_after() {
+        for (status, kind, retry) in [
+            (429u16, "rate_limited", "30"),
+            (402, "payment_required", "600"),
+        ] {
+            let mock = MockServer::start().await;
+            answer(
+                &mock,
+                format!("/works/{}", enc("10.5555/x.1")),
+                status,
+                retry,
+            )
+            .await;
+
+            let text = server(&mock)
+                .provider_record("10.5555/x.1")
+                .await
+                .unwrap_err();
+
+            assert!(text.contains("for doi:10.5555/x.1"), "{text}");
+            assert_eq!(
+                report(&text),
+                (kind, Some(status), Some(retry.to_string())),
+                "{text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_datacite_402_names_the_doi_and_keeps_retry_after() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/works/{}", enc("10.5555/x.2"))))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+        answer(&mock, format!("/dois/{}", enc("10.5555/x.2")), 402, "900").await;
+
+        let text = server(&mock)
+            .provider_record("10.5555/x.2")
+            .await
+            .unwrap_err();
+
+        assert!(
+            text.starts_with("PAYMENT REQUIRED 127.0.0.1 for doi:10.5555/x.2 : 402"),
+            "{text}"
+        );
+        assert_eq!(
+            report(&text),
+            ("payment_required", Some(402), Some("900".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zenodo_429_names_the_doi() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/works/{}", enc("10.5281/zenodo.7"))))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"message": {"DOI": "10.5281/zenodo.7"}})),
+            )
+            .mount(&mock)
+            .await;
+        answer(&mock, "/records/7".into(), 429, "11").await;
+
+        let text = server(&mock)
+            .provider_record("10.5281/zenodo.7")
+            .await
+            .unwrap_err();
+
+        assert!(text.contains("for doi:10.5281/zenodo.7"), "{text}");
+        assert_eq!(
+            report(&text),
+            ("rate_limited", Some(429), Some("11".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_doi_org_throttle_or_restart_is_not_an_unregistered_doi() {
+        for (status, kind, http) in [
+            (429u16, "rate_limited", 429u16),
+            (503, "temporary_error", 503),
+        ] {
+            let mock = MockServer::start().await;
+            answer(
+                &mock,
+                format!("/handles/{}", enc("10.5555/x.3")),
+                status,
+                "7",
+            )
+            .await;
+
+            let error = server(&mock)
+                .registration_status("10.5555/x.3")
+                .await
+                .unwrap_err();
+
+            assert!(error.contains("for doi:10.5555/x.3"), "{error}");
+            assert!(!error.contains("UNREGISTERED"), "{error}");
+            assert_eq!(report(&error).0, kind);
+            assert_eq!(report(&error).1, Some(http));
+            assert_eq!(report(&error).2.as_deref(), Some("7"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_doi_org_answer_that_is_not_found_is_still_unregistered() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/handles/{}", enc("10.5555/x.4"))))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"responseCode": 100})))
+            .mount(&mock)
+            .await;
+
+        assert_eq!(
+            server(&mock).registration_status("10.5555/x.4").await,
+            Ok(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bib_export_names_the_doi_whose_provider_read_failed() {
+        let mock = MockServer::start().await;
+        registered(&mock, "10.5555/x.5").await;
+        answer(&mock, format!("/works/{}", enc("10.5555/x.5")), 429, "30").await;
+        let entries = vec![json!({"metadata": {
+            "doi": "10.5555/x.5", "title": "A stored title", "entry_type": "article"
+        }})];
+
+        let text = server(&mock)
+            .render_collection_bib(&entries, crate::bib_export::BibOptions::default())
+            .await;
+
+        assert!(
+            text.starts_with("RATE LIMITED 127.0.0.1 for doi:10.5555/x.5 : 429"),
+            "{text}"
+        );
+        assert_eq!(
+            report(&text),
+            ("rate_limited", Some(429), Some("30".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_lookup_still_uses_the_ookcite_record_when_the_publisher_read_is_throttled() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        registered(&mock, "10.5555/x.6").await;
+        answer(&mock, format!("/works/{}", enc("10.5555/x.6")), 402, "60").await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "doi": "10.5555/x.6", "title": "From the OokCite record"
+            })))
+            .mount(&mock)
+            .await;
+
+        let lookup = server(&mock)
+            .lookup_doi_with_freshness("10.5555/x.6")
+            .await
+            .unwrap();
+
+        assert_eq!(lookup.metadata["title"], "From the OokCite record");
     }
 }
