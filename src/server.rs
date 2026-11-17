@@ -3802,6 +3802,16 @@ fn tool_result_text(result: &CallToolResult) -> String {
 /// and the structured object carries the status and `Retry-After`.
 fn promote_upstream_failure(result: &mut CallToolResult) {
     let text = tool_result_text(result);
+    if text.trim() == crate::ridley_library::SAVE_INBOX_UNAVAILABLE {
+        result.is_error = Some(true);
+        result.structured_content = Some(serde_json::json!({
+            "kind": "ridley_save_inbox_unavailable",
+            "http_status": 404,
+            "message": text,
+            "retry_after": null,
+        }));
+        return;
+    }
     let Some(report) = upstream_failure_report(&text) else {
         return;
     };
@@ -8564,6 +8574,23 @@ mod tests {
         assert_eq!(structured["http_status"], 429);
         assert_eq!(structured["retry_after"], "75");
         assert_eq!(structured["message"], text);
+    }
+
+    #[test]
+    fn promote_marks_the_unavailable_ridley_inbox_as_an_error_without_a_prefix() {
+        let mut result = CallToolResult::success(vec![ContentBlock::text(
+            crate::ridley_library::SAVE_INBOX_UNAVAILABLE,
+        )]);
+        promote_upstream_failure(&mut result);
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["kind"], "ridley_save_inbox_unavailable");
+        assert_eq!(structured["http_status"], 404);
+        assert_eq!(
+            structured["message"],
+            crate::ridley_library::SAVE_INBOX_UNAVAILABLE
+        );
     }
 
     #[test]

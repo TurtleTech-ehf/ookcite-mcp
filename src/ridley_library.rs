@@ -15,6 +15,8 @@ use crate::policy::block_mutate;
 use crate::server::Server;
 
 const DEFAULT_DASHBOARD_API: &str = "https://dashboard-api.turtletech.us/api/v1";
+pub(crate) const SAVE_INBOX_UNAVAILABLE: &str =
+    "Ridley save inbox isn't available on this server yet.";
 
 #[cfg(test)]
 tokio::task_local! {
@@ -765,7 +767,7 @@ async fn inbox_failure(response: reqwest::Response) -> String {
         Some("library_not_found" | "ridley_library_not_found") => {
             "Failed to add DOI: Ridley library not found.".into()
         }
-        _ => "Ridley save inbox isn't available on this server yet.".into(),
+        _ => SAVE_INBOX_UNAVAILABLE.into(),
     }
 }
 
@@ -884,14 +886,16 @@ mod tests {
 
     #[test]
     fn shared_http_forces_remote_mode_even_when_a_replica_is_configured() {
-        let mode = LibraryMode::from_config(
-            true,
-            None,
-            Some(PathBuf::from("/srv/operator/library.redb")),
-            Some(PathBuf::from("tt")),
-        )
-        .unwrap();
-        assert!(matches!(mode, LibraryMode::Remote));
+        for mode in [None, Some("local")] {
+            let selected = LibraryMode::from_config(
+                true,
+                mode,
+                Some(PathBuf::from("/srv/operator/library.redb")),
+                Some(PathBuf::from("tt")),
+            )
+            .unwrap();
+            assert!(matches!(selected, LibraryMode::Remote));
+        }
     }
 
     #[test]
