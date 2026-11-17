@@ -202,6 +202,18 @@ pub fn upstream_failure_report(text: &str) -> Option<UpstreamFailureReport> {
     })
 }
 
+/// A failure that stops a check: a throttle, a payment wall, a timeout, or a
+/// restart. Anything else the provider said, such as a 403 or a 422, only
+/// leaves the entry unchecked.
+pub fn is_stopping_failure(text: &str) -> bool {
+    upstream_failure_report(text).is_some_and(|report| {
+        matches!(
+            report.kind,
+            "rate_limited" | "payment_required" | "timeout" | "temporary_error"
+        )
+    })
+}
+
 fn timeout_status(text: &str) -> u16 {
     if text
         .lines()

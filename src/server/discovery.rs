@@ -590,3 +590,79 @@ mod contact_email_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use crate::server::tests::EnvGuard;
+    use crate::tool_args::AuditBibliographyArgs;
+    use rmcp::handler::server::wrapper::Parameters;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const REFUSALS: [u16; 5] = [400, 401, 403, 409, 422];
+
+    fn server(mock: &MockServer) -> Server {
+        Server::new_with_base(mock.uri()).with_providers(mock.uri())
+    }
+
+    async fn handle_answers(mock: &MockServer, doi: &str, status: u16, body: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/handles/{}",
+                crate::server::encode_path_segment(doi)
+            )))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(mock)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_refusal_from_doi_org_is_not_an_unregistered_doi() {
+        for status in REFUSALS {
+            let mock = MockServer::start().await;
+            handle_answers(&mock, "10.5555/r.1", status, json!({"message": "nope"})).await;
+
+            let result = server(&mock).registration_status("10.5555/r.1").await;
+
+            let error = result.expect_err(&format!("HTTP {status} must not decide registration"));
+            assert!(error.contains(&status.to_string()), "{error}");
+            assert!(error.contains("doi:10.5555/r.1"), "{error}");
+            assert!(!error.contains("UNREGISTERED"), "{error}");
+            let required = server(&mock).require_registered("10.5555/r.1").await;
+            assert!(!required.unwrap_err().starts_with("UNREGISTERED"));
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_not_found_answer_is_an_unregistered_doi() {
+        let mock = MockServer::start().await;
+        handle_answers(&mock, "10.5555/r.2", 404, json!({"responseCode": 100})).await;
+        assert_eq!(
+            server(&mock).registration_status("10.5555/r.2").await,
+            Ok(false)
+        );
+        let mock = MockServer::start().await;
+        handle_answers(&mock, "10.5555/r.3", 200, json!({"responseCode": 1})).await;
+        assert_eq!(
+            server(&mock).registration_status("10.5555/r.3").await,
+            Ok(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_bibliography_marks_a_refusal_unchecked_never_broken() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let mock = MockServer::start().await;
+        handle_answers(&mock, "10.5555/r.5", 403, json!({"message": "nope"})).await;
+        let args = AuditBibliographyArgs {
+            content: "@article{k, title={A paper that exists}, doi={10.5555/r.5}}".into(),
+        };
+
+        let text = server(&mock).audit_bibliography(Parameters(args)).await;
+
+        assert!(text.contains("k | UNCHECKED | doi:10.5555/r.5"), "{text}");
+        assert!(!text.contains("BROKEN"), "{text}");
+    }
+}

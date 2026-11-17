@@ -20,7 +20,8 @@ use crate::constants::{
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail, failure_text,
-    is_promoted_status, prefixed_failure, severe_lookup_message, upstream_failure_report,
+    is_promoted_status, is_stopping_failure, prefixed_failure, severe_lookup_message,
+    upstream_failure_report,
 };
 use crate::inbound_auth::{self, apply_bearer};
 use crate::overrides;
@@ -409,7 +410,8 @@ impl Server {
                 Ok(false) => {
                     return DoiOutcome::Broken("not registered at doi.org".into());
                 }
-                Err(error) => return DoiOutcome::Upstream(error),
+                Err(error) if is_stopping_failure(&error) => return DoiOutcome::Upstream(error),
+                Err(error) => return DoiOutcome::Unchecked(error),
                 Ok(true) => {}
             }
         }
@@ -482,9 +484,12 @@ impl Server {
             .send()
             .await
             .map_err(|error| provider_send_error(doi, &error))?;
-        if is_promoted_status(response.status()) {
-            // A throttle or a restart is not an answer about the DOI. Reading
-            // its body for a responseCode called every such DOI unregistered.
+        let status = response.status();
+        if !status.is_success() && status.as_u16() != 404 {
+            // Only a 404 is doi.org saying the handle does not exist. A
+            // throttle, a restart, or a refusal (400, 401, 403, 409, 422) says
+            // nothing about the DOI, and reading its body for a responseCode
+            // called every such DOI unregistered.
             return Err(provider_failure(
                 doi,
                 ProviderRead::Status(discovery::read_provider_status(response).await),

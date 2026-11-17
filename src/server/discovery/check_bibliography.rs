@@ -319,6 +319,11 @@ pub(super) fn state_from_outcome(doi: &str, outcome: &DoiOutcome) -> DoiState {
     match outcome {
         DoiOutcome::Broken(reason) => DoiState::Broken(reason.clone()),
         DoiOutcome::Upstream(error) => DoiState::Upstream(first_line(error)),
+        DoiOutcome::Unchecked(reason) => DoiState::Read(DoiFacts {
+            notices: Vec::new(),
+            preprint: None,
+            unread: Some(first_line(reason)),
+        }),
         DoiOutcome::Resolved {
             provider,
             provider_error,
@@ -326,7 +331,7 @@ pub(super) fn state_from_outcome(doi: &str, outcome: &DoiOutcome) -> DoiState {
         } => {
             if let Some(error) = provider_error
                 .as_deref()
-                .filter(|error| is_provider_stop(error))
+                .filter(|error| crate::http_error::is_stopping_failure(error))
             {
                 return DoiState::Upstream(first_line(error));
             }
@@ -344,18 +349,6 @@ pub(super) fn state_from_outcome(doi: &str, outcome: &DoiOutcome) -> DoiState {
             })
         }
     }
-}
-
-/// A throttle, a payment wall, a timeout, a restart, or a refusal from the
-/// publisher record stops the entry. Marking it unread would let a throttled
-/// run look like a clean one.
-fn is_provider_stop(error: &str) -> bool {
-    crate::http_error::upstream_failure_report(error).is_some_and(|report| {
-        matches!(
-            report.kind,
-            "rate_limited" | "payment_required" | "timeout" | "temporary_error" | "access_denied"
-        )
-    })
 }
 
 fn first_line(text: &str) -> String {
@@ -576,7 +569,7 @@ fn row_for(entry: &BibEntry, found: &Found, states: &HashMap<String, DoiState>) 
                 }
             }
             if let Some(reason) = &facts.unread {
-                row.notes.push(format!("publisher record unread: {reason}"));
+                row.notes.push(format!("not checked: {reason}"));
                 if row.status == Status::Ok {
                     row.status = Status::Unchecked;
                 }
@@ -1546,6 +1539,36 @@ mod tests {
             .await;
 
         assert_provider_stop(&text, "d429", "RATE LIMITED", "rate_limited", 429, "20").await;
+    }
+
+    #[tokio::test]
+    async fn a_doi_org_refusal_is_unchecked_with_the_reason_never_broken() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        for status in [400u16, 401, 403, 409, 422] {
+            let mock = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path(format!("/handles/{}", enc("10.5555/refused.1"))))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(json!({"message": "nope"})),
+                )
+                .mount(&mock)
+                .await;
+            let bib = "@article{k, title={A paper that exists}, doi={10.5555/refused.1}}";
+
+            let text = server(&mock)
+                .check_bibliography(Parameters(args(bib)))
+                .await;
+
+            assert!(
+                text.contains("[k] UNCHECKED doi:10.5555/refused.1"),
+                "{status}: {text}"
+            );
+            assert!(text.contains(&status.to_string()), "{status}: {text}");
+            assert!(
+                !text.contains("BROKEN") && !text.contains("not registered"),
+                "{text}"
+            );
+        }
     }
 
     #[tokio::test]
