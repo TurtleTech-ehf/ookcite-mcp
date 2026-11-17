@@ -617,7 +617,7 @@ impl Server {
                 "POST",
                 &format!("/ridley/libraries/{}/inbox", encode(&library.library_id)),
             )
-            .json(&serde_json::json!({ "doi": doi }))
+            .json(&inbox_enqueue_body(&library.library_id, doi))
             .send()
             .await;
         match response {
@@ -738,6 +738,32 @@ fn nonempty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
 
 fn encode(value: &str) -> String {
     urlencoding::encode(value).into_owned()
+}
+
+/// Body for `POST /ridley/libraries/{id}/inbox`.
+///
+/// The dashboard `EnqueueBody` is `deny_unknown_fields` and requires `csl`,
+/// `source`, `source_ref`, and `idempotency_key`. A top-level `doi` is
+/// rejected. The DOI lives inside `csl`.
+fn inbox_enqueue_body(library_id: &str, doi: &str) -> serde_json::Value {
+    let source_ref: String = doi.chars().take(512).collect();
+    let mut idempotency_key = format!("ookcite:{library_id}:{doi}");
+    if idempotency_key.len() > 200 {
+        let mut end = 200;
+        while !idempotency_key.is_char_boundary(end) {
+            end -= 1;
+        }
+        idempotency_key.truncate(end);
+    }
+    serde_json::json!({
+        "csl": {
+            "type": "article-journal",
+            "DOI": doi,
+        },
+        "source": "ookcite",
+        "source_ref": source_ref,
+        "idempotency_key": idempotency_key,
+    })
 }
 
 async fn dashboard_failure(response: reqwest::Response, prefix: &str) -> String {
@@ -1097,12 +1123,33 @@ mod tests {
     async fn add_by_doi_posts_only_to_the_ridley_save_inbox() {
         let mock = MockServer::start().await;
         mount_ridley_home(&mock).await;
+        let body = inbox_enqueue_body("lib-lab", "10.1000/transformer");
+        let mut keys = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["csl", "idempotency_key", "source", "source_ref"],
+            "dashboard EnqueueBody rejects unknown fields such as doi or user_id"
+        );
+        assert!(body.get("doi").is_none());
+        assert!(body.get("user_id").is_none());
+        assert!(body.get("key_b64").is_none());
+        assert_eq!(body["csl"]["DOI"], "10.1000/transformer");
+        assert_eq!(body["source"], "ookcite");
+        assert_eq!(body["source_ref"], "10.1000/transformer");
+        assert_eq!(
+            body["idempotency_key"],
+            "ookcite:lib-lab:10.1000/transformer"
+        );
         Mock::given(method("POST"))
             .and(path("/ridley/libraries/lib-lab/inbox"))
             .and(header("authorization", format!("Bearer {KEY}")))
-            .and(body_json(serde_json::json!({
-                "doi": "10.1000/transformer"
-            })))
+            .and(body_json(body))
             .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
                 "queued": true,
                 "id": "save-1"
