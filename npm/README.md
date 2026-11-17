@@ -557,12 +557,18 @@ times: resolve, reverse, and the lookup of the DOI they find. A paste that
 cannot fit is refused before any request. If a provider answers `429` or `402`
 for an entry, from the publisher record or from doi.org, that entry is
 `UPSTREAM` with the provider's `Retry-After`, never `OK` or `UNCHECKED`, and
-the result is an error result as described above. If doi.org or a publisher
-refuses the request in another way (400, 401, 403, 409, 422), the entry is
-`UNCHECKED` with that reason. Only a not-found answer from doi.org makes an
-entry `BROKEN`. A timeout or a connection failure is `UPSTREAM` with its cause
-(`UNREACHABLE <doi> : timed out reading <host>`), keeps the DOI, and makes the
-result an error result. This tool reads text you
+the result is an error result as described above. The same holds when doi.org
+itself refuses the request (400, 401, 403, 409, 422), when its answer is past
+the 1 MiB cap, redirects off its host, or is not a handle verdict (not JSON, no
+numeric `responseCode`, or a code other than 1 and 100): the entry is
+`UPSTREAM` with the DOI and the cause, and the structured result carries the
+status the host sent (`access_denied` for 401 and 403, `error` for the others),
+so a 401 is reported as 401. Only a not-found answer from doi.org (a 404, or
+`responseCode` 100) makes an entry `BROKEN`. If a Crossref or DataCite record
+refuses the read in another way, the entry is `UNCHECKED` with that reason,
+because the DOI itself was confirmed. A timeout or a connection failure is
+`UPSTREAM` with its cause (`UNREACHABLE <doi> : timed out reading <host>`),
+keeps the DOI, and makes the result an error result. This tool reads text you
 paste and checks the DOIs. For a manuscript `.bib` compared field by field with
 the record, use `audit_bibliography`. RIS is read here only.
 

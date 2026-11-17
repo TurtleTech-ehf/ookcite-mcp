@@ -319,11 +319,6 @@ pub(super) fn state_from_outcome(doi: &str, outcome: &DoiOutcome) -> DoiState {
     match outcome {
         DoiOutcome::Broken(reason) => DoiState::Broken(reason.clone()),
         DoiOutcome::Upstream(error) => DoiState::Upstream(first_line(error)),
-        DoiOutcome::Unchecked(reason) => DoiState::Read(DoiFacts {
-            notices: Vec::new(),
-            preprint: None,
-            unread: Some(first_line(reason)),
-        }),
         DoiOutcome::Resolved {
             provider,
             provider_error,
@@ -1542,9 +1537,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_doi_org_refusal_is_unchecked_with_the_reason_never_broken() {
+    async fn a_doi_org_refusal_is_an_error_result_with_its_own_status() {
         let _key = EnvGuard::unset("OOKCITE_API_KEY");
-        for status in [400u16, 401, 403, 409, 422] {
+        let table: [(u16, &str); 5] = [
+            (400, "error"),
+            (401, "access_denied"),
+            (403, "access_denied"),
+            (409, "error"),
+            (422, "error"),
+        ];
+        for (status, kind) in table {
             let mock = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path(format!("/handles/{}", enc("10.5555/refused.1"))))
@@ -1560,14 +1562,70 @@ mod tests {
                 .await;
 
             assert!(
-                text.contains("[k] UNCHECKED doi:10.5555/refused.1"),
+                text.contains("[k] UPSTREAM doi:10.5555/refused.1"),
                 "{status}: {text}"
             );
-            assert!(text.contains(&status.to_string()), "{status}: {text}");
             assert!(
                 !text.contains("BROKEN") && !text.contains("not registered"),
+                "{status}: {text}"
+            );
+            assert!(text.contains(&format!("{status} ")), "{status}: {text}");
+            let mut result = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
+            crate::server::promote_upstream_failure(&mut result);
+            assert_eq!(result.is_error, Some(true), "{status}: {text}");
+            let structured = result.structured_content.unwrap();
+            assert_eq!(structured["kind"], kind, "{status}");
+            assert_eq!(structured["http_status"], status, "{status}");
+            assert!(
+                structured["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("doi:10.5555/refused.1"),
+                "{status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_oversized_or_redirecting_doi_org_answer_stops_the_entry() {
+        let _key = EnvGuard::unset("OOKCITE_API_KEY");
+        let bib = "@article{k, title={A paper that exists}, doi={10.5555/odd.1}}";
+        let handle = format!("/handles/{}", enc("10.5555/odd.1"));
+        let big = json!({"responseCode": 1, "padding": "x".repeat(crate::constants::PROVIDER_BODY_LIMIT + 1024)});
+        let answers = [
+            (
+                ResponseTemplate::new(200).set_body_json(big),
+                "provider response exceeded",
+            ),
+            (
+                ResponseTemplate::new(302).insert_header("location", "https://evil.example/x"),
+                "provider redirect refused",
+            ),
+        ];
+        for (answer, cause) in answers {
+            let mock = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path(handle.clone()))
+                .respond_with(answer)
+                .mount(&mock)
+                .await;
+
+            let text = server(&mock)
+                .check_bibliography(Parameters(args(bib)))
+                .await;
+
+            assert!(
+                text.contains("[k] UPSTREAM doi:10.5555/odd.1"),
+                "{cause}: {text}"
+            );
+            assert!(text.contains(cause), "{cause}: {text}");
+            assert!(
+                !text.contains("UNCHECKED") && !text.contains("BROKEN"),
                 "{text}"
             );
+            let mut result = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
+            crate::server::promote_upstream_failure(&mut result);
+            assert_eq!(result.is_error, Some(true), "{cause}: {text}");
         }
     }
 

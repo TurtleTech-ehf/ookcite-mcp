@@ -94,9 +94,6 @@ impl PublisherNotice {
 pub enum DoiOutcome {
     Broken(String),
     Upstream(String),
-    /// The DOI could not be checked, and the provider's answer does not say
-    /// it is broken: a refusal such as a 403. Holds the reason.
-    Unchecked(String),
     Resolved {
         metadata: Value,
         provider: Option<Value>,
@@ -740,14 +737,6 @@ fn row_for(entry: &BibEntry, outcomes: &HashMap<String, DoiOutcome>) -> Row {
             head: format!("{key} | BROKEN | doi:{doi} | {reason}"),
             details: Vec::new(),
         },
-        DoiOutcome::Unchecked(reason) => {
-            let title = entry.title.as_deref().unwrap_or("(no title)");
-            Row {
-                status: AuditStatus::Unchecked,
-                head: format!("{key} | UNCHECKED | doi:{doi} | {title}"),
-                details: vec![reason.clone()],
-            }
-        }
         DoiOutcome::Upstream(detail) => {
             let title = entry.title.as_deref().unwrap_or("(no title)");
             Row {

@@ -182,15 +182,23 @@ pub fn upstream_failure_report(text: &str) -> Option<UpstreamFailureReport> {
     } else if text.contains("TEMPORARY ERROR") {
         ("temporary_error", Some(503), Some("TEMPORARY ERROR"))
     } else if line_has_prefix(text, "ACCESS DENIED") {
-        ("access_denied", Some(403), Some("ACCESS DENIED"))
+        (
+            "access_denied",
+            Some(status_on_marked_line(text, "ACCESS DENIED").unwrap_or(403)),
+            Some("ACCESS DENIED"),
+        )
     } else if line_has_prefix(text, "AUTH REQUIRED") {
         ("auth_required", Some(401), None)
     } else if line_has_prefix(text, "CLIENT ERROR") {
-        ("client_error", Some(400), None)
+        (
+            "client_error",
+            Some(status_on_marked_line(text, "CLIENT ERROR").unwrap_or(400)),
+            None,
+        )
     } else if line_has_prefix(text, "UNREGISTERED") {
         ("unregistered", None, None)
     } else if line_has_prefix(text, "ERROR") {
-        ("error", None, None)
+        ("error", status_on_marked_line(text, "ERROR"), None)
     } else if line_has_prefix(text, "Failed") {
         ("failed", None, None)
     } else if line_has_prefix(text, "REFUSED") {
@@ -214,6 +222,36 @@ pub fn is_stopping_failure(text: &str) -> bool {
             report.kind,
             "rate_limited" | "payment_required" | "timeout" | "temporary_error" | "unreachable"
         )
+    })
+}
+
+/// The HTTP status a provider failure line names. The text is
+/// `<MARKER> <source> : <status> <reason>: <detail>`, and the status is read
+/// only after the first ` : `, so digits in a DOI or a host never count.
+/// `None` when the line carries no status, as for a body that was too large.
+fn status_on_marked_line(text: &str, marker: &str) -> Option<u16> {
+    text.lines().find_map(|line| {
+        let line = line.trim_start();
+        let line = match line.strip_prefix('[') {
+            Some(rest) => rest
+                .split_once(']')
+                .map_or(line, |(_, after)| after.trim_start()),
+            None => line,
+        };
+        let rest = line.strip_prefix(marker)?;
+        let (_, detail) = rest.split_once(" : ")?;
+        let digits: String = detail.chars().take_while(char::is_ascii_digit).collect();
+        let ends_cleanly = detail[digits.len()..]
+            .chars()
+            .next()
+            .is_none_or(|next| next == ' ' || next == ':');
+        if digits.len() != 3 || !ends_cleanly {
+            return None;
+        }
+        digits
+            .parse()
+            .ok()
+            .filter(|status| (100..=599).contains(status))
     })
 }
 
@@ -547,6 +585,50 @@ mod payment_required_tests {
             detail.chars().filter(|c| *c == 'x').count(),
             MAX_ERROR_BODY_CHARS
         );
+    }
+
+    #[test]
+    fn a_refusal_reports_the_status_the_provider_sent() {
+        let table = [
+            (
+                "ACCESS DENIED doi.org for doi:10.1/x : 401 Unauthorized: no",
+                "access_denied",
+                401,
+            ),
+            (
+                "ACCESS DENIED doi.org for doi:10.1/x : 403 Forbidden: no",
+                "access_denied",
+                403,
+            ),
+            (
+                "ERROR doi.org for doi:10.403/x : 400 Bad Request: no",
+                "error",
+                400,
+            ),
+            (
+                "    ERROR doi.org for doi:10.1/x : 409 Conflict",
+                "error",
+                409,
+            ),
+            (
+                "ERROR doi.org for doi:10.1/x : 422 Unprocessable Entity: no",
+                "error",
+                422,
+            ),
+            (
+                "CLIENT ERROR 10.1/x : 418 I'm a teapot",
+                "client_error",
+                418,
+            ),
+        ];
+        for (text, kind, status) in table {
+            let report = upstream_failure_report(text).unwrap();
+            assert_eq!(report.kind, kind, "{text}");
+            assert_eq!(report.http_status, Some(status), "{text}");
+        }
+        let no_status =
+            upstream_failure_report("ERROR corpus : provider response exceeded 9 bytes");
+        assert_eq!(no_status.unwrap().http_status, None);
     }
 
     #[test]

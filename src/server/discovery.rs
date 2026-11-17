@@ -657,18 +657,77 @@ mod registration_tests {
     }
 
     #[tokio::test]
-    async fn audit_bibliography_marks_a_refusal_unchecked_never_broken() {
+    async fn audit_bibliography_reports_a_refusal_as_an_error_with_its_status() {
         let _key = EnvGuard::unset("OOKCITE_API_KEY");
-        let mock = MockServer::start().await;
-        handle_answers(&mock, "10.5555/r.5", 403, json!({"message": "nope"})).await;
-        let args = AuditBibliographyArgs {
-            content: "@article{k, title={A paper that exists}, doi={10.5555/r.5}}".into(),
-        };
+        for status in REFUSALS {
+            let mock = MockServer::start().await;
+            handle_answers(&mock, "10.5555/r.5", status, json!({"message": "nope"})).await;
+            let args = AuditBibliographyArgs {
+                content: "@article{k, title={A paper that exists}, doi={10.5555/r.5}}".into(),
+            };
 
-        let text = server(&mock).audit_bibliography(Parameters(args)).await;
+            let text = server(&mock).audit_bibliography(Parameters(args)).await;
 
-        assert!(text.contains("k | UNCHECKED | doi:10.5555/r.5"), "{text}");
-        assert!(!text.contains("BROKEN"), "{text}");
+            assert!(
+                text.contains("k | UPSTREAM | doi:10.5555/r.5"),
+                "{status}: {text}"
+            );
+            assert!(!text.contains("BROKEN"), "{status}: {text}");
+            let report = crate::http_error::upstream_failure_report(&text)
+                .unwrap_or_else(|| panic!("{status} is not an error result: {text}"));
+            assert_eq!(report.http_status, Some(status), "{status}: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_handle_answer_that_is_not_a_registration_verdict_is_an_error() {
+        let doi = "10.5555/q.1";
+        let errors: [(u16, &str); 6] = [
+            (200, "<html>maintenance</html>"),
+            (200, "{}"),
+            (200, r#"{"responseCode":"1"}"#),
+            (200, r#"{"responseCode":2}"#),
+            (200, r#"{"responseCode":null}"#),
+            (404, "<html>Not Found</html>"),
+        ];
+        for (status, body) in errors {
+            let mock = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/handles/{}",
+                    crate::server::encode_path_segment(doi)
+                )))
+                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .mount(&mock)
+                .await;
+
+            let result = server(&mock).registration_status(doi).await;
+
+            let error = result.expect_err(&format!("{status} {body} decided registration"));
+            assert!(error.starts_with("ERROR "), "{error}");
+            assert!(error.contains("doi:10.5555/q.1"), "{error}");
+        }
+        let verdicts: [(u16, &str, bool); 3] = [
+            (200, r#"{"responseCode":1.0}"#, true),
+            (200, r#"{"responseCode":100}"#, false),
+            (404, r#"{"responseCode":100}"#, false),
+        ];
+        for (status, body, registered) in verdicts {
+            let mock = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/handles/{}",
+                    crate::server::encode_path_segment(doi)
+                )))
+                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .mount(&mock)
+                .await;
+            assert_eq!(
+                server(&mock).registration_status(doi).await,
+                Ok(registered),
+                "{status} {body}"
+            );
+        }
     }
 }
 

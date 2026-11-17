@@ -20,8 +20,7 @@ use crate::constants::{
 };
 use crate::http_error::{
     classify_collection_create_failure, classify_lookup_doi_failure, error_detail, failure_text,
-    is_promoted_status, is_stopping_failure, prefixed_failure, severe_lookup_message,
-    upstream_failure_report,
+    is_promoted_status, prefixed_failure, severe_lookup_message, upstream_failure_report,
 };
 use crate::inbound_auth::{self, apply_bearer};
 use crate::overrides;
@@ -162,6 +161,32 @@ fn provider_failure(doi: &str, error: ProviderRead) -> String {
         ProviderRead::Redirect => format!("ERROR {doi} : provider redirect refused"),
         ProviderRead::Failed(cause) => format!("UNREACHABLE {doi} : {cause}"),
         ProviderRead::Status(status) => status.text(&format!("{} for doi:{doi}", status.host())),
+    }
+}
+
+/// doi.org's handle API answers `responseCode` 1 for a registered handle and
+/// 100 for one that does not exist. Anything else, including a body that is
+/// not JSON, a missing or non-numeric code, or another code (2 is a server
+/// error, 200 is "values not found"), says nothing about the DOI. It is an
+/// error, not a verdict, so it can never become "not registered".
+fn handle_verdict(bytes: &[u8]) -> Result<bool, String> {
+    let body: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| "the body is not JSON".to_string())?;
+    let code = match body.get("responseCode") {
+        Some(serde_json::Value::Number(number)) => number.as_i64().or_else(|| {
+            number
+                .as_f64()
+                .filter(|value| value.fract() == 0.0)
+                .map(|value| value as i64)
+        }),
+        Some(_) => None,
+        None => return Err("it has no responseCode".to_string()),
+    };
+    match code {
+        Some(1) => Ok(true),
+        Some(100) => Ok(false),
+        Some(other) => Err(format!("responseCode {other}")),
+        None => Err("responseCode is not a number".to_string()),
     }
 }
 
@@ -452,8 +477,12 @@ impl Server {
                 Ok(false) => {
                     return DoiOutcome::Broken("not registered at doi.org".into());
                 }
-                Err(error) if is_stopping_failure(&error) => return DoiOutcome::Upstream(error),
-                Err(error) => return DoiOutcome::Unchecked(error),
+                // doi.org gave no answer about this DOI: a throttle, a refusal
+                // (400, 401, 403, 409, 422), a body past the cap, a refused
+                // redirect, or a body that is not a handle answer. The entry
+                // was not checked, and the caller must see a failed check
+                // with the status, not a clean-looking row.
+                Err(error) => return DoiOutcome::Upstream(error),
                 Ok(true) => {}
             }
         }
@@ -537,12 +566,15 @@ impl Server {
                 ProviderRead::Status(discovery::read_provider_status(response).await),
             ));
         }
+        let host = response.url().host_str().unwrap_or("doi.org").to_string();
         let bytes = read_capped_body(response)
             .await
             .map_err(|error| provider_failure(doi, error))?;
-        let body: serde_json::Value =
-            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-        Ok(body.get("responseCode").and_then(|value| value.as_i64()) == Some(1))
+        handle_verdict(&bytes).map_err(|why| {
+            format!(
+                "ERROR {host} for doi:{doi} : the handle answer ({status}) is not a registration verdict: {why}"
+            )
+        })
     }
 
     async fn provider_record(&self, doi: &str) -> Result<Option<serde_json::Value>, String> {
@@ -7054,7 +7086,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn audit_bibliography_treats_a_success_without_response_code_as_broken() {
+    async fn audit_bibliography_treats_a_success_without_response_code_as_unchecked_never_ok() {
         let _key = EnvGuard::unset("OOKCITE_API_KEY");
         let mock = MockServer::start().await;
         let doi = "10.1000/no-code";
@@ -7079,10 +7111,14 @@ mod tests {
             }))
             .await;
         assert!(
-            result.contains("| BROKEN |") && result.contains("not registered at doi.org"),
+            result.contains("plain | UPSTREAM | doi:10.1000/no-code")
+                && result.contains("not a registration verdict: it has no responseCode"),
             "{result}"
         );
-        assert!(!result.contains("| OK |"), "{result}");
+        assert!(
+            !result.contains("BROKEN") && !result.contains("| OK |"),
+            "{result}"
+        );
     }
 
     #[tokio::test]
