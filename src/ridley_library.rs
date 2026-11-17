@@ -195,7 +195,7 @@ struct ExportFile {
 impl Server {
     #[tool(
         name = "list_libraries",
-        description = "List Ridley libraries visible to the signed-in user. In remote mode the setup --connect bearer scopes the dashboard response to that user; in local mode tt opens the configured ridley-core replica.",
+        description = "List Ridley libraries visible to the signed-in user. This catalogue-only operation uses the setup --connect bearer so the dashboard scopes the response to that user.",
         annotations(
             title = "List Ridley libraries",
             read_only_hint = true,
@@ -206,13 +206,7 @@ impl Server {
         &self,
         #[allow(unused)] Parameters(_args): Parameters<ListLibrariesArgs>,
     ) -> String {
-        match LibraryMode::from_environment() {
-            Ok(LibraryMode::Remote) => self.remote_list_libraries().await,
-            Ok(LibraryMode::Local { replica, tt }) => {
-                run_tt(&tt, &replica, &["library", "list", "--json"]).await
-            }
-            Err(error) => error,
-        }
+        self.remote_list_libraries().await
     }
 
     #[tool(
@@ -317,6 +311,7 @@ impl Server {
                     &[
                         "library",
                         "export",
+                        "--collection",
                         &args.collection,
                         "--library",
                         &args.library,
@@ -681,8 +676,16 @@ fn combined_query(args: &SearchLibraryArgs) -> String {
             .filter(|value| !value.is_empty()),
     ]
     .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
+    .enumerate()
+    .filter_map(|(index, value)| {
+        value.map(|value| match index {
+            1 => format!("title:{value}"),
+            2 => format!("author:{value}"),
+            3 => format!("tag:{value}"),
+            _ => value.to_string(),
+        })
+    })
+    .collect::<Vec<String>>()
     .join(" ")
 }
 
@@ -727,6 +730,8 @@ async fn dashboard_failure(response: reqwest::Response, prefix: &str) -> String 
 async fn run_tt(tt: &PathBuf, replica: &PathBuf, args: &[&str]) -> String {
     let output = tokio::process::Command::new(tt)
         .args(args)
+        .arg("--replica")
+        .arg(replica)
         .env("TT_RIDLEY_REPLICA", replica)
         .stdin(std::process::Stdio::null())
         .output()
@@ -829,7 +834,10 @@ mod tests {
             tag: Some("read".into()),
             full_text: false,
         };
-        assert_eq!(combined_query(&args), "attention transformer Vaswani read");
+        assert_eq!(
+            combined_query(&args),
+            "attention title:transformer author:Vaswani tag:read"
+        );
     }
 
     #[test]
@@ -1066,7 +1074,7 @@ mod tests {
         let tt = directory.path().join("tt-fixture");
         std::fs::write(
             &tt,
-            "#!/bin/sh\nset -eu\ntest -f \"$TT_RIDLEY_REPLICA\"\nprintf '%s\\n' '{\"item_id\":\"paper-1\",\"highlights\":[\"scaled dot-product attention\"]}'\n",
+            "#!/bin/sh\nset -eu\ntest -f \"$TT_RIDLEY_REPLICA\"\ncase \"$*\" in *\"--replica $TT_RIDLEY_REPLICA\"*) ;; *) exit 3 ;; esac\nprintf '%s\\n' '{\"item_id\":\"paper-1\",\"highlights\":[\"scaled dot-product attention\"]}'\n",
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&tt).unwrap().permissions();

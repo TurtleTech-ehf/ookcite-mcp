@@ -21,7 +21,8 @@ Local mode supports:
   full-text search.
 - `get_item`: metadata, notes and highlights.
 - `export_bib`: collection export from the synced replica.
-- `list_libraries`: libraries represented in the local replica.
+- `list_libraries` is the exception: it lists authenticated Ridley library ids
+  from `GET /api/v1/ridley/libraries` and never reads object bodies.
 
 `add_by_doi` always uses the signed-in dashboard credential and posts the DOI
 to `POST /api/v1/ridley/libraries/{id}/inbox`. The inbox is consumed by a
