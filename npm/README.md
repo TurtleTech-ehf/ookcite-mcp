@@ -304,6 +304,7 @@ eduGenAI Chat, after `ookcite-api.turtletech.us` is whitelisted:
 | `find_open_access_pdf` | Link to a legal open-access copy of a DOI (Unpaywall)   |
 | `related_papers`       | Related works, references, or citing works of a DOI (OpenAlex) |
 | `cite_while_writing`   | Candidate citations for one claim sentence, with reasons |
+| `check_bibliography`   | Pasted BibTeX or RIS: DOIs, retractions, preprint upgrades, duplicates |
 
 See [Discovery tools](#discovery-tools) for inputs, errors, and example calls.
 
@@ -412,10 +413,10 @@ These three require an Academic or Business plan.
 
 ## Discovery tools
 
-These tools read two public indexes next to the OokCite API: Unpaywall for
-open-access locations and OpenAlex for the citation graph. They return links
-and metadata, never files. Calls go out over https to those two hosts only,
-with redirects pinned to the same hosts, and a response is read to at most
+`find_open_access_pdf` and `related_papers` read two public indexes next to the
+OokCite API: Unpaywall for open-access locations and OpenAlex for the citation
+graph. They return links and metadata, never files. Those calls go out over
+https to those two hosts only, with redirects pinned to the same hosts, and a response is read to at most
 1 MiB. They send a contact address, `rgoswami@ieee.org` by default, because
 both services ask for one; set `OOKCITE_MCP_CONTACT_EMAIL` to use your own.
 
@@ -517,6 +518,56 @@ Searched the OokCite corpus for: sheared colloidal glasses nucleate crystals fas
    Notices: no retraction, withdrawal, or concern in the publisher record
 Left out: 1 hit(s) with no DOI, 0 older than year_from.
 These are keyword matches on titles and the corpus index. None is evidence that the paper supports the claim: read it, then validate_doi and format_citation the one you use.
+```
+
+### check_bibliography
+
+Input: `{"content": "<BibTeX or RIS text>", "format": "auto" | "bibtex" | "ris", "resolve_missing_dois": true}`.
+Only `content` is required (up to 1 MiB and 2000 entries). `format` defaults to
+`auto`, which reads RIS when the text has `TY  -` records.
+
+For each entry it reports the DOI (the one written, or one found from the title
+when the entry has none), a retraction, withdrawal, or expression of concern
+from the Crossref or DataCite record, and, for a preprint, the published
+version the publisher records (`UPGRADE`). A DOI found from a title is accepted
+only when the title agrees closely and neither the year nor the first author
+conflicts; otherwise the entry stays `NO DOI` and the closest record is named,
+not used. Duplicates are grouped by DOI, by title (when year and first author
+do not conflict), and as a preprint next to its published version. Set
+`resolve_missing_dois` to false to skip title lookups.
+
+Each DOI looked up counts against the daily quota. A title lookup counts three
+times: resolve, reverse, and the lookup of the DOI they find. A paste that
+cannot fit is refused before any request. If a provider answers `429` or `402`
+for an entry from the publisher record, that entry is
+`UPSTREAM` with the provider's `Retry-After`, never `OK` or `UNCHECKED`, and
+the result is an error result as described above. This tool reads text you
+paste and checks the DOIs. For a manuscript `.bib` compared field by field with
+the record, use `audit_bibliography`. RIS is read here only.
+
+Example (mock data):
+
+```
+> check_bibliography {"content": "@article{clean2020, ...}\n... (8 entries)"}
+BIBLIOGRAPHY CHECK (BibTeX): 8 entries, 6 with a DOI, 1 DOI(s) found from titles
+Summary: 1 RETRACTED, 2 UPGRADE, 1 NO DOI, 4 OK; 2 duplicate group(s)
+[clean2020] OK doi:10.5555/clean.2020 (article)
+[clean2020b] OK doi:10.5555/clean.2020 (article)
+[retracted2019] RETRACTED doi:10.5555/retracted.2019 (article)
+    retracted by doi:10.5555/notice.2020 on 2020-06
+[preprint2021] UPGRADE doi:10.5555/preprint.2021 (misc)
+    preprint (Crossref type posted-content); published version doi:10.5555/pub.2021. Cite the published version.
+[published2021] OK doi:10.5555/pub.2021 (article)
+[arxiv2022] UPGRADE doi:10.48550/arxiv.2201.00001 (misc)
+    preprint (DataCite resource type Preprint); published version doi:10.5555/pub.2022. Cite the published version.
+[nodoi2018] OK doi:10.5555/found.2018 (article)
+    DOI found from the title: doi:10.5555/found.2018 (title overlap 100%, year and first author do not conflict). Add it to the entry.
+[ghost2017] NO DOI (article)
+    no DOI; no record matches the title
+Duplicates:
+- [clean2020], [clean2020b]: same DOI doi:10.5555/clean.2020
+- [preprint2021], [published2021]: preprint doi:10.5555/preprint.2021 and its published version doi:10.5555/pub.2021
+Metadata only. This does not compare titles, authors, or pages with the record: run audit_bibliography on the corrected .bib for that.
 ```
 
 ## Plans & Pricing

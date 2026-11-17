@@ -13,6 +13,7 @@ use serde_json::Value;
 use super::{read_capped_body, ProviderRead, Server, PROVIDER_USER_AGENT};
 use crate::http_error::error_detail;
 
+mod check_bibliography;
 mod cite_while_writing;
 mod open_access;
 mod related_papers;
@@ -208,6 +209,7 @@ pub(super) fn discovery_routers() -> rmcp::handler::server::tool::ToolRouter<Ser
     Server::open_access_tool_router()
         + Server::related_papers_tool_router()
         + Server::cite_while_writing_tool_router()
+        + Server::check_bibliography_tool_router()
 }
 
 #[cfg(test)]

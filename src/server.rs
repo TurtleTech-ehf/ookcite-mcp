@@ -4037,13 +4037,13 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    struct EnvGuard {
+    pub(super) struct EnvGuard {
         key: &'static str,
         prev: Option<String>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
     impl EnvGuard {
-        fn set(key: &'static str, val: &str) -> Self {
+        pub(super) fn set(key: &'static str, val: &str) -> Self {
             let lock = env_lock();
             let prev = std::env::var(key).ok();
             // SAFETY: held under env_lock for the guard lifetime.
@@ -4055,7 +4055,7 @@ mod tests {
             }
         }
 
-        fn unset(key: &'static str) -> Self {
+        pub(super) fn unset(key: &'static str) -> Self {
             let lock = env_lock();
             let prev = std::env::var(key).ok();
             // SAFETY: held under env_lock for the guard lifetime.
