@@ -502,6 +502,10 @@ Input: `{"claim": "<sentence>", "limit": 1-10, "year_from": 1000-2100, "check_re
 Only `claim` is required (12 to 2000 characters). `limit` defaults to 5 and
 `check_retractions` to true.
 
+The corpus answer is read like every provider answer: a body over 1 MiB is
+refused while it streams, and a body that is not JSON is an error
+(`ERROR corpus : ...`), not an empty result.
+
 The claim is cut to its content words and searched in the OokCite corpus. Each
 candidate lists the claim words its title and venue share, its corpus score,
 year, venue, and DOI, so the reason for each suggestion is something you can

@@ -20,7 +20,7 @@ use serde_json::Value;
 use crate::batch_limits::read_only_concurrency;
 use crate::bib_audit::{notices_from_provider, PublisherNotice};
 use crate::http_error::failure_text;
-use crate::server::Server;
+use crate::server::{provider_failure, read_capped_body, Server};
 use ookcite_mcp::endpoints;
 
 const DEFAULT_LIMIT: u32 = 5;
@@ -387,6 +387,17 @@ pub(super) enum Screen {
     Skipped,
 }
 
+/// Read the corpus answer, refusing a body past [`PROVIDER_BODY_LIMIT`] while
+/// it streams, as every provider read does, and refusing one that is not JSON
+/// rather than reading it as an empty result.
+async fn corpus_body(response: reqwest::Response) -> Result<Value, String> {
+    let bytes = read_capped_body(response)
+        .await
+        .map_err(|error| provider_failure("corpus", error))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| "ERROR corpus : the response was not valid JSON".to_string())
+}
+
 pub(super) fn screen_from_provider(provider: Result<Option<Value>, String>) -> Screen {
     match provider {
         Err(error) => Screen::Unchecked(error),
@@ -565,9 +576,10 @@ impl Server {
             })
             .await;
         let data: Value = match response {
-            Ok(response) if response.status().is_success() => {
-                response.json().await.unwrap_or_default()
-            }
+            Ok(response) if response.status().is_success() => match corpus_body(response).await {
+                Ok(data) => data,
+                Err(text) => return text,
+            },
             Ok(response) => return failure_text(response, "Failed to search the corpus").await,
             Err(error) => return format!("Failed to search the corpus: {error}"),
         };
@@ -935,6 +947,50 @@ mod tests {
             crate::http_error::upstream_failure_report(&text).is_none(),
             "{text}"
         );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_corpus_body_is_refused_while_it_streams() {
+        let mock = MockServer::start().await;
+        let mut body = corpus_hits();
+        body["padding"] = json!("x".repeat(crate::constants::PROVIDER_BODY_LIMIT + 1024));
+        mount_corpus(&mock, body).await;
+
+        let text = plain_server(&mock)
+            .cite_while_writing(Parameters(args(CLAIM)))
+            .await;
+
+        assert!(
+            text.starts_with("ERROR corpus : provider response exceeded"),
+            "{}",
+            &text[..text.len().min(300)]
+        );
+        assert!(
+            text.contains(&crate::constants::PROVIDER_BODY_LIMIT.to_string()),
+            "{}",
+            &text[..text.len().min(300)]
+        );
+        assert!(
+            !text.contains("Candidates"),
+            "no candidate from a refused body"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_corpus_body_is_an_error_not_an_empty_answer() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/search/enhanced"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>maintenance</html>"))
+            .mount(&mock)
+            .await;
+
+        let text = plain_server(&mock)
+            .cite_while_writing(Parameters(args(CLAIM)))
+            .await;
+
+        assert!(text.starts_with("ERROR corpus : "), "{text}");
+        assert!(!text.contains("No usable candidates"), "{text}");
     }
 
     #[tokio::test]
