@@ -35,7 +35,6 @@ const CLAIM_ECHO_CHARS: usize = 140;
 const HITS_PER_CANDIDATE: u32 = 4;
 const MAX_HITS: u32 = 40;
 const MIN_YEAR_FROM: i32 = 1000;
-const MAX_YEAR_FROM: i32 = 2100;
 
 fn default_limit() -> u32 {
     DEFAULT_LIMIT
@@ -55,9 +54,9 @@ pub struct CiteWhileWritingArgs {
     #[serde(default = "default_limit")]
     #[schemars(range(min = 1, max = 10))]
     pub limit: u32,
-    /// Drop candidates published before this year, 1000 to next year.
+    /// Drop candidates published before this year. Must be 1000 or later and no later than next year; the upper bound moves with the calendar, so the server checks it and the schema does not state one.
     #[serde(default)]
-    #[schemars(range(min = 1000, max = 2100))]
+    #[schemars(range(min = 1000))]
     pub year_from: Option<i32>,
     /// Read each candidate's Crossref or DataCite record and hold back a retraction, withdrawal, or expression of concern (default true).
     #[serde(default = "default_true")]
@@ -410,7 +409,7 @@ fn current_year() -> i32 {
     year_of_unix_secs(secs)
 }
 
-/// `year_from` must be a year the corpus can hold: 1000 to 2100, and no later
+/// `year_from` must be a year the corpus can hold: 1000 or later, and no later
 /// than next year (a paper can be dated ahead of its issue). Anything else
 /// would only ever filter out every hit, so it is refused as invalid
 /// parameters before a request is made.
@@ -418,7 +417,7 @@ fn check_year_from(year_from: Option<i32>) -> Result<(), rmcp::ErrorData> {
     let Some(year) = year_from else {
         return Ok(());
     };
-    let latest = current_year().saturating_add(1).min(MAX_YEAR_FROM);
+    let latest = current_year().saturating_add(1);
     if (MIN_YEAR_FROM..=latest).contains(&year) {
         return Ok(());
     }
@@ -1146,10 +1145,26 @@ mod tests {
         assert_eq!(props["limit"]["default"], 5);
         assert_eq!(props["check_retractions"]["default"], true);
         assert_eq!(props["year_from"]["minimum"], 1000);
+        assert!(
+            props["year_from"].get("maximum").is_none(),
+            "the upper bound moves with the calendar, so the schema must not state one: {}",
+            props["year_from"]
+        );
         assert!(serde_json::from_value::<CiteWhileWritingArgs>(
             json!({"claim": CLAIM, "style": "apa"})
         )
         .is_err());
+    }
+
+    #[test]
+    fn the_readme_states_the_year_from_range_the_server_enforces() {
+        for readme in [
+            include_str!("../../../README.md"),
+            include_str!("../../../npm/README.md"),
+        ] {
+            assert!(!readme.contains("1000-2100"), "stale year_from range");
+            assert!(readme.contains("\"year_from\": 1000-next year"));
+        }
     }
 
     #[test]

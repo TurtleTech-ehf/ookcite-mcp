@@ -498,7 +498,7 @@ Metadata only. Check a DOI with validate_doi before citing it, and format it wit
 
 ### cite_while_writing
 
-Input: `{"claim": "<sentence>", "limit": 1-10, "year_from": 1000-2100, "check_retractions": true}`.
+Input: `{"claim": "<sentence>", "limit": 1-10, "year_from": 1000-next year, "check_retractions": true}`.
 Only `claim` is required (12 to 2000 characters). `limit` defaults to 5 and
 `check_retractions` to true. `year_from` must be between 1000 and next year;
 anything else is refused as invalid params (JSON-RPC -32602, naming the value
