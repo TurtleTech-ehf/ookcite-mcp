@@ -428,7 +428,9 @@ where
         return Ok(Some(SecretString::new(value.into())));
     }
     if let Some((service, account)) = config.platform.as_ref() {
-        return backend.get_password(service, account);
+        if let Some(secret) = backend.get_password(service, account)? {
+            return Ok(Some(secret));
+        }
     }
     if command_timed_out {
         anyhow::bail!("credential command timed out")
@@ -450,18 +452,37 @@ async fn load_command_credential(
     let mut command = {
         let mut command = tokio::process::Command::new("sh");
         command.args(["-c", retrieval_command]);
+        // Run the retrieval shell in its own process group so timeout cleanup
+        // can terminate the whole pipeline, not only the shell process itself.
+        #[cfg(unix)]
+        command.process_group(0);
         command
     };
+    #[cfg(windows)]
+    // Windows behavior is unchanged: kill_on_drop applies to the process tree
+    // semantics available there, and we do not alter platform-specific rules.
+    let _windows_behavior_is_unchanged = ();
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let output = match tokio::time::timeout(command_timeout, command.output()).await {
+    let child = command
+        .spawn()
+        .map_err(|_| anyhow::anyhow!("credential command could not be started"))?;
+    #[cfg(unix)]
+    let mut process_group = ChildProcessGroup::new(child.id());
+    let output = match tokio::time::timeout(command_timeout, child.wait_with_output()).await {
         Ok(output) => {
+            #[cfg(unix)]
+            process_group.disarm();
             output.map_err(|_| anyhow::anyhow!("credential command could not be started"))?
         }
-        Err(_) => return Ok(CommandCredential::TimedOut),
+        Err(_) => {
+            #[cfg(unix)]
+            process_group.kill_now();
+            return Ok(CommandCredential::TimedOut);
+        }
     };
     if !output.status.success() {
         anyhow::bail!("credential command failed")
@@ -506,10 +527,42 @@ fn present(value: Option<&str>) -> bool {
     value.is_some_and(|value| !value.trim().is_empty())
 }
 
+#[cfg(unix)]
+struct ChildProcessGroup {
+    leader_pid: Option<u32>,
+}
+
+#[cfg(unix)]
+impl ChildProcessGroup {
+    fn new(leader_pid: Option<u32>) -> Self {
+        Self { leader_pid }
+    }
+
+    fn disarm(&mut self) {
+        self.leader_pid = None;
+    }
+
+    fn kill_now(&mut self) {
+        if let Some(leader_pid) = self.leader_pid.take() {
+            unsafe {
+                libc::kill(-(leader_pid as i32), libc::SIGKILL);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ChildProcessGroup {
+    fn drop(&mut self) {
+        self.kill_now();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -600,5 +653,91 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(credential.expose_secret(), "file-key");
+    }
+
+    #[tokio::test]
+    async fn command_timeout_with_empty_platform_still_reports_timeout() {
+        let backend = MemoryKeyring::default();
+        let config = CredentialConfig {
+            api_key: None,
+            command: Some("never-completes".into()),
+            file: None,
+            platform: Some(("ookcite-mcp".into(), "default".into())),
+            command_timeout: Duration::from_secs(1),
+        };
+        let error = load_credential_with_command_loader(&config, &backend, |_, _| async {
+            Ok(CommandCredential::TimedOut)
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "credential command timed out");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_timeout_kills_pipeline_grandchildren() {
+        let backend = MemoryKeyring::default();
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("grandchild.pid");
+        let command = format!(
+            "(sh -c 'printf %s \"$$\" > {}; exec tail -f /dev/null' | cat >/dev/null)",
+            pid_file.display()
+        );
+        let config = CredentialConfig {
+            api_key: None,
+            command: Some(command),
+            file: None,
+            platform: None,
+            command_timeout: Duration::from_millis(50),
+        };
+        let error = load_credential(&config, &backend).await.unwrap_err();
+        assert_eq!(error.to_string(), "credential command timed out");
+
+        wait_for_path(&pid_file).await;
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        let exited = wait_for_process_exit(pid).await;
+        if !exited {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        assert!(exited, "grandchild {pid} stayed alive after timeout");
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_path(path: &Path) {
+        for _ in 0..20_000 {
+            if path.exists() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("path {} was never created", path.display());
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_process_exit(pid: i32) -> bool {
+        for _ in 0..20_000 {
+            if !process_is_running(pid) {
+                return true;
+            }
+            tokio::task::yield_now().await;
+        }
+        !process_is_running(pid)
+    }
+
+    #[cfg(unix)]
+    fn process_is_running(pid: i32) -> bool {
+        let stat_path = format!("/proc/{pid}/stat");
+        let Ok(stat) = std::fs::read_to_string(stat_path) else {
+            return false;
+        };
+        stat.split_whitespace()
+            .nth(2)
+            .is_some_and(|state| state != "Z")
     }
 }
