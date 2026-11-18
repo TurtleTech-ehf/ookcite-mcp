@@ -12,10 +12,12 @@ use ookcite_mcp::connect::{
     DashboardClient, DevicePoll, LoopbackListener, Pkce, StartBrowserRequest, StartDeviceRequest,
 };
 use ookcite_mcp::credentials::{
-    choose_source, load_credential, CredentialConfig, CredentialReference, CredentialSink,
-    CredentialSource, KeyringBackend, PlatformCredentialSink, ProtectedFileSink, StoreCommandSink,
+    choose_source, load_credential, load_credential_with_command_loader, CommandCredential,
+    CredentialConfig, CredentialReference, CredentialSink, CredentialSource, KeyringBackend,
+    PlatformCredentialSink, ProtectedFileSink, StoreCommandSink,
 };
 use secrecy::{ExposeSecret as _, SecretString};
+use tokio::sync::oneshot;
 use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -558,7 +560,6 @@ fn platform_sink_refuses_overwrite_and_rolls_back_only_its_change() {
 async fn credential_loader_preserves_environment_command_file_platform_precedence() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("credential");
-    let command_completed = directory.path().join("command-completed");
     std::fs::write(&file, "file-key\n").unwrap();
     let backend = Arc::new(MemoryKeyring::default());
     backend
@@ -570,13 +571,10 @@ async fn credential_loader_preserves_environment_command_file_platform_precedenc
         .unwrap();
     let mut config = CredentialConfig {
         api_key: Some(SecretString::new("environment-key".into())),
-        command: Some(format!(
-            "printf command-key; : > {}",
-            command_completed.display()
-        )),
+        command: Some("unused-command".into()),
         file: Some(file),
         platform: Some(("ookcite-mcp".into(), "default".into())),
-        command_timeout: Duration::from_secs(30),
+        command_timeout: Duration::from_secs(1),
     };
 
     assert_eq!(
@@ -588,15 +586,27 @@ async fn credential_loader_preserves_environment_command_file_platform_precedenc
         "environment-key"
     );
     config.api_key = None;
+    let (command_called_tx, command_called_rx) = oneshot::channel();
+    let command_called_tx = Arc::new(Mutex::new(Some(command_called_tx)));
     assert_eq!(
-        load_credential(&config, backend.as_ref())
-            .await
-            .unwrap()
-            .unwrap()
-            .expose_secret(),
+        load_credential_with_command_loader(&config, backend.as_ref(), move |_, _| {
+            let command_called_tx = Arc::clone(&command_called_tx);
+            async move {
+                if let Some(command_called_tx) = command_called_tx.lock().unwrap().take() {
+                    let _ = command_called_tx.send(());
+                }
+                Ok(CommandCredential::Loaded(SecretString::new(
+                    "command-key".into(),
+                )))
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .expose_secret(),
         "command-key"
     );
-    assert!(command_completed.exists());
+    command_called_rx.await.unwrap();
     config.command = None;
     assert_eq!(
         load_credential(&config, backend.as_ref())

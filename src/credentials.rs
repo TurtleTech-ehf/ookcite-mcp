@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::Future;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -375,6 +376,30 @@ pub async fn load_credential<B: KeyringBackend>(
     config: &CredentialConfig,
     backend: &B,
 ) -> anyhow::Result<Option<SecretString>> {
+    load_credential_with_command_loader(config, backend, |command, command_timeout| {
+        let command = command.to_string();
+        async move { load_command_credential(&command, command_timeout).await }
+    })
+    .await
+}
+
+#[doc(hidden)]
+pub enum CommandCredential {
+    Loaded(SecretString),
+    TimedOut,
+}
+
+pub async fn load_credential_with_command_loader<B, L, Fut>(
+    config: &CredentialConfig,
+    backend: &B,
+    mut command_loader: L,
+) -> anyhow::Result<Option<SecretString>>
+where
+    B: KeyringBackend,
+    L: FnMut(&str, Duration) -> Fut,
+    Fut: Future<Output = anyhow::Result<CommandCredential>>,
+{
+    let mut command_timed_out = false;
     if let Some(value) = config
         .api_key
         .as_ref()
@@ -387,9 +412,10 @@ pub async fn load_credential<B: KeyringBackend>(
         .as_deref()
         .filter(|value| present(Some(value)))
     {
-        return load_command_credential(command, config.command_timeout)
-            .await
-            .map(Some);
+        match command_loader(command, config.command_timeout).await? {
+            CommandCredential::Loaded(credential) => return Ok(Some(credential)),
+            CommandCredential::TimedOut => command_timed_out = true,
+        }
     }
     if let Some(path) = config.file.as_ref() {
         let value = tokio::fs::read_to_string(path)
@@ -404,13 +430,16 @@ pub async fn load_credential<B: KeyringBackend>(
     if let Some((service, account)) = config.platform.as_ref() {
         return backend.get_password(service, account);
     }
+    if command_timed_out {
+        anyhow::bail!("credential command timed out")
+    }
     Ok(None)
 }
 
 async fn load_command_credential(
     retrieval_command: &str,
     command_timeout: Duration,
-) -> anyhow::Result<SecretString> {
+) -> anyhow::Result<CommandCredential> {
     #[cfg(windows)]
     let mut command = {
         let mut command = tokio::process::Command::new("cmd");
@@ -428,10 +457,12 @@ async fn load_command_credential(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let output = tokio::time::timeout(command_timeout, command.output())
-        .await
-        .map_err(|_| anyhow::anyhow!("credential command timed out"))?
-        .map_err(|_| anyhow::anyhow!("credential command could not be started"))?;
+    let output = match tokio::time::timeout(command_timeout, command.output()).await {
+        Ok(output) => {
+            output.map_err(|_| anyhow::anyhow!("credential command could not be started"))?
+        }
+        Err(_) => return Ok(CommandCredential::TimedOut),
+    };
     if !output.status.success() {
         anyhow::bail!("credential command failed")
     }
@@ -441,7 +472,7 @@ async fn load_command_credential(
     if value.is_empty() {
         anyhow::bail!("credential command returned no credential")
     }
-    Ok(SecretString::new(value.into()))
+    Ok(CommandCredential::Loaded(SecretString::new(value.into())))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -473,4 +504,101 @@ pub fn choose_source(
 
 fn present(value: Option<&str>) -> bool {
     value.is_some_and(|value| !value.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct MemoryKeyring {
+        values: Mutex<HashMap<(String, String), String>>,
+    }
+
+    impl KeyringBackend for MemoryKeyring {
+        fn get_password(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> anyhow::Result<Option<SecretString>> {
+            Ok(self
+                .values
+                .lock()
+                .unwrap()
+                .get(&(service.to_string(), account.to_string()))
+                .cloned()
+                .map(SecretString::new))
+        }
+
+        fn set_password(
+            &self,
+            service: &str,
+            account: &str,
+            secret: &SecretString,
+        ) -> anyhow::Result<()> {
+            self.values.lock().unwrap().insert(
+                (service.to_string(), account.to_string()),
+                secret.expose_secret().to_string(),
+            );
+            Ok(())
+        }
+
+        fn delete_password(&self, service: &str, account: &str) -> anyhow::Result<()> {
+            self.values
+                .lock()
+                .unwrap()
+                .remove(&(service.to_string(), account.to_string()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn command_timeout_without_fallback_returns_timeout_error() {
+        let backend = MemoryKeyring::default();
+        let observed_timeout = Arc::new(Mutex::new(None));
+        let timeout_recorder = Arc::clone(&observed_timeout);
+        let timeout = Duration::from_secs(1);
+        let config = CredentialConfig {
+            api_key: None,
+            command: Some("ignored".into()),
+            file: None,
+            platform: None,
+            command_timeout: timeout,
+        };
+        let error = load_credential_with_command_loader(&config, &backend, move |_, received| {
+            let timeout_recorder = Arc::clone(&timeout_recorder);
+            async move {
+                *timeout_recorder.lock().unwrap() = Some(received);
+                Ok(CommandCredential::TimedOut)
+            }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(*observed_timeout.lock().unwrap(), Some(timeout));
+        assert_eq!(error.to_string(), "credential command timed out");
+    }
+
+    #[tokio::test]
+    async fn command_timeout_falls_through_to_file_without_sleeping() {
+        let backend = MemoryKeyring::default();
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("credential");
+        std::fs::write(&file, "file-key\n").unwrap();
+        let config = CredentialConfig {
+            api_key: None,
+            command: Some("never-completes".into()),
+            file: Some(file),
+            platform: None,
+            command_timeout: Duration::from_secs(1),
+        };
+        let credential = load_credential_with_command_loader(&config, &backend, |_, _| async {
+            Ok(CommandCredential::TimedOut)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(credential.expose_secret(), "file-key");
+    }
 }
