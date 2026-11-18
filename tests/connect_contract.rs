@@ -558,6 +558,7 @@ fn platform_sink_refuses_overwrite_and_rolls_back_only_its_change() {
 async fn credential_loader_preserves_environment_command_file_platform_precedence() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("credential");
+    let command_completed = directory.path().join("command-completed");
     std::fs::write(&file, "file-key\n").unwrap();
     let backend = Arc::new(MemoryKeyring::default());
     backend
@@ -569,10 +570,13 @@ async fn credential_loader_preserves_environment_command_file_platform_precedenc
         .unwrap();
     let mut config = CredentialConfig {
         api_key: Some(SecretString::new("environment-key".into())),
-        command: Some("printf command-key".into()),
+        command: Some(format!(
+            "printf command-key; : > {}",
+            command_completed.display()
+        )),
         file: Some(file),
         platform: Some(("ookcite-mcp".into(), "default".into())),
-        command_timeout: Duration::from_secs(1),
+        command_timeout: Duration::from_secs(30),
     };
 
     assert_eq!(
@@ -592,6 +596,7 @@ async fn credential_loader_preserves_environment_command_file_platform_precedenc
             .expose_secret(),
         "command-key"
     );
+    assert!(command_completed.exists());
     config.command = None;
     assert_eq!(
         load_credential(&config, backend.as_ref())
