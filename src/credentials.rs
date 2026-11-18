@@ -428,7 +428,9 @@ where
         return Ok(Some(SecretString::new(value.into())));
     }
     if let Some((service, account)) = config.platform.as_ref() {
-        return backend.get_password(service, account);
+        if let Some(secret) = backend.get_password(service, account)? {
+            return Ok(Some(secret));
+        }
     }
     if command_timed_out {
         anyhow::bail!("credential command timed out")
@@ -440,8 +442,10 @@ async fn load_command_credential(
     retrieval_command: &str,
     command_timeout: Duration,
 ) -> anyhow::Result<CommandCredential> {
+    const REAP_GRACE: Duration = Duration::from_millis(200);
     #[cfg(windows)]
     let mut command = {
+        // Windows behavior is unchanged.
         let mut command = tokio::process::Command::new("cmd");
         command.args(["/C", retrieval_command]);
         command
@@ -450,6 +454,10 @@ async fn load_command_credential(
     let mut command = {
         let mut command = tokio::process::Command::new("sh");
         command.args(["-c", retrieval_command]);
+        // Run the retrieval shell in its own process group so timeout cleanup
+        // can terminate the whole pipeline, not only the shell process itself.
+        #[cfg(unix)]
+        command.process_group(0);
         command
     };
     command
@@ -457,11 +465,25 @@ async fn load_command_credential(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let output = match tokio::time::timeout(command_timeout, command.output()).await {
+    let child = command
+        .spawn()
+        .map_err(|_| anyhow::anyhow!("credential command could not be started"))?;
+    #[cfg(unix)]
+    let mut process_group = ChildProcessGroup::new(child.id());
+    let output_future = child.wait_with_output();
+    tokio::pin!(output_future);
+    let output = match tokio::time::timeout(command_timeout, &mut output_future).await {
         Ok(output) => {
+            #[cfg(unix)]
+            process_group.disarm();
             output.map_err(|_| anyhow::anyhow!("credential command could not be started"))?
         }
-        Err(_) => return Ok(CommandCredential::TimedOut),
+        Err(_) => {
+            #[cfg(unix)]
+            process_group.kill_now();
+            let _ = tokio::time::timeout(REAP_GRACE, &mut output_future).await;
+            return Ok(CommandCredential::TimedOut);
+        }
     };
     if !output.status.success() {
         anyhow::bail!("credential command failed")
@@ -506,11 +528,47 @@ fn present(value: Option<&str>) -> bool {
     value.is_some_and(|value| !value.trim().is_empty())
 }
 
+#[cfg(unix)]
+struct ChildProcessGroup {
+    leader_pid: Option<rustix::process::Pid>,
+}
+
+#[cfg(unix)]
+impl ChildProcessGroup {
+    fn new(leader_pid: Option<u32>) -> Self {
+        let leader_pid = leader_pid
+            .and_then(|pid| i32::try_from(pid).ok())
+            .and_then(rustix::process::Pid::from_raw);
+        Self { leader_pid }
+    }
+
+    fn disarm(&mut self) {
+        self.leader_pid = None;
+    }
+
+    fn kill_now(&mut self) {
+        if let Some(leader_pid) = self.leader_pid.take() {
+            let _ = rustix::process::kill_process_group(leader_pid, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ChildProcessGroup {
+    fn drop(&mut self) {
+        self.kill_now();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    #[cfg(unix)]
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
+    #[cfg(unix)]
+    use std::time::Instant;
 
     #[derive(Default)]
     struct MemoryKeyring {
@@ -600,5 +658,139 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(credential.expose_secret(), "file-key");
+    }
+
+    #[tokio::test]
+    async fn command_timeout_with_empty_platform_still_reports_timeout() {
+        let backend = MemoryKeyring::default();
+        let config = CredentialConfig {
+            api_key: None,
+            command: Some("never-completes".into()),
+            file: None,
+            platform: Some(("ookcite-mcp".into(), "default".into())),
+            command_timeout: Duration::from_secs(1),
+        };
+        let error = load_credential_with_command_loader(&config, &backend, |_, _| async {
+            Ok(CommandCredential::TimedOut)
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "credential command timed out");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_timeout_kills_pipeline_grandchildren() {
+        let backend = MemoryKeyring::default();
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("grandchild.pid");
+        let fifo_path = directory.path().join("grandchild.wait");
+        std::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .unwrap();
+        let command = format!(
+            "(sh -c 'printf %s \"$$\" > {}; exec cat < {}' | cat >/dev/null)",
+            pid_file.display(),
+            fifo_path.display()
+        );
+        let timeout = Duration::from_secs(3);
+        let ready_timeout = Duration::from_secs(1);
+        let config = CredentialConfig {
+            api_key: None,
+            command: Some(command),
+            file: None,
+            platform: None,
+            command_timeout: timeout,
+        };
+        let load = tokio::spawn(async move { load_credential(&config, &backend).await });
+        wait_for_path(&pid_file, ready_timeout).await;
+        let error = tokio::time::timeout(timeout + Duration::from_secs(2), load)
+            .await
+            .expect("load_credential hung after timeout")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.to_string(), "credential command timed out");
+
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        let exited = wait_for_process_exit(pid, Duration::from_secs(5)).await;
+        assert!(exited, "grandchild {pid} stayed alive after timeout");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_timeout_is_not_delayed_by_escaped_descendant() {
+        let backend = MemoryKeyring::default();
+        let timeout = Duration::from_secs(1);
+        let grace = Duration::from_millis(400);
+        let command = "setsid sleep 4 & sleep 60";
+        let config = CredentialConfig {
+            api_key: None,
+            command: Some(command.into()),
+            file: None,
+            platform: None,
+            command_timeout: timeout,
+        };
+        let started = Instant::now();
+        let error = tokio::time::timeout(
+            timeout + Duration::from_secs(6),
+            load_credential(&config, &backend),
+        )
+        .await
+        .expect("load_credential hung unexpectedly")
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert_eq!(error.to_string(), "credential command timed out");
+        assert!(
+            elapsed <= timeout + grace,
+            "timeout error took {:?}, expected at most {:?}",
+            elapsed,
+            timeout + grace
+        );
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_path(path: &Path, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if path.exists() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!(
+            "path {} was never created before {:?}",
+            path.display(),
+            timeout
+        );
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_process_exit(pid: i32, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !process_is_running(pid) {
+                return true;
+            }
+            tokio::task::yield_now().await;
+        }
+        !process_is_running(pid)
+    }
+
+    #[cfg(unix)]
+    fn process_is_running(pid: i32) -> bool {
+        let Some(pid) = rustix::process::Pid::from_raw(pid) else {
+            return false;
+        };
+        match rustix::process::test_kill_process(pid) {
+            Ok(()) => true,
+            Err(rustix::io::Errno::SRCH) => false,
+            Err(rustix::io::Errno::PERM) => true,
+            Err(_) => true,
+        }
     }
 }
