@@ -171,6 +171,9 @@ pub fn render_pairs(
         if let Some(mut source) = crate::bib_source::source_from_meta(stored) {
             flush_works(&mut works, options, &mut used, &mut out)?;
             separate_entries(&mut out);
+            // The import snapshot is the first copy. A version on the
+            // current record is the release export should print.
+            overlay_record_on_source(&mut source, stored);
             if options.enrich {
                 if let Some(provider) = provider {
                     let locked = user_fields(stored);
@@ -334,9 +337,14 @@ fn assemble(stored: &Value, provider: Option<&Value>) -> Work {
 }
 
 fn copy_locked(work: &mut Work, stored: &Work, locked: &HashSet<String>) {
-    let take = |flag: bool, current: &mut Option<String>, replacement: &Option<String>| {
-        if flag {
-            *current = replacement.clone();
+    // A value on the current record wins. A lock still applies when the
+    // record has no value, which is how a cleared field stays cleared.
+    // `url` is the exception: a stored DOI URL must not hide a provider
+    // landing page, so it wins only when it is locked or is not the DOI.
+    let take = |locked_field: bool, current: &mut Option<String>, replacement: &Option<String>| {
+        let replacement = replacement.clone().filter(|value| !value.trim().is_empty());
+        if locked_field || replacement.is_some() {
+            *current = replacement;
         }
     };
     take(
@@ -368,10 +376,15 @@ fn copy_locked(work: &mut Work, stored: &Work, locked: &HashSet<String>) {
         &mut work.institution,
         &stored.institution,
     );
-    if locked.contains("doi") {
+    if locked.contains("doi") || !stored.doi.is_empty() {
         work.doi = stored.doi.clone();
     }
-    take(locked.contains("url"), &mut work.url, &stored.url);
+    let stored_url = stored.url.clone().filter(|value| !value.trim().is_empty());
+    if locked.contains("url") {
+        work.url = stored_url;
+    } else if let Some(url) = stored_url.filter(|url| !url_repeats_doi(url, &stored.doi)) {
+        work.url = Some(url);
+    }
     take(
         locked.contains("version"),
         &mut work.version,
@@ -392,8 +405,19 @@ fn copy_locked(work: &mut Work, stored: &Work, locked: &HashSet<String>) {
         &mut work.report_number,
         &stored.report_number,
     );
-    if locked.contains("year") {
+    if locked.contains("year") || stored.year.is_some() {
         work.year = stored.year;
+    }
+}
+
+/// Replace the imported `version` when the current record has one.
+///
+/// Other snapshot fields stay. `apply` lists every source field in
+/// `user_fields` while leaving the server's copy of that field in the
+/// record, so those names are not a signal that the record is newer.
+fn overlay_record_on_source(source: &mut crate::bib_source::BibSource, meta: &Value) {
+    if let Some(version) = text(meta, "version") {
+        source.set_field("version", version);
     }
 }
 
@@ -2995,6 +3019,127 @@ mod tests {
         assert!(!bib.contains("\\&"), "{bib}");
         assert!(bib.contains("archiveprefix = {arXiv}"), "{bib}");
         assert!(bib.contains("primaryclass = {cond-mat.stat-mech}"), "{bib}");
+    }
+
+    #[test]
+    fn the_current_record_replaces_a_provider_software_version() {
+        let stored = json!({
+            "entry_type": "software",
+            "title": "linkcell",
+            "version": "0.5.0",
+            "publisher": "Current Press",
+            "url": "https://example.org/linkcell",
+            "doi": "10.5281/zenodo.1000",
+            "authors": [{"family": "Goswami", "given": "Rohit"}],
+            "date": {"year": 2024}
+        });
+        let provider = json!({
+            "datacite": {
+                "doi": "10.5281/zenodo.1000",
+                "types": {"resourceTypeGeneral": "Software"},
+                "titles": [{"title": "linkcell"}],
+                "creators": [{"givenName": "Rohit", "familyName": "Goswami", "nameType": "Personal"}],
+                "publicationYear": 2019,
+                "publisher": "Zenodo",
+                "version": "0.3.11",
+                "url": "https://zenodo.org/records/1000",
+                "relatedIdentifiers": [{"relationType": "IsVersionOf", "relatedIdentifier": "10.5281/zenodo.999"}]
+            },
+            "zenodo": {
+                "doi": "10.5281/zenodo.1000",
+                "conceptdoi": "10.5281/zenodo.999",
+                "version": "0.3.11"
+            }
+        });
+        let bib = render_works(
+            &[assemble(&stored, Some(&provider))],
+            &BibOptions::default(),
+        );
+        assert!(bib.contains("version = {0.5.0}"), "{bib}");
+        assert!(bib.contains("publisher = {Current Press}"), "{bib}");
+        assert!(bib.contains("year = {2024}"), "{bib}");
+        assert!(
+            bib.contains("url = {https://example.org/linkcell}"),
+            "{bib}"
+        );
+        assert!(!bib.contains("0.3.11"), "{bib}");
+        assert!(!bib.contains("publisher = {Zenodo}"), "{bib}");
+
+        let doi_url = json!({
+            "doi": "10.5281/zenodo.1000",
+            "url": "https://doi.org/10.5281/zenodo.1000"
+        });
+        let landing = json!({
+            "crossref": {
+                "type": "software",
+                "title": ["linkcell"],
+                "DOI": "10.5281/zenodo.1000",
+                "URL": "https://doi.org/10.5281/zenodo.1000",
+                "resource": {"primary": {"URL": "https://zenodo.org/records/1000"}},
+                "author": [{"family": "Goswami", "given": "Rohit"}]
+            }
+        });
+        let bib = render_works(
+            &[assemble(&doi_url, Some(&landing))],
+            &BibOptions::default(),
+        );
+        assert!(
+            bib.contains("url = {https://zenodo.org/records/1000}"),
+            "{bib}"
+        );
+        assert!(!bib.contains("url = {https://doi.org/"), "{bib}");
+
+        let current_doi = json!({"doi": "10.1000/current", "title": "A paper"});
+        let provider_doi = json!({
+            "crossref": {
+                "type": "journal-article",
+                "title": ["A paper"],
+                "DOI": "10.1000/provider",
+                "author": [{"family": "Goswami", "given": "Rohit"}]
+            }
+        });
+        let bib = render_works(
+            &[assemble(&current_doi, Some(&provider_doi))],
+            &BibOptions::default(),
+        );
+        assert!(bib.contains("doi = {10.1000/current}"), "{bib}");
+        assert!(!bib.contains("10.1000/provider"), "{bib}");
+    }
+
+    #[test]
+    fn the_current_record_replaces_an_imported_software_version() {
+        let stored = json!({
+            "entry_type": "software",
+            "title": "Server title",
+            "version": "0.5.0",
+            "publisher": "Resolver Press",
+            "doi": "10.5281/zenodo.1000",
+            "authors": [{"family": "Wrong", "given": "Name"}],
+            "user_fields": ["title", "version", "publisher", "author"],
+            "bib_source": {
+                "key": "linkcell",
+                "entry_type": "software",
+                "fields": [
+                    ["title", "{linkcell}"],
+                    ["author", "Goswami, Rohit"],
+                    ["year", "2024"],
+                    ["version", "0.3.11"],
+                    ["publisher", "Old Press"],
+                    ["note", "kept note"],
+                    ["doi", "10.5281/zenodo.1000"]
+                ]
+            }
+        });
+        let bib = render_pairs(&[(stored, None)], &BibOptions::default()).expect("citation keys");
+        assert!(bib.contains("@software{linkcell,"), "{bib}");
+        assert!(bib.contains("version = {0.5.0}"), "{bib}");
+        assert!(bib.contains("title = {{linkcell}}"), "{bib}");
+        assert!(bib.contains("author = {Goswami, Rohit}"), "{bib}");
+        assert!(bib.contains("publisher = {Old Press}"), "{bib}");
+        assert!(bib.contains("note = {kept note}"), "{bib}");
+        assert!(!bib.contains("0.3.11"), "{bib}");
+        assert!(!bib.contains("Server title"), "{bib}");
+        assert!(!bib.contains("Resolver Press"), "{bib}");
     }
 
     #[test]

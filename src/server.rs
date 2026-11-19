@@ -5677,6 +5677,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn export_collection_emits_the_updated_software_version() {
+        let mock = MockServer::start().await;
+        let doi = "10.5281/zenodo.1000";
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "c-link", "name": "linkcell"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/c-link/import"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "added": 1,
+                "duplicates_skipped": 0
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let entry = |version: &str, publisher: &str| {
+            serde_json::json!({
+                "id": "c-link",
+                "name": "linkcell",
+                "entries": [{
+                    "id": "e-link",
+                    "metadata": {
+                        "entry_type": "software",
+                        "title": "linkcell",
+                        "doi": doi,
+                        "version": version,
+                        "publisher": publisher,
+                        "authors": [{"family": "Goswami", "given": "Rohit"}],
+                        "date": {"year": 2024}
+                    }
+                }]
+            })
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/c-link"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(entry("0.3.11", "Old Press")))
+            .up_to_n_times(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/c-link"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(entry("0.5.0", "Current Press")))
+            .mount(&mock)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/collections/c-link/entries/e-link/metadata"))
+            .and(body_string_contains("0.5.0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "e-link",
+                "metadata": {"title": "linkcell", "version": "0.5.0"}
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", doi)))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/dois", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"attributes": {
+                    "doi": doi,
+                    "types": {"resourceTypeGeneral": "Software"},
+                    "titles": [{"title": "linkcell"}],
+                    "creators": [{"name": "Goswami, Rohit", "givenName": "Rohit", "familyName": "Goswami", "nameType": "Personal"}],
+                    "publicationYear": 2024,
+                    "publisher": "Zenodo",
+                    "version": "0.3.11",
+                    "relatedIdentifiers": [{"relationType": "IsVersionOf", "relatedIdentifier": "10.5281/zenodo.999"}]
+                }}
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/records/1000"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": doi,
+                "conceptdoi": "10.5281/zenodo.999",
+                "metadata": {"version": "0.3.11"}
+            })))
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_linkcell");
+        let server = test_server(&mock.uri()).with_providers(mock.uri());
+        let imported = server
+            .import_bibliography(Parameters(ImportBibliographyArgs {
+                collection: Some("linkcell".into()),
+                content: format!(
+                    "@software{{linkcell,\n  title = {{linkcell}},\n  author = {{Goswami, Rohit}},\n  year = {{2024}},\n  version = {{0.3.11}},\n  publisher = {{Old Press}},\n  doi = {{{doi}}}\n}}\n"
+                ),
+                format: "bibtex".into(),
+                style: None,
+            }))
+            .await;
+        assert!(imported.contains("Imported into 'linkcell'"), "{imported}");
+        let updated = server
+            .update_entry_metadata(Parameters(UpdateEntryMetadataArgs {
+                collection: "linkcell".into(),
+                entry_id: "e-link".into(),
+                version: Some("0.5.0".into()),
+                publisher: Some("Current Press".into()),
+                ..Default::default()
+            }))
+            .await;
+        assert!(updated.contains("Updated entry e-link"), "{updated}");
+        let bib = server
+            .export_collection(Parameters(ExportCollectionArgs {
+                collection: "linkcell".into(),
+                format: "bib".into(),
+                style: "apa".into(),
+                software_entry: "software".into(),
+                eid_as: "eid".into(),
+                local_overrides: true,
+                enrich: false,
+            }))
+            .await;
+        assert!(bib.contains("version = {0.5.0}"), "{bib}");
+        assert!(bib.contains("publisher = {Current Press}"), "{bib}");
+        assert!(!bib.contains("0.3.11"), "{bib}");
+        assert!(!bib.contains("Old Press"), "{bib}");
+    }
+
+    #[tokio::test]
     async fn export_collection_bib_rejects_an_unregistered_doi() {
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
