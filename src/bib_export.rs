@@ -152,19 +152,24 @@ impl Work {
     }
 }
 
-pub fn render_stored_entries(entries: &[Value]) -> String {
+pub fn render_stored_entries(
+    entries: &[Value],
+) -> Result<String, crate::bib_source::CitationKeyExhausted> {
     let pairs: Vec<(Value, Option<Value>)> =
         entries.iter().cloned().map(|entry| (entry, None)).collect();
     render_pairs(&pairs, &BibOptions::default())
 }
 
-pub fn render_pairs(pairs: &[(Value, Option<Value>)], options: &BibOptions) -> String {
+pub fn render_pairs(
+    pairs: &[(Value, Option<Value>)],
+    options: &BibOptions,
+) -> Result<String, crate::bib_source::CitationKeyExhausted> {
     let mut used = HashSet::new();
     let mut out = String::new();
     let mut works = Vec::new();
     for (stored, provider) in pairs {
         if let Some(mut source) = crate::bib_source::source_from_meta(stored) {
-            flush_works(&mut works, options, &mut used, &mut out);
+            flush_works(&mut works, options, &mut used, &mut out)?;
             separate_entries(&mut out);
             if options.enrich {
                 if let Some(provider) = provider {
@@ -176,13 +181,13 @@ pub fn render_pairs(pairs: &[(Value, Option<Value>)], options: &BibOptions) -> S
                     crate::bib_source::fill_empty(&mut source, &additions);
                 }
             }
-            out.push_str(&crate::bib_source::render_entry(&source, &mut used));
+            out.push_str(&crate::bib_source::render_entry(&source, &mut used)?);
             continue;
         }
         works.push(assemble(stored, provider.as_ref()));
     }
-    flush_works(&mut works, options, &mut used, &mut out);
-    out
+    flush_works(&mut works, options, &mut used, &mut out)?;
+    Ok(out)
 }
 
 fn separate_entries(out: &mut String) {
@@ -196,15 +201,16 @@ fn flush_works(
     options: &BibOptions,
     used: &mut HashSet<String>,
     out: &mut String,
-) {
+) -> Result<(), crate::bib_source::CitationKeyExhausted> {
     if works.is_empty() {
-        return;
+        return Ok(());
     }
     separate_entries(out);
     for work in works.drain(..) {
-        out.push_str(&render_work_entry(&work, options, used));
+        out.push_str(&render_work_entry(&work, options, used)?);
         out.push('\n');
     }
+    Ok(())
 }
 
 /// Stored metadata with provider fields filled in. Caller locks win.
@@ -820,13 +826,17 @@ fn render_works(works: &[Work], options: &BibOptions) -> String {
     let mut used = HashSet::new();
     let mut out = String::new();
     for work in works {
-        out.push_str(&render_work_entry(work, options, &mut used));
+        out.push_str(&render_work_entry(work, options, &mut used).expect("citation keys"));
         out.push('\n');
     }
     out
 }
 
-fn render_work_entry(work: &Work, options: &BibOptions, used: &mut HashSet<String>) -> String {
+fn render_work_entry(
+    work: &Work,
+    options: &BibOptions,
+    used: &mut HashSet<String>,
+) -> Result<String, crate::bib_source::CitationKeyExhausted> {
     let custom = work
         .citation_key
         .as_deref()
@@ -835,8 +845,8 @@ fn render_work_entry(work: &Work, options: &BibOptions, used: &mut HashSet<Strin
         .map(str::to_string);
     let key = custom.unwrap_or_else(|| generated_key(work));
     let key = if key.is_empty() { "ref".into() } else { key };
-    let key = crate::bib_source::dedup_key(key, used);
-    render_entry(work, &key, options)
+    let key = crate::bib_source::dedup_key(key, used)?;
+    Ok(render_entry(work, &key, options))
 }
 
 fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
@@ -2116,7 +2126,8 @@ mod tests {
             "pages": "1-23",
             "publisher": "Springer Netherlands",
             "citation_key": "voterIntroductionKineticMonte2007"
-        })]);
+        })])
+        .expect("citation keys");
         assert!(
             bib.contains("@inbook{voterIntroductionKineticMonte2007,"),
             "{bib}"
@@ -2444,7 +2455,7 @@ mod tests {
             "doi": "10.1109/ieeestd.2019.8766229",
             "entry_type": "misc"
         });
-        let bib = render_stored_entries(&[stored]);
+        let bib = render_stored_entries(&[stored]).expect("citation keys");
         let author = bib.lines().find(|line| line.contains("author = ")).unwrap();
         assert!(author.contains("{{IEEE Computer Society}}"), "{author}");
         assert!(!author.contains("}}, {"), "{author}");
@@ -2465,8 +2476,8 @@ mod tests {
             "entry_type": "article",
             "journal": "MethodsX"
         });
-        let first = render_stored_entries(std::slice::from_ref(&stored));
-        let second = render_stored_entries(&[stored]);
+        let first = render_stored_entries(std::slice::from_ref(&stored)).expect("citation keys");
+        let second = render_stored_entries(&[stored]).expect("citation keys");
         assert_eq!(first, second);
         assert!(first.contains("@article{myCustomKey,"), "{first}");
     }
@@ -2940,7 +2951,7 @@ mod tests {
             }],
             "user_fields": ["entry_type", "title", "pages", "number", "edition", "series", "organization", "address", "authors"]
         });
-        let bib = render_stored_entries(std::slice::from_ref(&stored));
+        let bib = render_stored_entries(std::slice::from_ref(&stored)).expect("citation keys");
         assert!(bib.starts_with("@manual{h5md110,"), "{bib}");
         assert!(bib.contains("title = {{H5MD} 1.1.0}"), "{bib}");
         assert!(bib.contains("pages = {23-32}"), "{bib}");
@@ -2974,7 +2985,8 @@ mod tests {
                 "issued": {"date-parts": [[1998]]}
             }
         });
-        let bib = render_pairs(&[(stored, Some(provider))], &BibOptions::default());
+        let bib = render_pairs(&[(stored, Some(provider))], &BibOptions::default())
+            .expect("citation keys");
         assert!(bib.contains("eprint = {cond-mat/9801_5%#&}"), "{bib}");
         assert_eq!(bib.matches("eprint =").count(), 1, "{bib}");
         assert!(!bib.contains("\\_"), "{bib}");
@@ -2997,7 +3009,7 @@ mod tests {
                 })
             })
             .collect();
-        let bib = render_stored_entries(&entries);
+        let bib = render_stored_entries(&entries).expect("citation keys");
         let parsed = crate::bib_audit::parse_bibtex_raw(&bib).expect("export re-parses");
         assert_eq!(parsed.len(), 30, "{bib}");
         let unique: HashSet<_> = parsed.iter().map(|entry| entry.key.as_str()).collect();
@@ -3048,7 +3060,8 @@ mod tests {
                 enrich: true,
                 ..BibOptions::default()
             },
-        );
+        )
+        .expect("citation keys");
         assert!(bib.contains("title = {Kept}"), "{bib}");
         assert!(bib.contains("journal = {Journal of Testing}"), "{bib}");
         assert!(!bib.contains("url ="), "{bib}");
@@ -3058,10 +3071,11 @@ mod tests {
     }
 
     #[test]
-    fn a_thousand_colliding_citation_keys_finish_on_export() {
-        const COUNT: usize = 1000;
-        let bib = finish_within(std::time::Duration::from_secs(10), || {
-            let entries: Vec<Value> = (0..COUNT)
+    fn metadata_export_stops_at_the_citation_key_cap() {
+        // One base key, `a`–`z`, then `aa`–`zz`.
+        const KEYS: usize = 1 + 26 + 26 * 26;
+        fn colliding(count: usize) -> Vec<Value> {
+            (0..count)
                 .map(|index| {
                     json!({
                         "title": format!("Paper {index}"),
@@ -3070,15 +3084,17 @@ mod tests {
                         "date": {"year": 2020},
                     })
                 })
-                .collect();
-            render_stored_entries(&entries)
+                .collect()
+        }
+        let bib = finish_within(std::time::Duration::from_secs(10), || {
+            render_stored_entries(&colliding(KEYS)).expect("citation keys")
         });
         let keys: Vec<String> = crate::bib_audit::parse_bibtex_raw(&bib)
             .expect("export")
             .into_iter()
             .map(|entry| entry.key)
             .collect();
-        assert_eq!(keys.len(), COUNT);
+        assert_eq!(keys.len(), KEYS);
         let unique: HashSet<_> = keys.iter().collect();
         assert_eq!(unique.len(), keys.len());
         for (key, want) in keys.iter().zip(["same", "samea", "sameb", "samec"]) {
@@ -3086,7 +3102,15 @@ mod tests {
         }
         assert_eq!(keys[26], "samez");
         assert_eq!(keys[27], "sameaa");
+        assert_eq!(keys[KEYS - 1], "samezz");
         assert!(keys.iter().all(|key| key.is_ascii()));
+
+        let error = render_stored_entries(&colliding(KEYS + 1)).unwrap_err();
+        assert_eq!(error.base, "same");
+        assert_eq!(
+            error.to_string(),
+            "no free citation key for \"same\" after suffixes a-z and aa-zz"
+        );
     }
 
     fn finish_within<T>(limit: std::time::Duration, work: impl FnOnce() -> T + Send + 'static) -> T

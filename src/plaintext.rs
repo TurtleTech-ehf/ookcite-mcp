@@ -168,7 +168,9 @@ pub fn citation_units_from_parse_payload(payload: &serde_json::Value) -> Vec<Str
         .unwrap_or_default()
 }
 
-pub fn render_bibtex_entries(entries: &[serde_json::Value]) -> String {
+pub fn render_bibtex_entries(
+    entries: &[serde_json::Value],
+) -> Result<String, crate::bib_source::CitationKeyExhausted> {
     crate::bib_export::render_stored_entries(entries)
 }
 
@@ -311,7 +313,7 @@ mod tests {
             "date": { "year": 1960 },
             "authors": [{"family": "Maiman", "given": "T. H."}]
         });
-        let bib = render_bibtex_entries(&[meta]);
+        let bib = render_bibtex_entries(&[meta]).expect("citation keys");
         assert!(bib.contains("@article{maimanStimulatedOpticalRadiation1960,"));
         assert!(bib.contains("title = {Stimulated Optical Radiation in Ruby}"));
         assert!(bib.contains("doi = {10.1038/187493a0}"));

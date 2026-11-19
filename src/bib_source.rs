@@ -23,8 +23,8 @@
 //! Braces, `--`, name particles, and LaTeX accents are copied as written.
 //! A citation key is kept. A key is generated only when the source entry
 //! has none. A repeated key keeps the first spelling and then takes the
-//! suffixes `a`, `b`, `c`, through `z`, `aa`, `ab`, so a long run of
-//! collisions still ends. Resolver fields are not added unless export is
+//! suffixes `a`, `b`, `c`, through `z`, then `aa` through `zz`. One more
+//! collision is an error. Resolver fields are not added unless export is
 //! asked to enrich, and then only a field the source left empty and the
 //! caller did not clear.
 
@@ -104,8 +104,11 @@ pub fn source_from_meta(meta: &Value) -> Option<BibSource> {
 /// A DOI matches first. Entries left over match in order when the two sides
 /// have the same number of leftovers, which is how a server that dropped the
 /// DOI of a web page is still tied to the source entry.
-pub fn pair_with_server(content: &str, server: &[Value]) -> Result<Vec<PairedSource>, String> {
-    let entries = parse_bibtex_raw(content)?;
+pub fn pair_with_server(
+    content: &str,
+    server: &[Value],
+) -> Result<Vec<PairedSource>, BibliographyError> {
+    let entries = parse_bibtex_raw(content).map_err(BibliographyError::Parse)?;
     let mut used = vec![false; server.len()];
     let mut paired: Vec<Option<usize>> = vec![None; entries.len()];
     for (index, entry) in entries.iter().enumerate() {
@@ -172,7 +175,7 @@ pub fn pair_with_server(content: &str, server: &[Value]) -> Result<Vec<PairedSou
         let Some(server_index) = paired[index] else {
             continue;
         };
-        let source = to_source(entry, &mut seen_keys);
+        let source = to_source(entry, &mut seen_keys)?;
         let record = &server[server_index];
         out.push(PairedSource {
             entry_id: record
@@ -270,19 +273,22 @@ fn loose_title(value: &str) -> String {
 }
 
 #[cfg(test)]
-pub fn render_bibliography(entries: &[BibSource]) -> String {
+pub fn render_bibliography(entries: &[BibSource]) -> Result<String, CitationKeyExhausted> {
     let mut used = HashSet::new();
     let mut out = String::new();
     for (index, entry) in entries.iter().enumerate() {
         if index > 0 {
             out.push('\n');
         }
-        out.push_str(&render_entry(entry, &mut used));
+        out.push_str(&render_entry(entry, &mut used)?);
     }
-    out
+    Ok(out)
 }
 
-pub fn render_entry(entry: &BibSource, used: &mut HashSet<String>) -> String {
+pub fn render_entry(
+    entry: &BibSource,
+    used: &mut HashSet<String>,
+) -> Result<String, CitationKeyExhausted> {
     let mut key = entry.key.trim().to_string();
     if key.is_empty() {
         key = generate_key(entry);
@@ -290,7 +296,7 @@ pub fn render_entry(entry: &BibSource, used: &mut HashSet<String>) -> String {
     if key.is_empty() {
         key = "ref".into();
     }
-    key = dedup_key(key, used);
+    key = dedup_key(key, used)?;
     let entry_type = entry.entry_type.trim().to_ascii_lowercase();
     let entry_type = if entry_type.is_empty() {
         "misc"
@@ -307,7 +313,10 @@ pub fn render_entry(entry: &BibSource, used: &mut HashSet<String>) -> String {
             lines.push(line);
         }
     }
-    format!("@{entry_type}{{{key},\n{}\n}}\n", lines.join(",\n"))
+    Ok(format!(
+        "@{entry_type}{{{key},\n{}\n}}\n",
+        lines.join(",\n")
+    ))
 }
 
 /// Fill only fields the source does not already have.
@@ -530,7 +539,10 @@ fn match_title(value: &str) -> String {
     collapse_whitespace(&out)
 }
 
-fn to_source(entry: &RawBibEntry, used: &mut HashSet<String>) -> BibSource {
+fn to_source(
+    entry: &RawBibEntry,
+    used: &mut HashSet<String>,
+) -> Result<BibSource, CitationKeyExhausted> {
     let mut key = entry.key.trim().to_string();
     if key.is_empty() {
         let draft = BibSource {
@@ -543,12 +555,12 @@ fn to_source(entry: &RawBibEntry, used: &mut HashSet<String>) -> BibSource {
     if key.is_empty() {
         key = "ref".into();
     }
-    key = dedup_key(key, used);
-    BibSource {
+    key = dedup_key(key, used)?;
+    Ok(BibSource {
         key,
         entry_type: entry.entry_type.clone(),
         fields: entry.fields.clone(),
-    }
+    })
 }
 
 fn source_doi(entry: &RawBibEntry) -> Option<String> {
@@ -684,29 +696,85 @@ fn format_field_line(name: &str, value: &str) -> Option<String> {
     Some(format!("  {name} = {{{value}}}"))
 }
 
-/// Return `key` when it is free. Otherwise append `a`, `b`, `c`, … `z`, `aa`, `ab`, …
-///
-/// The first twenty-six collisions are the single letters this exporter already
-/// wrote. The tail is bijective base 26, so a long run of collisions still ends.
-pub(crate) fn dedup_key(key: String, used: &mut HashSet<String>) -> String {
-    if used.insert(key.clone()) {
-        return key;
+/// Longest disambiguating suffix. `a`–`z`, then `aa`–`zz`, and then stop.
+const MAX_SUFFIX_CHARS: usize = 2;
+
+/// No suffix of `a`–`z` or `aa`–`zz` was free for `base`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CitationKeyExhausted {
+    pub base: String,
+}
+
+impl std::fmt::Display for CitationKeyExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no free citation key for \"{}\" after suffixes a-z and aa-zz",
+            self.base
+        )
     }
-    let base = key;
-    let mut suffix = String::new();
-    loop {
-        next_letter_suffix(&mut suffix);
-        let candidate = format!("{base}{suffix}");
-        if used.insert(candidate.clone()) {
-            return candidate;
+}
+
+impl std::error::Error for CitationKeyExhausted {}
+
+/// A bibliography could not be paired or its citation keys ran out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BibliographyError {
+    Parse(String),
+    CitationKey(CitationKeyExhausted),
+}
+
+impl std::fmt::Display for BibliographyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse(message) => f.write_str(message),
+            Self::CitationKey(error) => write!(f, "{error}"),
         }
     }
 }
 
-fn next_letter_suffix(suffix: &mut String) {
+impl std::error::Error for BibliographyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Parse(_) => None,
+            Self::CitationKey(error) => Some(error),
+        }
+    }
+}
+
+impl From<CitationKeyExhausted> for BibliographyError {
+    fn from(error: CitationKeyExhausted) -> Self {
+        Self::CitationKey(error)
+    }
+}
+
+/// Return `key` when it is free. Otherwise append `a`, `b`, `c`, through `z`, then `aa` through `zz`.
+///
+/// The first twenty-six collisions are the single letters this exporter already
+/// wrote. A further collision past `zz` is [`CitationKeyExhausted`].
+pub(crate) fn dedup_key(
+    key: String,
+    used: &mut HashSet<String>,
+) -> Result<String, CitationKeyExhausted> {
+    if used.insert(key.clone()) {
+        return Ok(key);
+    }
+    let base = key;
+    let mut suffix = String::new();
+    while next_letter_suffix(&mut suffix) {
+        let candidate = format!("{base}{suffix}");
+        if used.insert(candidate.clone()) {
+            return Ok(candidate);
+        }
+    }
+    Err(CitationKeyExhausted { base })
+}
+
+/// Advance `suffix` through `a`–`z`, then `aa`–`zz`. Returns false at the cap.
+fn next_letter_suffix(suffix: &mut String) -> bool {
     if suffix.is_empty() {
         suffix.push('a');
-        return;
+        return true;
     }
     let mut chars: Vec<char> = suffix.chars().collect();
     let mut index = chars.len();
@@ -716,12 +784,16 @@ fn next_letter_suffix(suffix: &mut String) {
             let next = u32::from(chars[index]) + 1;
             chars[index] = char::from_u32(next).unwrap_or(chars[index]);
             *suffix = chars.into_iter().collect();
-            return;
+            return true;
         }
         chars[index] = 'a';
     }
+    if chars.len() >= MAX_SUFFIX_CHARS {
+        return false;
+    }
     chars.insert(0, 'a');
     *suffix = chars.into_iter().collect();
+    true
 }
 
 #[cfg(test)]
@@ -735,8 +807,9 @@ mod tests {
         let sources: Vec<BibSource> = entries
             .iter()
             .map(|entry| to_source(entry, &mut used))
-            .collect();
-        render_bibliography(&sources)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        render_bibliography(&sources).unwrap()
     }
 
     #[test]
@@ -1020,20 +1093,20 @@ mod tests {
     fn common_collisions_keep_the_letters_a_b_and_c() {
         let mut used = HashSet::new();
         let keys: Vec<_> = (0..4)
-            .map(|_| dedup_key("voter".into(), &mut used))
+            .map(|_| dedup_key("voter".into(), &mut used).unwrap())
             .collect();
         assert_prefix(&keys, &["voter", "votera", "voterb", "voterc"]);
 
         let mut used = HashSet::from(["voter".into(), "votera".into()]);
-        assert_eq!(dedup_key("voter".into(), &mut used), "voterb");
-        assert_eq!(dedup_key("voter".into(), &mut used), "voterc");
+        assert_eq!(dedup_key("voter".into(), &mut used).unwrap(), "voterb");
+        assert_eq!(dedup_key("voter".into(), &mut used).unwrap(), "voterc");
     }
 
     #[test]
     fn collisions_continue_past_z_with_aa() {
         let mut used = HashSet::new();
         let keys: Vec<_> = (0..28)
-            .map(|_| dedup_key("voter".into(), &mut used))
+            .map(|_| dedup_key("voter".into(), &mut used).unwrap())
             .collect();
         assert_eq!(keys[26], "voterz");
         assert_eq!(keys[27], "voteraa");
@@ -1041,46 +1114,48 @@ mod tests {
     }
 
     #[test]
-    fn prop_keys_stay_unique_for_any_collision_count() {
+    fn prop_keys_stay_unique_through_the_suffix_cap() {
         finish_within(std::time::Duration::from_secs(10), || {
             let mut saturated = HashSet::from(["dup".into()]);
             for byte in b'a'..=255 {
                 saturated.insert(format!("dup{}", char::from(byte)));
             }
-            for count in (0..=128).chain([159, 160, 161, 255, 256, 257, 1000, 1001, 2048]) {
+            for count in (0..=128).chain([159, 160, 161, 255, 256, 257, 675, 676, 701, 702]) {
                 assert_unique_collisions(count, HashSet::new());
                 assert_unique_collisions(count, HashSet::from(["dup".into()]));
-                if matches!(count, 0 | 1 | 3 | 26 | 27 | 160 | 256 | 1000 | 2048) {
+                if count <= 676 && matches!(count, 0 | 1 | 3 | 26 | 27 | 160 | 256 | 675 | 676) {
                     assert_unique_collisions(count, saturated.clone());
                 }
             }
+            assert_unique_collisions(1 + 26 + 26 * 26, HashSet::new());
         });
     }
 
     #[test]
-    fn a_thousand_colliding_keys_finish_on_import_and_export() {
-        const COUNT: usize = 1000;
+    fn suffixes_stop_at_zz_on_import_and_export() {
+        // One base key, `a`–`z`, then `aa`–`zz`.
+        const KEYS: usize = 1 + 26 + 26 * 26;
         let (import_keys, export_keys) = finish_within(std::time::Duration::from_secs(10), || {
             let mut bib = String::new();
-            for index in 0..COUNT {
+            for index in 0..KEYS {
                 bib.push_str(&format!(
                     "@article{{same,\n  title = {{Paper {index}}}\n}}\n\n"
                 ));
             }
-            let server: Vec<Value> = (0..COUNT)
+            let server: Vec<Value> = (0..KEYS)
                 .map(|index| json!({"id": format!("e{index}")}))
                 .collect();
             let paired = pair_with_server(&bib, &server).expect("import");
             let import_keys: Vec<String> =
                 paired.iter().map(|item| item.source.key.clone()).collect();
-            let colliding: Vec<BibSource> = (0..COUNT)
+            let colliding: Vec<BibSource> = (0..KEYS)
                 .map(|index| BibSource {
                     key: "same".into(),
                     entry_type: "article".into(),
                     fields: vec![("title".into(), format!("Paper {index}"))],
                 })
                 .collect();
-            let exported = render_bibliography(&colliding);
+            let exported = render_bibliography(&colliding).expect("export");
             let export_keys: Vec<String> = parse_bibtex_raw(&exported)
                 .expect("export")
                 .into_iter()
@@ -1088,18 +1163,65 @@ mod tests {
                 .collect();
             (import_keys, export_keys)
         });
-        assert_eq!(import_keys.len(), COUNT);
-        assert_eq!(export_keys.len(), COUNT);
+        assert_eq!(import_keys.len(), KEYS);
+        assert_eq!(export_keys.len(), KEYS);
         assert_unique(&import_keys);
         assert_unique(&export_keys);
         assert_prefix(&import_keys, &["same", "samea", "sameb", "samec"]);
         assert_prefix(&export_keys, &["same", "samea", "sameb", "samec"]);
         assert_eq!(import_keys[26], "samez");
         assert_eq!(import_keys[27], "sameaa");
+        assert_eq!(import_keys[KEYS - 1], "samezz");
         assert_eq!(export_keys[26], "samez");
         assert_eq!(export_keys[27], "sameaa");
-        assert!(import_keys.iter().all(|key| key.is_ascii()));
-        assert!(export_keys.iter().all(|key| key.is_ascii()));
+        assert_eq!(export_keys[KEYS - 1], "samezz");
+
+        let mut bib = String::new();
+        for index in 0..=KEYS {
+            bib.push_str(&format!(
+                "@article{{same,\n  title = {{Paper {index}}}\n}}\n\n"
+            ));
+        }
+        let server: Vec<Value> = (0..=KEYS)
+            .map(|index| json!({"id": format!("e{index}")}))
+            .collect();
+        let import_error = pair_with_server(&bib, &server).unwrap_err();
+        let BibliographyError::CitationKey(import_error) = import_error else {
+            panic!("import returned {import_error}");
+        };
+        assert_eq!(import_error.base, "same");
+        assert_eq!(
+            import_error.to_string(),
+            "no free citation key for \"same\" after suffixes a-z and aa-zz"
+        );
+        let wrapped = BibliographyError::from(import_error);
+        assert_eq!(
+            wrapped.to_string(),
+            "no free citation key for \"same\" after suffixes a-z and aa-zz"
+        );
+        assert_eq!(
+            std::error::Error::source(&wrapped)
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("no free citation key for \"same\" after suffixes a-z and aa-zz")
+        );
+        let parse_error = BibliographyError::Parse("bad bib".into());
+        assert_eq!(parse_error.to_string(), "bad bib");
+        assert!(std::error::Error::source(&parse_error).is_none());
+
+        let colliding: Vec<BibSource> = (0..=KEYS)
+            .map(|index| BibSource {
+                key: "same".into(),
+                entry_type: "article".into(),
+                fields: vec![("title".into(), format!("Paper {index}"))],
+            })
+            .collect();
+        let export_error = render_bibliography(&colliding).unwrap_err();
+        assert_eq!(export_error.base, "same");
+        assert_eq!(
+            export_error.to_string(),
+            "no free citation key for \"same\" after suffixes a-z and aa-zz"
+        );
     }
 
     fn assert_unique_collisions(count: usize, mut used: HashSet<String>) {
@@ -1110,7 +1232,7 @@ mod tests {
             && blocked.contains("dupz")
             && blocked.contains(&format!("dup{}", char::from(255)));
         let keys: Vec<String> = (0..count)
-            .map(|_| dedup_key("dup".into(), &mut used))
+            .map(|_| dedup_key("dup".into(), &mut used).unwrap())
             .collect();
         assert_eq!(keys.len(), count);
         assert_unique(&keys);

@@ -738,7 +738,10 @@ impl Server {
         if !errors.is_empty() {
             return errors.join("\n");
         }
-        bib_export::render_pairs(&pairs, &options)
+        match bib_export::render_pairs(&pairs, &options) {
+            Ok(bib) => bib,
+            Err(error) => error.to_string(),
+        }
     }
 
     /// Collection-local metadata only — never hits LOOKUP_DOI (free tier path).
@@ -2402,7 +2405,10 @@ impl Server {
         if entries.is_empty() {
             return format!("No citations resolved.\n{}", errors.join("\n"));
         }
-        let bib = render_bibtex_entries(&entries);
+        let bib = match render_bibtex_entries(&entries) {
+            Ok(bib) => bib,
+            Err(error) => return error.to_string(),
+        };
         let mut out = format!(
             "Resolved {} of {} citations.\n\n{bib}",
             entries.len(),
