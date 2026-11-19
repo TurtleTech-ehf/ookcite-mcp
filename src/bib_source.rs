@@ -1170,6 +1170,11 @@ mod tests {
   year = {2018},
   isbn = {0-8044-2957-X}
 }
+@book{otherbook,
+  title = {Second book title},
+  year = {2004},
+  isbn = {978-0-521-85629-7}
+}
 @misc{note2021,
   title = {Local note},
   year = {2017}
@@ -1181,6 +1186,7 @@ mod tests {
 }
 ";
         let server = vec![
+            json!({"id": "s-otherbook", "metadata": {"isbn": "9780521856297", "title": "Server second book", "year": 1980}}),
             json!({"id": "s-note", "metadata": {"citation_key": "note2021", "title": "Server note", "year": 1990}}),
             json!({"id": "s-other", "metadata": {"title": "Resolver page", "year": 2001, "eprint": "1111.11111"}}),
             json!({"id": "s-book", "isbn": "080442957x", "title": "Other book", "year": 1991}),
@@ -1196,11 +1202,12 @@ mod tests {
             json!({"id": "s-doi", "metadata": {"doi": "10.1000/abc", "eprint": "9999.99999", "title": "Other article", "year": 1993}}),
         ];
         let paired = pair_with_server(bib, &server).unwrap();
-        assert_eq!(paired.len(), 5, "{paired:?}");
+        assert_eq!(paired.len(), 6, "{paired:?}");
         let by_key = |key: &str| paired.iter().find(|item| item.source.key == key).unwrap();
         assert_eq!(by_key("doiPaper").entry_id.as_deref(), Some("s-doi"));
         assert_eq!(by_key("preprint").entry_id.as_deref(), Some("s-pre"));
         assert_eq!(by_key("book").entry_id.as_deref(), Some("s-book"));
+        assert_eq!(by_key("otherbook").entry_id.as_deref(), Some("s-otherbook"));
         assert_eq!(by_key("note2021").entry_id.as_deref(), Some("s-note"));
         let web = by_key("web");
         assert_eq!(web.entry_id, None);
