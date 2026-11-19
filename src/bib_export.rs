@@ -100,6 +100,8 @@ struct Work {
     institution: Option<String>,
     doi: String,
     url: Option<String>,
+    /// Caller `eprint`, kept verbatim. Not a provider column.
+    eprint: Option<String>,
     version: Option<String>,
     note: Option<String>,
     howpublished: Option<String>,
@@ -135,6 +137,7 @@ impl Work {
             institution: None,
             doi: String::new(),
             url: None,
+            eprint: None,
             version: None,
             note: None,
             howpublished: None,
@@ -306,6 +309,9 @@ fn assemble(stored: &Value, provider: Option<&Value>) -> Work {
     copy_locked(&mut work, &stored_work, &locked);
     work.caller_fields.clone_from(&locked);
     work.extra.clone_from(&stored_work.extra);
+    if stored_work.eprint.is_some() {
+        work.eprint.clone_from(&stored_work.eprint);
+    }
     if locked.contains("editor") {
         work.editors = stored_work.editors.clone();
     }
@@ -414,6 +420,7 @@ fn extra_locked(meta: &Value, locked: &HashSet<String>) -> Vec<(String, String)>
         "institution",
         "doi",
         "url",
+        "eprint",
         "version",
         "note",
         "howpublished",
@@ -774,6 +781,9 @@ fn work_from_stored(meta: &Value) -> Work {
     work.howpublished_locked = locked.contains("howpublished");
     work.caller_fields = locked.clone();
     work.extra = extra_locked(meta, &locked);
+    if locked.contains("eprint") {
+        work.eprint = text(meta, "eprint");
+    }
     let kind = map_type(&work.source_type, false);
     if work.booktitle.is_none() && matches!(kind, "inproceedings" | "incollection" | "inbook") {
         work.booktitle = work.journal.take();
@@ -964,6 +974,9 @@ fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
         if let Some(editor) = format_people(&work.editors) {
             fields.push(format!("  editor = {{{editor}}}"));
         }
+    }
+    if let Some(eprint) = work.eprint.as_deref() {
+        push_plain(&mut fields, "eprint", eprint);
     }
     if !work.doi.is_empty() {
         push_plain(&mut fields, "doi", &work.doi);
@@ -2939,6 +2952,37 @@ mod tests {
         assert!(bib.contains("series = {NATO Science Series}"), "{bib}");
         assert!(bib.contains("organization = {H5MD}"), "{bib}");
         assert!(bib.contains("address = {Dordrecht}"), "{bib}");
+    }
+
+    #[test]
+    fn metadata_eprint_is_copied_verbatim() {
+        let stored = json!({
+            "entry_type": "misc",
+            "title": "A preprint",
+            "citation_key": "pre",
+            "eprint": "cond-mat/9801_5%#&",
+            "archiveprefix": "arXiv",
+            "primaryclass": "cond-mat.stat-mech",
+            "user_fields": ["entry_type", "title", "eprint", "archiveprefix", "primaryclass"]
+        });
+        let provider = json!({
+            "crossref": {
+                "type": "posted-content",
+                "title": ["Resolver title"],
+                "DOI": "10.48550/arxiv.cond-mat/9801005",
+                "author": [{"family": "Author", "given": "A."}],
+                "issued": {"date-parts": [[1998]]}
+            }
+        });
+        let bib = render_pairs(&[(stored, Some(provider))], &BibOptions::default());
+        assert!(bib.contains("eprint = {cond-mat/9801_5%#&}"), "{bib}");
+        assert_eq!(bib.matches("eprint =").count(), 1, "{bib}");
+        assert!(!bib.contains("\\_"), "{bib}");
+        assert!(!bib.contains("\\%"), "{bib}");
+        assert!(!bib.contains("\\#"), "{bib}");
+        assert!(!bib.contains("\\&"), "{bib}");
+        assert!(bib.contains("archiveprefix = {arXiv}"), "{bib}");
+        assert!(bib.contains("primaryclass = {cond-mat.stat-mech}"), "{bib}");
     }
 
     #[test]

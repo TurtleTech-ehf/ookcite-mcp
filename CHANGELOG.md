@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file. See [conven
 - (**bibtex**) keep an imported bibliography's keys, types, and fields on export
 - (**bibtex**) disambiguate a run of identical citation keys without stalling
 - (**bibtex**) copy doi, url, and eprint verbatim and keep an @string macro bare
+- (**bibtex**) copy a stored eprint verbatim on the metadata export path
 - (**bibtex**) pair leftover entries by citation key, title, and year
 - (**bibtex**) keep both sources when two entries share a DOI
 - (**bibtex**) do not refill a cleared field when enrich is set
