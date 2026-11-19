@@ -806,19 +806,9 @@ fn render_work_entry(work: &Work, options: &BibOptions, used: &mut HashSet<Strin
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .map(str::to_string);
-    let mut key = custom.unwrap_or_else(|| generated_key(work));
-    if key.is_empty() {
-        key = "ref".into();
-    }
-    if used.contains(&key) {
-        let base = key.clone();
-        let mut suffix = b'a';
-        while used.contains(&key) {
-            key = format!("{base}{}", suffix as char);
-            suffix = suffix.saturating_add(1);
-        }
-    }
-    used.insert(key.clone());
+    let key = custom.unwrap_or_else(|| generated_key(work));
+    let key = if key.is_empty() { "ref".into() } else { key };
+    let key = crate::bib_source::dedup_key(key, used);
     render_entry(work, &key, options)
 }
 
@@ -2932,6 +2922,60 @@ mod tests {
         assert!(bib.contains("series = {NATO Science Series}"), "{bib}");
         assert!(bib.contains("organization = {H5MD}"), "{bib}");
         assert!(bib.contains("address = {Dordrecht}"), "{bib}");
+    }
+
+    #[test]
+    fn a_thousand_colliding_citation_keys_finish_on_export() {
+        const COUNT: usize = 1000;
+        let bib = finish_within(std::time::Duration::from_secs(10), || {
+            let entries: Vec<Value> = (0..COUNT)
+                .map(|index| {
+                    json!({
+                        "title": format!("Paper {index}"),
+                        "citation_key": "same",
+                        "entry_type": "article",
+                        "date": {"year": 2020},
+                    })
+                })
+                .collect();
+            render_stored_entries(&entries)
+        });
+        let keys: Vec<String> = crate::bib_audit::parse_bibtex_raw(&bib)
+            .expect("export")
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect();
+        assert_eq!(keys.len(), COUNT);
+        let unique: HashSet<_> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len());
+        for (key, want) in keys.iter().zip(["same", "samea", "sameb", "samec"]) {
+            assert_eq!(key, want);
+        }
+        assert_eq!(keys[26], "samez");
+        assert_eq!(keys[27], "sameaa");
+        assert!(keys.iter().all(|key| key.is_ascii()));
+    }
+
+    fn finish_within<T>(limit: std::time::Duration, work: impl FnOnce() -> T + Send + 'static) -> T
+    where
+        T: Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(limit) {
+            Ok(Ok(value)) => value,
+            Ok(Err(payload)) => std::panic::resume_unwind(payload),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!("citation key disambiguation did not finish within {limit:?}");
+                std::process::exit(101);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("citation key disambiguation stopped before returning a key");
+            }
+        }
     }
 
     fn split_entries(bib: &str) -> Vec<String> {

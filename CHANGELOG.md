@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file. See [conven
 ## Unreleased
 #### Bugfixes
 - (**bibtex**) keep an imported bibliography's keys, types, and fields on export
+- (**bibtex**) disambiguate a run of identical citation keys without stalling
 
 - - -
 ## v0.6.5 - 2026-10-04

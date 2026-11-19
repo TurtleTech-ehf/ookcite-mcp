@@ -20,8 +20,10 @@
 //!
 //! Braces, `--`, name particles, and LaTeX accents are copied as written.
 //! A citation key is kept. A key is generated only when the source entry
-//! has none. Resolver fields are not added unless export is asked to enrich,
-//! and then only a field the source left empty.
+//! has none. A repeated key keeps the first spelling and then takes the
+//! suffixes `a`, `b`, `c`, through `z`, `aa`, `ab`, so a long run of
+//! collisions still ends. Resolver fields are not added unless export is
+//! asked to enrich, and then only a field the source left empty.
 
 #[cfg(test)]
 use std::collections::HashMap;
@@ -543,19 +545,45 @@ fn first_year(value: &str) -> Option<i32> {
     (1000..3000).contains(&year).then_some(year)
 }
 
-fn dedup_key(mut key: String, used: &mut HashSet<String>) -> String {
-    if !used.contains(&key) {
-        used.insert(key.clone());
+/// Return `key` when it is free. Otherwise append `a`, `b`, `c`, … `z`, `aa`, `ab`, …
+///
+/// The first twenty-six collisions are the single letters this exporter already
+/// wrote. The tail is bijective base 26, so the search does not stall once a
+/// one-byte suffix has been used up.
+pub(crate) fn dedup_key(key: String, used: &mut HashSet<String>) -> String {
+    if used.insert(key.clone()) {
         return key;
     }
-    let base = key.clone();
-    let mut suffix = b'a';
-    while used.contains(&key) {
-        key = format!("{base}{}", suffix as char);
-        suffix = suffix.saturating_add(1);
+    let base = key;
+    // Least-significant digit first, 0 = 'a'. Each step is a new suffix.
+    let mut digits = Vec::new();
+    loop {
+        next_letter_suffix(&mut digits);
+        let suffix = format_letter_suffix(&digits);
+        let candidate = format!("{base}{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
     }
-    used.insert(key.clone());
-    key
+}
+
+fn next_letter_suffix(digits: &mut Vec<u8>) {
+    for digit in digits.iter_mut() {
+        if *digit < 25 {
+            *digit += 1;
+            return;
+        }
+        *digit = 0;
+    }
+    digits.push(0);
+}
+
+fn format_letter_suffix(digits: &[u8]) -> String {
+    digits
+        .iter()
+        .rev()
+        .map(|digit| char::from(b'a' + *digit))
+        .collect()
 }
 
 #[cfg(test)]
@@ -795,5 +823,187 @@ mod tests {
         assert_eq!(by_key("kept").source.field("title"), Some("Real title"));
         assert_eq!(by_key("web").entry_id.as_deref(), Some("e2"));
         assert_eq!(by_key("web").source.entry_type, "manual");
+    }
+
+    #[test]
+    fn common_collisions_keep_the_letters_a_b_and_c() {
+        let mut used = HashSet::new();
+        let keys: Vec<_> = (0..4)
+            .map(|_| dedup_key("voter".into(), &mut used))
+            .collect();
+        assert_prefix(&keys, &["voter", "votera", "voterb", "voterc"]);
+
+        let mut used = HashSet::from(["voter".into(), "votera".into()]);
+        assert_eq!(dedup_key("voter".into(), &mut used), "voterb");
+        assert_eq!(dedup_key("voter".into(), &mut used), "voterc");
+    }
+
+    #[test]
+    fn collisions_continue_past_z_with_aa() {
+        let mut used = HashSet::new();
+        let keys: Vec<_> = (0..28)
+            .map(|_| dedup_key("voter".into(), &mut used))
+            .collect();
+        assert_eq!(keys[26], "voterz");
+        assert_eq!(keys[27], "voteraa");
+        assert!(keys.iter().all(|key| key.is_ascii()));
+    }
+
+    #[test]
+    fn prop_keys_stay_unique_for_any_collision_count() {
+        finish_within(std::time::Duration::from_secs(10), || {
+            let mut saturated = HashSet::from(["dup".into()]);
+            for byte in b'a'..=255 {
+                saturated.insert(format!("dup{}", char::from(byte)));
+            }
+            for count in (0..=128).chain([159, 160, 161, 255, 256, 257, 1000, 1001, 2048]) {
+                assert_unique_collisions(count, HashSet::new());
+                assert_unique_collisions(count, HashSet::from(["dup".into()]));
+                if matches!(count, 0 | 1 | 3 | 26 | 27 | 160 | 256 | 1000 | 2048) {
+                    assert_unique_collisions(count, saturated.clone());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn a_thousand_colliding_keys_finish_on_import_and_export() {
+        const COUNT: usize = 1000;
+        let (import_keys, export_keys) = finish_within(std::time::Duration::from_secs(10), || {
+            let mut bib = String::new();
+            for index in 0..COUNT {
+                bib.push_str(&format!(
+                    "@article{{same,\n  title = {{Paper {index}}}\n}}\n\n"
+                ));
+            }
+            let server: Vec<Value> = (0..COUNT)
+                .map(|index| json!({"id": format!("e{index}")}))
+                .collect();
+            let paired = pair_with_server(&bib, &server).expect("import");
+            let import_keys: Vec<String> =
+                paired.iter().map(|item| item.source.key.clone()).collect();
+            let colliding: Vec<BibSource> = (0..COUNT)
+                .map(|index| BibSource {
+                    key: "same".into(),
+                    entry_type: "article".into(),
+                    fields: vec![("title".into(), format!("Paper {index}"))],
+                })
+                .collect();
+            let exported = render_bibliography(&colliding);
+            let export_keys: Vec<String> = parse_bibtex_raw(&exported)
+                .expect("export")
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect();
+            (import_keys, export_keys)
+        });
+        assert_eq!(import_keys.len(), COUNT);
+        assert_eq!(export_keys.len(), COUNT);
+        assert_unique(&import_keys);
+        assert_unique(&export_keys);
+        assert_prefix(&import_keys, &["same", "samea", "sameb", "samec"]);
+        assert_prefix(&export_keys, &["same", "samea", "sameb", "samec"]);
+        assert_eq!(import_keys[26], "samez");
+        assert_eq!(import_keys[27], "sameaa");
+        assert_eq!(export_keys[26], "samez");
+        assert_eq!(export_keys[27], "sameaa");
+        assert!(import_keys.iter().all(|key| key.is_ascii()));
+        assert!(export_keys.iter().all(|key| key.is_ascii()));
+    }
+
+    #[test]
+    fn readcon_and_amsel_round_trips_are_unchanged() {
+        let paths = [
+            "/cursor/stores/bot/ttkit/readcon-ookcite-repro/rg_main.bib",
+            "/cursor/stores/bot/ttkit/amsel-ookcite-repro/amsel-refs.bib",
+        ];
+        for path in paths {
+            if !std::path::Path::new(path).exists() {
+                continue;
+            }
+            let source = std::fs::read_to_string(path).unwrap();
+            let exported = round_trip(&source);
+            let diff = diff_bibliographies(&source, &exported).unwrap();
+            assert_eq!(diff.key_changes, 0, "{path} {diff:?}");
+            assert_eq!(diff.type_changes, 0, "{path} {diff:?}");
+            assert_eq!(diff.dropped_fields, 0, "{path} {diff:?}");
+            assert_eq!(diff.added_fields, 0, "{path} {diff:?}");
+            assert_eq!(diff.value_changes, 0, "{path} {diff:?}");
+            assert_eq!(diff.entries_differing, 0, "{path} {diff:?}");
+            assert_eq!(diff.export_entries, diff.source_entries, "{path} {diff:?}");
+            let source_keys: Vec<_> = parse_bibtex_raw(&source)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect();
+            let export_keys: Vec<_> = parse_bibtex_raw(&exported)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect();
+            assert_eq!(export_keys, source_keys, "{path}");
+        }
+    }
+
+    fn assert_unique_collisions(count: usize, mut used: HashSet<String>) {
+        let blocked = used.clone();
+        let only_base = blocked.len() == 1 && blocked.contains("dup");
+        let byte_tails_are_full = blocked.contains("dup")
+            && blocked.contains("dupa")
+            && blocked.contains("dupz")
+            && blocked.contains(&format!("dup{}", char::from(255)));
+        let keys: Vec<String> = (0..count)
+            .map(|_| dedup_key("dup".into(), &mut used))
+            .collect();
+        assert_eq!(keys.len(), count);
+        assert_unique(&keys);
+        assert!(
+            keys.iter().all(|key| !blocked.contains(key)),
+            "count {count}"
+        );
+        assert!(keys.iter().all(|key| key.is_ascii()), "count {count}");
+        if blocked.is_empty() && count >= 4 {
+            assert_prefix(&keys, &["dup", "dupa", "dupb", "dupc"]);
+        }
+        if only_base && count >= 3 {
+            assert_prefix(&keys, &["dupa", "dupb", "dupc"]);
+        }
+        if byte_tails_are_full && count >= 2 {
+            assert_prefix(&keys, &["dupaa", "dupab"]);
+        }
+    }
+
+    fn assert_prefix(keys: &[String], expected: &[&str]) {
+        assert!(keys.len() >= expected.len());
+        for (key, want) in keys.iter().zip(expected) {
+            assert_eq!(key, want);
+        }
+    }
+
+    fn assert_unique(keys: &[String]) {
+        let unique: HashSet<_> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len());
+    }
+
+    fn finish_within<T>(limit: std::time::Duration, work: impl FnOnce() -> T + Send + 'static) -> T
+    where
+        T: Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(limit) {
+            Ok(Ok(value)) => value,
+            Ok(Err(payload)) => std::panic::resume_unwind(payload),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!("citation key disambiguation did not finish within {limit:?}");
+                std::process::exit(101);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("citation key disambiguation stopped before returning a key");
+            }
+        }
     }
 }
