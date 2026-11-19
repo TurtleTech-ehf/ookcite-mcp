@@ -103,7 +103,8 @@ pub fn source_from_meta(meta: &Value) -> Option<BibSource> {
 ///
 /// A DOI matches first. Entries left over match in order when the two sides
 /// have the same number of leftovers, which is how a server that dropped the
-/// DOI of a web page is still tied to the source entry.
+/// DOI of a web page is still tied to the source entry. An entry that matches
+/// nothing is still returned, with no entry id, so its source snapshot stays.
 pub fn pair_with_server(
     content: &str,
     server: &[Value],
@@ -172,10 +173,15 @@ pub fn pair_with_server(
     let mut seen_keys = HashSet::new();
     let mut out = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
+        let source = to_source(entry, &mut seen_keys)?;
         let Some(server_index) = paired[index] else {
+            out.push(PairedSource {
+                entry_id: None,
+                doi: source_doi(entry),
+                source,
+            });
             continue;
         };
-        let source = to_source(entry, &mut seen_keys)?;
         let record = &server[server_index];
         out.push(PairedSource {
             entry_id: record
@@ -1059,11 +1065,60 @@ mod tests {
             json!({"id": "s-extra", "metadata": {"title": "Something else", "year": 2011}}),
         ];
         let paired = pair_with_server(bib, &server).unwrap();
-        assert_eq!(paired.len(), 2, "{paired:?}");
+        assert_eq!(paired.len(), 3, "{paired:?}");
         let by_key = |key: &str| paired.iter().find(|item| item.source.key == key).unwrap();
         assert_eq!(by_key("alpha").entry_id.as_deref(), Some("s-alpha"));
         assert_eq!(by_key("gamma").entry_id.as_deref(), Some("s-gamma"));
-        assert!(paired.iter().all(|item| item.source.key != "beta"));
+        let beta = by_key("beta");
+        assert_eq!(beta.entry_id, None);
+        assert_eq!(beta.doi, None);
+        assert_eq!(beta.source.entry_type, "manual");
+        assert_eq!(beta.source.field("title"), Some("Beta manual"));
+        assert_eq!(beta.source.field("year"), Some("2021"));
+    }
+
+    #[test]
+    fn unpaired_entries_keep_their_source_snapshot() {
+        let bib = "\
+@article{matched,
+  title = {Matched title},
+  year = {2020},
+  doi = {10.1000/matched}
+}
+@misc{doi-only,
+  title = {Unmatched doi},
+  year = {2019},
+  doi = {10.1000/unmatched},
+  note = {doi snapshot}
+}
+@manual{no-doi,
+  title = {No doi note},
+  year = {2018},
+  howpublished = {Web}
+}
+";
+        let server = vec![
+            json!({"id": "s-matched", "metadata": {"doi": "10.1000/matched", "title": "Matched title"}}),
+        ];
+        let paired = pair_with_server(bib, &server).unwrap();
+        assert_eq!(paired.len(), 3, "{paired:?}");
+        let by_key = |key: &str| paired.iter().find(|item| item.source.key == key).unwrap();
+        assert_eq!(by_key("matched").entry_id.as_deref(), Some("s-matched"));
+        assert_eq!(by_key("matched").doi.as_deref(), Some("10.1000/matched"));
+        let doi_only = by_key("doi-only");
+        assert_eq!(doi_only.entry_id, None);
+        assert_eq!(doi_only.doi.as_deref(), Some("10.1000/unmatched"));
+        assert_eq!(doi_only.source.entry_type, "misc");
+        assert_eq!(doi_only.source.field("title"), Some("Unmatched doi"));
+        assert_eq!(doi_only.source.field("note"), Some("doi snapshot"));
+        assert_eq!(doi_only.source.field("year"), Some("2019"));
+        let no_doi = by_key("no-doi");
+        assert_eq!(no_doi.entry_id, None);
+        assert_eq!(no_doi.doi, None);
+        assert_eq!(no_doi.source.entry_type, "manual");
+        assert_eq!(no_doi.source.field("title"), Some("No doi note"));
+        assert_eq!(no_doi.source.field("howpublished"), Some("Web"));
+        assert_eq!(no_doi.source.field("year"), Some("2018"));
     }
 
     #[test]
