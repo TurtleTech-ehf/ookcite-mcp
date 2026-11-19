@@ -37,4 +37,4 @@
     - `journal`, `booktitle`, `chapter`, `series`, `volume`, `number` (the issue or the report number; keep `--`), `pages` (keep a source page range, including an article number and a single hyphen), `publisher` (keep `\&`), `address`, `edition`, `organization`, `institution`, `type` (the BibTeX `type` field, distinct from `entry_type`), `howpublished`, `note`, `version`, `school`, `month`, `isbn`, `doi`, `url`, `year`.
     - `user_fields`, the keys the caller set.
 
-    A resolver value may fill a field only when that field is empty in the source and the client asked for enrichment. It must not replace `volume`, `number`, `pages`, or any other non-empty source value, and it must not change the key or the entry type.
+    A resolver value may fill a field only when that field is empty in the source, the caller did not clear it, and the client asked for enrichment. It must not replace `volume`, `number`, `pages`, or any other non-empty source value, and it must not change the key or the entry type. `doi`, `url`, and `eprint` are copied verbatim. A month or other field that names an `@string` macro stays a bare macro. Two entries that share a DOI are both kept.

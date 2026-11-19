@@ -44,7 +44,7 @@ A later edit of the same entry updates its record; fields it does not mention ar
 ```json
 {
   "version": 1,
-  "collection": "readcon-cpc-v3",
+  "collection": "lab-v3",
   "entries": {
     "doi:10.1002/jcc.21224": {
       "fields": {
@@ -82,10 +82,10 @@ Setting the field again later replaces the marker.
 
 ## Export
 
-`export_collection` loads the file and, for an entry with a `source` record, prints that entry. A field set later with `update_entry_metadata` replaces the same field in the printed entry. `enrich=true` fills only a field the source left empty, from the resolver. The default is off, so a resolver title, URL, page range, or author list does not replace or extend the source.
+`export_collection` loads the file and, for an entry with a `source` record, prints that entry. A field set later with `update_entry_metadata` replaces the same field in the printed entry. `enrich=true` fills only a field the source left empty, from the resolver, and does not fill a field that was cleared. The default is off, so a resolver title, URL, page range, or author list does not replace or extend the source. Two imported entries that share a DOI are both kept: the first stays on the DOI key and each entry stays on its id.
 `local_overrides=false` exports the server record alone.
 
-An imported entry is printed with these normalisations and no others: the entry type and field names are lower case; fields stay in source order and are written as `name = {value}`; a numeric or quoted value is written in braces; `#` concatenation is joined and an `@string` macro is not expanded; a Unicode en dash or em dash is written `--` or `---`; a bare `&`, `%`, `#`, or `_` is escaped and an escaped one is not escaped again. Braces, `--`, name particles, and LaTeX accents are copied as written. A source file that already has this shape is unchanged.
+An imported entry is printed with these normalisations and no others: the entry type and field names are lower case; fields stay in source order and are written as `name = {value}`; a numeric or quoted value is written in braces; `#` concatenation of braced text is joined; an `@string` macro stays bare (`month = jan`); `doi`, `url`, and `eprint` are copied verbatim; a Unicode en dash or em dash is written `--` or `---`; a bare `&`, `%`, `#`, or `_` in any other field is escaped and an escaped one is not escaped again. Braces, `--`, name particles, and LaTeX accents are copied as written. A source file that already has this shape is unchanged.
 
 A file that cannot be read or parsed does not stop the export.
 The full path and the error go to stderr, and the BibTeX starts with a `%` comment that names the collection and says the overrides were not applied.
