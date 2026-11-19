@@ -122,28 +122,36 @@ impl OverrideStore {
         }
     }
 
-    /// Store the source of every imported entry, under its id and its DOI.
+    /// Store the source of every imported entry.
     ///
-    /// The `Ok` value lists DOIs that belonged to more than one entry. Both
-    /// sources are kept: the first stays on the DOI key and each entry stays
-    /// on its id.
+    /// Each source is written under its entry id and its DOI when it has
+    /// them. A source that would otherwise be dropped is written under its
+    /// citation key. `kept` is the number of sources still in the file after
+    /// those writes, not the number of pairs that were offered.
     pub fn record_sources(
         &self,
         collection: &str,
         pairs: &[PairedSource],
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<RecordedSources, String> {
         match self {
             Self::Enabled(dir) => {
-                let mut conflicts = Vec::new();
+                let mut recorded = RecordedSources::default();
                 update_in(dir, collection, |store| {
-                    conflicts = store.record_sources(pairs);
+                    recorded = store.record_sources(pairs);
                 })?;
-                Ok(conflicts)
+                Ok(recorded)
             }
             Self::Unavailable => Err(UNAVAILABLE_MESSAGE.into()),
             Self::Disabled => Err(DISABLED_MESSAGE.into()),
         }
     }
+}
+
+/// How many imported sources were actually stored, and any collisions.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RecordedSources {
+    pub kept: usize,
+    pub conflicts: Vec<String>,
 }
 
 /// One entry's overrides. `None` in `fields` removes that field.
@@ -397,40 +405,73 @@ impl CollectionOverrides {
         }
     }
 
-    pub fn record_sources(&mut self, pairs: &[PairedSource]) -> Vec<String> {
+    pub fn record_sources(&mut self, pairs: &[PairedSource]) -> RecordedSources {
         let mut conflicts = Vec::new();
         for pair in pairs {
-            if let Some(id) = pair
-                .entry_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-            {
+            if let Some(id) = nonempty(pair.entry_id.as_deref()) {
                 self.put_source(id_key(id), pair.source.clone());
             }
-            if let Some(doi) = pair
-                .doi
-                .as_deref()
-                .map(str::trim)
-                .filter(|doi| !doi.is_empty())
-            {
+            if let Some(doi) = nonempty(pair.doi.as_deref()) {
                 let key = doi_key(doi);
-                if let Some(existing) = self
-                    .entries
-                    .get(&key)
-                    .and_then(|entry| entry.source.clone())
-                {
+                if let Some(existing) = self.source_at(&key).cloned() {
                     if existing != pair.source {
                         conflicts.push(format!(
                             "Duplicate DOI {doi} kept the first source; the other entry stays under its id."
                         ));
-                        continue;
                     }
+                } else {
+                    self.put_source(key, pair.source.clone());
                 }
-                self.put_source(key, pair.source.clone());
+            }
+            if !self.holds_source(pair) {
+                self.store_under_citation_key(pair, &mut conflicts);
             }
         }
-        conflicts
+        RecordedSources {
+            kept: pairs.iter().filter(|pair| self.holds_source(pair)).count(),
+            conflicts,
+        }
+    }
+
+    fn source_at(&self, key: &str) -> Option<&BibSource> {
+        self.entries
+            .get(key)
+            .and_then(|entry| entry.source.as_ref())
+    }
+
+    fn holds_source(&self, pair: &PairedSource) -> bool {
+        let source = &pair.source;
+        if let Some(id) = nonempty(pair.entry_id.as_deref()) {
+            if self.source_at(&id_key(id)) == Some(source) {
+                return true;
+            }
+        }
+        if let Some(doi) = nonempty(pair.doi.as_deref()) {
+            if self.source_at(&doi_key(doi)) == Some(source) {
+                return true;
+            }
+        }
+        let cite = pair.source.key.trim();
+        !cite.is_empty() && self.source_at(&cite_key(cite)) == Some(source)
+    }
+
+    fn store_under_citation_key(&mut self, pair: &PairedSource, conflicts: &mut Vec<String>) {
+        let cite = pair.source.key.trim();
+        if cite.is_empty() {
+            conflicts
+                .push("An imported entry with no citation key, id, or DOI was not stored.".into());
+            return;
+        }
+        let key = cite_key(cite);
+        if let Some(existing) = self.source_at(&key).cloned() {
+            if existing != pair.source {
+                conflicts.push(format!(
+                    "Citation key {cite} kept the first source; a later entry with that key was not stored."
+                ));
+            }
+        } else {
+            self.put_source(key, pair.source.clone());
+        }
     }
 
     fn put_source(&mut self, key: String, source: BibSource) {
@@ -438,6 +479,11 @@ impl CollectionOverrides {
     }
 
     /// Lay every override over a collection body's entries, in place.
+    ///
+    /// An id or DOI hit is applied first. A source that was stored only under
+    /// its citation key is then attached when the server entry's citation key,
+    /// URL, or year-compatible title identifies it and that identification is
+    /// unique.
     pub fn apply_to_entries(&self, entries: &mut [Value]) {
         for entry in entries.iter_mut() {
             let entry_id = entry.get("id").and_then(Value::as_str).map(str::to_string);
@@ -449,14 +495,199 @@ impl CollectionOverrides {
             let Some(ov) = self.for_entry(entry_id.as_deref(), doi.as_deref()) else {
                 continue;
             };
-            let merged = apply(&meta, ov);
-            if entry.get("metadata").is_some() {
-                entry["metadata"] = merged;
-            } else {
-                *entry = merged;
+            apply_override(entry, ov);
+        }
+        self.attach_loose_sources(entries);
+    }
+
+    fn attach_loose_sources(&self, entries: &mut [Value]) {
+        let attached = entries.iter().filter_map(entry_source).collect::<Vec<_>>();
+        let loose: Vec<&EntryOverride> = self
+            .entries
+            .iter()
+            .filter(|(key, ov)| {
+                map_key_is_citation(key)
+                    && ov
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| !attached.iter().any(|have| have == source))
+            })
+            .map(|(_, ov)| ov)
+            .collect();
+        if loose.is_empty() {
+            return;
+        }
+        let mut open: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| (!entry_has_source(entry)).then_some(index))
+            .collect();
+        let mut used = vec![false; loose.len()];
+        for kind in [LooseMatch::CitationKey, LooseMatch::Url, LooseMatch::Title] {
+            let pairs = unique_loose_pairs(entries, &open, &loose, &used, kind);
+            let mut taken = Vec::new();
+            for (entry_index, loose_index) in pairs {
+                apply_override(&mut entries[entry_index], loose[loose_index]);
+                used[loose_index] = true;
+                taken.push(entry_index);
             }
+            open.retain(|index| !taken.contains(index));
         }
     }
+}
+
+fn map_key_is_citation(key: &str) -> bool {
+    key.starts_with("key:") && key.len() > "key:".len()
+}
+
+fn apply_override(entry: &mut Value, ov: &EntryOverride) {
+    let meta = entry
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| entry.clone());
+    let merged = apply(&meta, ov);
+    if entry.get("metadata").is_some() {
+        entry["metadata"] = merged;
+    } else {
+        *entry = merged;
+    }
+}
+
+fn entry_has_source(entry: &Value) -> bool {
+    entry_source(entry).is_some()
+}
+
+fn entry_source(entry: &Value) -> Option<BibSource> {
+    let meta = entry.get("metadata").unwrap_or(entry);
+    crate::bib_source::source_from_meta(meta)
+}
+
+/// Entries that still have no kept source after overrides were applied.
+pub fn source_gap_note(entries: &[Value]) -> Option<String> {
+    let missing = entries
+        .iter()
+        .filter(|entry| !entry_has_source(entry))
+        .count();
+    if missing == 0 {
+        return None;
+    }
+    Some(format!(
+        "no kept source for {missing} entries; they were rendered from the server record. Re-import the bibliography to keep the original BibTeX."
+    ))
+}
+
+#[derive(Clone, Copy)]
+enum LooseMatch {
+    CitationKey,
+    Url,
+    Title,
+}
+
+fn unique_loose_pairs(
+    entries: &[Value],
+    open: &[usize],
+    loose: &[&EntryOverride],
+    used: &[bool],
+    kind: LooseMatch,
+) -> Vec<(usize, usize)> {
+    let available: Vec<usize> = used
+        .iter()
+        .enumerate()
+        .filter_map(|(index, taken)| (!taken).then_some(index))
+        .collect();
+    let mut chosen = Vec::new();
+    for &entry_index in open {
+        let mut hit = None;
+        for &loose_index in &available {
+            let Some(source) = loose[loose_index].source.as_ref() else {
+                continue;
+            };
+            if !loose_match(kind, source, &entries[entry_index]) {
+                continue;
+            }
+            if hit.is_some() {
+                hit = None;
+                break;
+            }
+            hit = Some(loose_index);
+        }
+        if let Some(loose_index) = hit {
+            chosen.push((entry_index, loose_index));
+        }
+    }
+    let mut claims = BTreeMap::<usize, usize>::new();
+    for (_, loose_index) in &chosen {
+        *claims.entry(*loose_index).or_insert(0) += 1;
+    }
+    chosen.retain(|(_, loose_index)| claims.get(loose_index) == Some(&1));
+    chosen
+}
+
+fn loose_match(kind: LooseMatch, source: &BibSource, entry: &Value) -> bool {
+    match kind {
+        LooseMatch::CitationKey => citation_keys_match(source, entry),
+        LooseMatch::Url => urls_match(source, entry),
+        LooseMatch::Title => titles_match(source, entry),
+    }
+}
+
+fn citation_keys_match(source: &BibSource, entry: &Value) -> bool {
+    let source_key = source.key.trim();
+    !source_key.is_empty()
+        && entry_citation_key(entry).is_some_and(|key| key.eq_ignore_ascii_case(source_key))
+}
+
+fn entry_citation_key(entry: &Value) -> Option<String> {
+    let meta = entry.get("metadata").unwrap_or(entry);
+    meta.get("citation_key")
+        .or_else(|| meta.get("cite_key"))
+        .or_else(|| entry.pointer("/render/citation_key"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+}
+
+fn urls_match(source: &BibSource, entry: &Value) -> bool {
+    let Some(source_url) = source
+        .field("url")
+        .and_then(crate::bib_source::normalized_url)
+    else {
+        return false;
+    };
+    let meta = entry.get("metadata").unwrap_or(entry);
+    meta.get("url")
+        .and_then(Value::as_str)
+        .and_then(crate::bib_source::normalized_url)
+        .is_some_and(|url| url == source_url)
+}
+
+fn titles_match(source: &BibSource, entry: &Value) -> bool {
+    let source_title = crate::bib_source::loose_title(source.field("title").unwrap_or(""));
+    if source_title.is_empty() {
+        return false;
+    }
+    let meta = entry.get("metadata").unwrap_or(entry);
+    let server_title =
+        crate::bib_source::loose_title(meta.get("title").and_then(Value::as_str).unwrap_or(""));
+    if server_title != source_title {
+        return false;
+    }
+    let source_year = source.field("year").and_then(crate::bib_source::first_year);
+    let server_year = crate::bib_source::server_year(entry);
+    match (source_year, server_year) {
+        (Some(left), Some(right)) => left == right,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|text| !text.is_empty())
+}
+
+fn cite_key(key: &str) -> String {
+    format!("key:{}", key.trim())
 }
 
 pub fn doi_key(doi: &str) -> String {
@@ -916,8 +1147,10 @@ mod tests {
             key: key.into(),
             entry_type: "article".into(),
             fields: vec![("title".into(), title.into())],
+
+            separators: Vec::new(),
         };
-        let conflicts = store.record_sources(&[
+        let recorded = store.record_sources(&[
             PairedSource {
                 entry_id: Some("e1".into()),
                 doi: Some("10.1000/shared".into()),
@@ -929,8 +1162,12 @@ mod tests {
                 source: source("second", "Two"),
             },
         ]);
-        assert_eq!(conflicts.len(), 1, "{conflicts:?}");
-        assert!(conflicts[0].contains("10.1000/Shared"), "{conflicts:?}");
+        assert_eq!(recorded.kept, 2, "{recorded:?}");
+        assert_eq!(recorded.conflicts.len(), 1, "{recorded:?}");
+        assert!(
+            recorded.conflicts[0].contains("10.1000/Shared"),
+            "{recorded:?}"
+        );
         assert_eq!(
             store.entries["doi:10.1000/shared"]
                 .source
@@ -943,6 +1180,7 @@ mod tests {
             store.entries["id:e2"].source.as_ref().unwrap().key,
             "second"
         );
+        assert_eq!(store.entries.len(), 3, "{:?}", store.entries.keys());
         let mut entries = vec![
             json!({"id": "e1", "metadata": {"doi": "10.1000/shared"}}),
             json!({"id": "e2", "metadata": {"doi": "10.1000/shared"}}),
@@ -950,6 +1188,617 @@ mod tests {
         store.apply_to_entries(&mut entries);
         assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "first");
         assert_eq!(entries[1]["metadata"]["bib_source"]["key"], "second");
+    }
+
+    #[test]
+    fn a_duplicate_doi_without_an_id_keeps_both_sources() {
+        use crate::bib_source::{BibSource, PairedSource};
+        let source = |key: &str, title: &str| BibSource {
+            key: key.into(),
+            entry_type: "article".into(),
+            fields: vec![("title".into(), title.into())],
+
+            separators: Vec::new(),
+        };
+        let mut store = CollectionOverrides::new("paper");
+        let _conflicts = store.record_sources(&[
+            PairedSource {
+                entry_id: None,
+                doi: Some("10.1000/shared".into()),
+                source: source("first", "One"),
+            },
+            PairedSource {
+                entry_id: None,
+                doi: Some("10.1000/shared".into()),
+                source: source("second", "Two"),
+            },
+        ]);
+        let mut keys: Vec<_> = store
+            .entries
+            .values()
+            .filter_map(|entry| entry.source.as_ref().map(|item| item.key.clone()))
+            .collect();
+        keys.sort();
+        assert_eq!(keys, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn an_unpaired_entry_without_a_doi_is_kept() {
+        use crate::bib_source::{BibSource, PairedSource};
+        let mut store = CollectionOverrides::new("paper");
+        let source = BibSource {
+            key: "h5md110".into(),
+            entry_type: "manual".into(),
+            fields: vec![
+                ("author".into(), "{H5MD developers}".into()),
+                (
+                    "title".into(),
+                    "H5MD format specification version 1.1.0".into(),
+                ),
+                (
+                    "url".into(),
+                    "https://h5md.nongnu.org/releases/h5md-1.1.0.html".into(),
+                ),
+                ("version".into(), "1.1.0".into()),
+            ],
+
+            separators: Vec::new(),
+        };
+        let recorded = store.record_sources(&[PairedSource {
+            entry_id: None,
+            doi: None,
+            source: source.clone(),
+        }]);
+        assert_eq!(recorded.kept, 1, "{recorded:?}");
+        let stored: Vec<_> = store
+            .entries
+            .values()
+            .filter_map(|entry| entry.source.clone())
+            .collect();
+        assert_eq!(stored, vec![source]);
+    }
+
+    #[test]
+    fn a_citation_key_collision_keeps_the_first_source_only() {
+        use crate::bib_source::{BibSource, PairedSource};
+        let source = |title: &str| BibSource {
+            key: "h5md110".into(),
+            entry_type: "manual".into(),
+            fields: vec![("title".into(), title.into())],
+
+            separators: Vec::new(),
+        };
+        let mut store = CollectionOverrides::new("paper");
+        let recorded = store.record_sources(&[
+            PairedSource {
+                entry_id: None,
+                doi: None,
+                source: source("H5MD format specification"),
+            },
+            PairedSource {
+                entry_id: None,
+                doi: None,
+                source: source("Different title"),
+            },
+        ]);
+        assert_eq!(recorded.kept, 1, "{recorded:?}");
+        assert!(!recorded.conflicts.is_empty(), "{recorded:?}");
+        let stored: Vec<_> = store
+            .entries
+            .values()
+            .filter_map(|entry| entry.source.as_ref().and_then(|item| item.field("title")))
+            .collect();
+        assert_eq!(stored, vec!["H5MD format specification"]);
+    }
+
+    #[test]
+    fn export_attaches_a_loose_source_by_url() {
+        use crate::bib_source::BibSource;
+        let mut store = CollectionOverrides::new("paper");
+        store.entries.insert(
+            "key:h5md110".into(),
+            EntryOverride {
+                source: Some(BibSource {
+                    key: "h5md110".into(),
+                    entry_type: "manual".into(),
+                    fields: vec![
+                        ("author".into(), "{H5MD developers}".into()),
+                        (
+                            "title".into(),
+                            "H5MD format specification version 1.1.0".into(),
+                        ),
+                        ("version".into(), "1.1.0".into()),
+                        (
+                            "url".into(),
+                            "https://h5md.nongnu.org/releases/h5md-1.1.0.html".into(),
+                        ),
+                    ],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![json!({
+            "id": "hmddevelopersH5mdFormatSpecification",
+            "render": {"citation_key": "hmddevelopersH5mdFormatSpecification"},
+            "metadata": {
+                "title": "Resolved manual page",
+                "entry_type": "article",
+                "url": "https://h5md.nongnu.org/releases/h5md-1.1.0.html/",
+                "authors": [{"family": "H5MD developers"}]
+            }
+        })];
+        store.apply_to_entries(&mut entries);
+        assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "h5md110");
+        assert_eq!(entries[0]["metadata"]["entry_type"], "manual");
+        assert_eq!(
+            entries[0]["metadata"]["bib_source"]["fields"][2][1],
+            "1.1.0"
+        );
+    }
+
+    #[test]
+    fn export_attaches_a_loose_source_by_citation_key() {
+        use crate::bib_source::BibSource;
+        let mut store = CollectionOverrides::new("paper");
+        store.entries.insert(
+            "key:note2021".into(),
+            EntryOverride {
+                source: Some(BibSource {
+                    key: "note2021".into(),
+                    entry_type: "misc".into(),
+                    fields: vec![
+                        ("title".into(), "Local note".into()),
+                        ("year".into(), "2017".into()),
+                    ],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![json!({
+            "id": "server-generated",
+            "metadata": {
+                "citation_key": "note2021",
+                "title": "Server note",
+                "year": 1990,
+                "entry_type": "article"
+            }
+        })];
+        store.apply_to_entries(&mut entries);
+        assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "note2021");
+        assert_eq!(entries[0]["metadata"]["entry_type"], "misc");
+    }
+
+    #[test]
+    fn two_unpaired_entries_are_both_kept() {
+        use crate::bib_source::{BibSource, PairedSource};
+        let source = |key: &str| BibSource {
+            key: key.into(),
+            entry_type: "manual".into(),
+            fields: vec![("title".into(), key.into())],
+
+            separators: Vec::new(),
+        };
+        let mut store = CollectionOverrides::new("paper");
+        let recorded = store.record_sources(&[
+            PairedSource {
+                entry_id: None,
+                doi: None,
+                source: source("first"),
+            },
+            PairedSource {
+                entry_id: None,
+                doi: None,
+                source: source("second"),
+            },
+        ]);
+        assert_eq!(recorded.kept, 2, "{recorded:?}");
+        assert!(recorded.conflicts.is_empty(), "{recorded:?}");
+        assert!(
+            store.entries.contains_key("key:first"),
+            "{:?}",
+            store.entries
+        );
+        assert!(
+            store.entries.contains_key("key:second"),
+            "{:?}",
+            store.entries
+        );
+    }
+
+    #[test]
+    fn an_id_only_source_is_stored_once() {
+        use crate::bib_source::{BibSource, PairedSource};
+        let mut store = CollectionOverrides::new("paper");
+        let recorded = store.record_sources(&[PairedSource {
+            entry_id: Some("e1".into()),
+            doi: None,
+            source: BibSource {
+                key: "only".into(),
+                entry_type: "manual".into(),
+                fields: vec![("title".into(), "Only".into())],
+
+                separators: Vec::new(),
+            },
+        }]);
+        assert_eq!(recorded.kept, 1, "{recorded:?}");
+        assert_eq!(store.entries.len(), 1, "{:?}", store.entries.keys());
+        assert!(store.entries.contains_key("id:e1"));
+    }
+
+    #[test]
+    fn an_entry_with_no_key_id_or_doi_is_not_counted() {
+        use crate::bib_source::{BibSource, PairedSource};
+        let mut store = CollectionOverrides::new("paper");
+        let recorded = store.record_sources(&[PairedSource {
+            entry_id: Some("  ".into()),
+            doi: None,
+            source: BibSource {
+                key: " ".into(),
+                entry_type: "misc".into(),
+                fields: vec![("title".into(), "Untitled".into())],
+
+                separators: Vec::new(),
+            },
+        }]);
+        assert_eq!(recorded.kept, 0, "{recorded:?}");
+        assert!(store.entries.is_empty(), "{:?}", store.entries);
+        assert!(!recorded.conflicts.is_empty(), "{recorded:?}");
+    }
+
+    #[test]
+    fn export_does_not_reuse_a_loose_copy_of_an_attached_source() {
+        use crate::bib_source::BibSource;
+        let source = BibSource {
+            key: "right".into(),
+            entry_type: "manual".into(),
+            fields: vec![("url".into(), "https://example.org/right".into())],
+            separators: Vec::new(),
+        };
+        let mut store = CollectionOverrides::new("paper");
+        store.entries.insert(
+            "id:e1".into(),
+            EntryOverride {
+                source: Some(source.clone()),
+                ..Default::default()
+            },
+        );
+        store.entries.insert(
+            "key:right".into(),
+            EntryOverride {
+                source: Some(source),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![
+            json!({"id": "e1", "metadata": {"title": "Kept"}}),
+            json!({"id": "e2", "metadata": {"url": "https://example.org/right"}}),
+        ];
+        store.apply_to_entries(&mut entries);
+        assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "right");
+        assert!(entries[1]["metadata"].get("bib_source").is_none());
+    }
+
+    #[test]
+    fn export_does_not_replace_an_id_source_with_a_loose_one() {
+        use crate::bib_source::BibSource;
+        let mut store = CollectionOverrides::new("paper");
+        store.entries.insert(
+            "id:e1".into(),
+            EntryOverride {
+                source: Some(BibSource {
+                    key: "right".into(),
+                    entry_type: "manual".into(),
+                    fields: vec![("title".into(), "Kept title".into())],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        store.entries.insert(
+            "key:other".into(),
+            EntryOverride {
+                source: Some(BibSource {
+                    key: "other".into(),
+                    entry_type: "misc".into(),
+                    fields: vec![("url".into(), "https://example.org/loose".into())],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![json!({
+            "id": "e1",
+            "metadata": {"url": "https://example.org/loose", "title": "Server title"}
+        })];
+        store.apply_to_entries(&mut entries);
+        assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "right");
+    }
+
+    #[test]
+    fn export_does_not_reuse_a_source_stored_under_another_entry_id() {
+        use crate::bib_source::BibSource;
+        let mut store = CollectionOverrides::new("paper");
+        store.entries.insert(
+            "id:e1".into(),
+            EntryOverride {
+                source: Some(BibSource {
+                    key: "spec".into(),
+                    entry_type: "manual".into(),
+                    fields: vec![("title".into(), "Format specification".into())],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![json!({
+            "id": "e2",
+            "metadata": {"title": "Format specification", "entry_type": "article"}
+        })];
+        store.apply_to_entries(&mut entries);
+        assert!(entries[0]["metadata"].get("bib_source").is_none());
+    }
+
+    #[test]
+    fn export_does_not_attach_one_source_to_two_entries() {
+        use crate::bib_source::BibSource;
+        let mut store = CollectionOverrides::new("paper");
+        store.entries.insert(
+            "key:spec".into(),
+            EntryOverride {
+                source: Some(BibSource {
+                    key: "spec".into(),
+                    entry_type: "manual".into(),
+                    fields: vec![("url".into(), "https://example.org/spec".into())],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![
+            json!({"id": "a", "metadata": {"url": "https://example.org/spec"}}),
+            json!({"id": "b", "metadata": {"url": "https://example.org/spec/"}}),
+        ];
+        store.apply_to_entries(&mut entries);
+        assert!(entries[0]["metadata"].get("bib_source").is_none());
+        assert!(entries[1]["metadata"].get("bib_source").is_none());
+    }
+
+    #[test]
+    fn export_does_not_attach_two_loose_sources_to_one_entry() {
+        use crate::bib_source::BibSource;
+        let mut store = CollectionOverrides::new("paper");
+        for key in ["one", "two"] {
+            store.entries.insert(
+                format!("key:{key}"),
+                EntryOverride {
+                    source: Some(BibSource {
+                        key: key.into(),
+                        entry_type: "manual".into(),
+                        fields: vec![("url".into(), "https://example.org/spec".into())],
+
+                        separators: Vec::new(),
+                    }),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut entries = vec![json!({
+            "id": "only",
+            "metadata": {"url": "https://example.org/spec"}
+        })];
+        store.apply_to_entries(&mut entries);
+        assert!(entries[0]["metadata"].get("bib_source").is_none());
+    }
+
+    #[test]
+    fn export_uses_a_loose_source_only_once() {
+        use crate::bib_source::BibSource;
+        let mut store = CollectionOverrides::new("paper");
+        store.entries.insert(
+            "key:note2021".into(),
+            EntryOverride {
+                source: Some(BibSource {
+                    key: "note2021".into(),
+                    entry_type: "misc".into(),
+                    fields: vec![
+                        ("title".into(), "Local note".into()),
+                        ("url".into(), "https://example.org/note".into()),
+                    ],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![
+            json!({"id": "by-key", "metadata": {"citation_key": "note2021"}}),
+            json!({"id": "by-url", "metadata": {"url": "https://example.org/note"}}),
+        ];
+        store.apply_to_entries(&mut entries);
+        assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "note2021");
+        assert!(entries[1]["metadata"].get("bib_source").is_none());
+    }
+
+    #[test]
+    fn export_keeps_the_earlier_loose_match() {
+        use crate::bib_source::BibSource;
+        let mut store = CollectionOverrides::new("paper");
+        store.entries.insert(
+            "key:note2021".into(),
+            EntryOverride {
+                source: Some(BibSource {
+                    key: "note2021".into(),
+                    entry_type: "misc".into(),
+                    fields: vec![("title".into(), "Local note".into())],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        store.entries.insert(
+            "key:other".into(),
+            EntryOverride {
+                source: Some(BibSource {
+                    key: "other".into(),
+                    entry_type: "manual".into(),
+                    fields: vec![("url".into(), "https://example.org/note".into())],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![json!({
+            "id": "both",
+            "metadata": {
+                "citation_key": "note2021",
+                "url": "https://example.org/note"
+            }
+        })];
+        store.apply_to_entries(&mut entries);
+        assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "note2021");
+    }
+
+    #[test]
+    fn export_ignores_a_record_that_is_not_a_citation_key() {
+        use crate::bib_source::BibSource;
+        for map_key in ["key:", "keyextra", "k"] {
+            let mut store = CollectionOverrides::new("paper");
+            store.entries.insert(
+                map_key.into(),
+                EntryOverride {
+                    source: Some(BibSource {
+                        key: "spec".into(),
+                        entry_type: "manual".into(),
+                        fields: vec![("title".into(), "Format specification".into())],
+
+                        separators: Vec::new(),
+                    }),
+                    ..Default::default()
+                },
+            );
+            let mut entries = vec![json!({
+                "id": "e2",
+                "metadata": {"title": "Format specification"}
+            })];
+            store.apply_to_entries(&mut entries);
+            assert!(
+                entries[0]["metadata"].get("bib_source").is_none(),
+                "{map_key}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_attaches_a_loose_source_when_the_years_agree() {
+        use crate::bib_source::BibSource;
+        let mut store = CollectionOverrides::new("paper");
+        store.entries.insert(
+            "key:spec".into(),
+            EntryOverride {
+                source: Some(BibSource {
+                    key: "spec".into(),
+                    entry_type: "manual".into(),
+                    fields: vec![
+                        ("title".into(), "Format specification".into()),
+                        ("year".into(), "2017".into()),
+                    ],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![json!({
+            "id": "s-spec",
+            "metadata": {"title": "Format specification", "year": 2017}
+        })];
+        store.apply_to_entries(&mut entries);
+        assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "spec");
+    }
+
+    #[test]
+    fn source_gap_note_names_entries_without_a_source() {
+        let one = vec![
+            json!({"metadata": {"bib_source": {"key": "a", "entry_type": "article", "fields": []}}}),
+            json!({"metadata": {"title": "B"}}),
+        ];
+        let note = source_gap_note(&one).unwrap();
+        assert!(note.contains("no kept source for 1 entries"), "{note}");
+        assert!(note.contains("Re-import"), "{note}");
+        assert!(source_gap_note(&one[..1]).is_none());
+        let two = vec![
+            json!({"metadata": {"title": "A"}}),
+            json!({"metadata": {"title": "B"}}),
+        ];
+        let note = source_gap_note(&two).unwrap();
+        assert!(note.contains("no kept source for 2 entries"), "{note}");
+    }
+
+    #[test]
+    fn export_does_not_attach_a_loose_source_whose_year_disagrees() {
+        use crate::bib_source::BibSource;
+        let mut store = CollectionOverrides::new("paper");
+        store.entries.insert(
+            "key:beta".into(),
+            EntryOverride {
+                source: Some(BibSource {
+                    key: "beta".into(),
+                    entry_type: "manual".into(),
+                    fields: vec![
+                        ("title".into(), "Beta manual".into()),
+                        ("year".into(), "2021".into()),
+                    ],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![json!({
+            "id": "s-stale",
+            "metadata": {"title": "Beta manual", "year": 1999, "entry_type": "article"}
+        })];
+        store.apply_to_entries(&mut entries);
+        assert!(entries[0]["metadata"].get("bib_source").is_none());
+    }
+
+    #[test]
+    fn export_attaches_a_loose_source_by_a_yearless_title() {
+        use crate::bib_source::BibSource;
+        let mut store = CollectionOverrides::new("paper");
+        store.entries.insert(
+            "key:spec".into(),
+            EntryOverride {
+                source: Some(BibSource {
+                    key: "spec".into(),
+                    entry_type: "manual".into(),
+                    fields: vec![
+                        ("title".into(), "{H5MD} format specification".into()),
+                        ("version".into(), "1.1.0".into()),
+                    ],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        let mut entries = vec![json!({
+            "id": "s-spec",
+            "metadata": {"title": "H5MD format specification", "entry_type": "article"}
+        })];
+        store.apply_to_entries(&mut entries);
+        assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "spec");
+        assert_eq!(entries[0]["metadata"]["entry_type"], "manual");
     }
 
     #[test]

@@ -176,12 +176,18 @@ pub fn render_pairs(
             overlay_record_on_source(&mut source, stored);
             if options.enrich {
                 if let Some(provider) = provider {
-                    let locked = user_fields(stored);
-                    let additions = additions_from_provider(provider)
-                        .into_iter()
-                        .filter(|(name, _)| !clear_blocks(&locked, name))
-                        .collect::<Vec<_>>();
-                    crate::bib_source::fill_empty(&mut source, &additions);
+                    let provider_doi = work_from_provider_record(provider)
+                        .map(|work| work.doi)
+                        .unwrap_or_default();
+                    let source_doi = source.field("doi").unwrap_or("");
+                    if !distinct_dois(source_doi, &provider_doi) {
+                        let locked = user_fields(stored);
+                        let additions = additions_from_provider(provider)
+                            .into_iter()
+                            .filter(|(name, _)| !clear_blocks(&locked, name))
+                            .collect::<Vec<_>>();
+                        crate::bib_source::fill_empty(&mut source, &additions);
+                    }
                 }
             }
             out.push_str(&crate::bib_source::render_entry(&source, &mut used)?);
@@ -295,6 +301,11 @@ fn assemble(stored: &Value, provider: Option<&Value>) -> Work {
     let Some(mut work) = work_from_provider_record(record) else {
         return stored_work;
     };
+    // A provider for a different DOI is a different work. Filling one
+    // record from the other mixes two papers into a single entry.
+    if distinct_dois(&stored_work.doi, &work.doi) {
+        return stored_work;
+    }
     let locked = user_fields(stored);
     if locked.contains("title") {
         work.title = stored_work.title.clone();
@@ -772,6 +783,13 @@ fn apply_zenodo_payload(work: &mut Work, zenodo: &Value) {
             )
         });
     }
+}
+
+/// Both sides name a DOI and they are not the same work.
+fn distinct_dois(stored: &str, provider: &str) -> bool {
+    let stored = crate::collection_entries::normalize_doi_token(stored);
+    let provider = crate::collection_entries::normalize_doi_token(provider);
+    !stored.is_empty() && !provider.is_empty() && stored != provider
 }
 
 fn work_from_stored(meta: &Value) -> Work {
@@ -2957,6 +2975,35 @@ mod tests {
     }
 
     #[test]
+    fn a_server_rendered_title_turns_an_em_dash_into_tex() {
+        let bib = render_stored_entries(&[json!({
+            "entry_type": "article",
+            "title": "MMTF\u{2014}An efficient file format",
+            "citation_key": "Bradley2017MMTF"
+        })])
+        .expect("citation keys");
+        assert!(bib.contains("MMTF---"), "{bib}");
+        assert!(!bib.contains('\u{2014}'), "{bib}");
+    }
+
+    #[test]
+    fn a_locked_howpublished_url_keeps_its_underscore() {
+        let bib = render_stored_entries(&[json!({
+            "entry_type": "misc",
+            "title": "LAMMPS Documentation",
+            "citation_key": "lammpsHowtoTriclinic2026",
+            "howpublished": "\\url{https://docs.lammps.org/Howto_triclinic.html}",
+            "user_fields": ["howpublished"]
+        })])
+        .expect("citation keys");
+        assert!(
+            bib.contains(r"howpublished = {\url{https://docs.lammps.org/Howto_triclinic.html}}"),
+            "{bib}"
+        );
+        assert!(!bib.contains(r"Howto\_"), "{bib}");
+    }
+
+    #[test]
     fn a_locked_manual_keeps_its_type_braces_pages_and_particles() {
         let stored = json!({
             "entry_type": "manual",
@@ -3213,6 +3260,124 @@ mod tests {
         assert!(!bib.contains("volume ="), "{bib}");
         assert!(!bib.contains("number ="), "{bib}");
         assert!(!bib.contains("example.org/resolver"), "{bib}");
+    }
+
+    #[test]
+    fn distinct_dois_are_not_merged() {
+        let stored = json!({
+            "doi": "10.1000/ice",
+            "title": "Structural note",
+            "authors": [{"family": "Moore", "given": "Emily"}],
+            "journal": "Nature",
+            "volume": "479",
+            "pages": "506-508",
+            "date": {"year": 2011}
+        });
+        let provider = json!({
+            "crossref": {
+                "type": "journal-article",
+                "DOI": "10.1000/melanoma",
+                "title": ["A different paper"],
+                "author": [{"given": "Corine", "family": "Bertolotto"}],
+                "container-title": ["Nature"],
+                "volume": "480",
+                "issue": "7375",
+                "page": "94-98",
+                "publisher": "Other Press",
+                "issued": {"date-parts": [[2011]]}
+            }
+        });
+        let merged = merge_provider_metadata(&stored, &provider);
+        assert_eq!(merged["doi"], "10.1000/ice");
+        assert_eq!(merged["title"], "Structural note");
+        assert_eq!(merged["volume"], "479");
+        assert!(merged.get("issue").is_none(), "{merged}");
+        assert_eq!(merged["authors"][0]["family"], "Moore");
+        assert!(merged.get("publisher").is_none(), "{merged}");
+    }
+
+    #[test]
+    fn enrich_does_not_fill_from_a_different_doi() {
+        let stored = json!({
+            "doi": "10.1000/ice",
+            "bib_source": {
+                "key": "ice2011",
+                "entry_type": "article",
+                "fields": [
+                    ["title", "Structural note"],
+                    ["doi", "10.1000/ice"],
+                    ["year", "2011"]
+                ]
+            }
+        });
+        let provider = json!({
+            "crossref": {
+                "type": "journal-article",
+                "DOI": "10.1000/melanoma",
+                "title": ["A different paper"],
+                "container-title": ["Other Journal"],
+                "issue": "7375",
+                "publisher": "Other Press",
+                "issued": {"date-parts": [[2011]]}
+            }
+        });
+        let bib = render_pairs(
+            &[(stored, Some(provider))],
+            &BibOptions {
+                enrich: true,
+                ..BibOptions::default()
+            },
+        )
+        .expect("citation keys");
+        assert!(bib.contains("title = {Structural note}"), "{bib}");
+        assert!(bib.contains("doi = {10.1000/ice}"), "{bib}");
+        assert!(!bib.contains("Other Journal"), "{bib}");
+        assert!(!bib.contains("7375"), "{bib}");
+        assert!(!bib.contains("10.1000/melanoma"), "{bib}");
+    }
+
+    #[test]
+    fn a_record_without_a_doi_still_takes_the_provider() {
+        let stored = json!({
+            "title": "Short",
+            "authors": [{"family": "Ada", "given": "A"}]
+        });
+        let provider = json!({
+            "crossref": {
+                "type": "journal-article",
+                "DOI": "10.1000/filled",
+                "title": ["Short"],
+                "author": [{"given": "A", "family": "Ada"}],
+                "container-title": ["Filled Journal"],
+                "volume": "3",
+                "issued": {"date-parts": [[2020]]}
+            }
+        });
+        let merged = merge_provider_metadata(&stored, &provider);
+        assert_eq!(merged["doi"], "10.1000/filled");
+        assert_eq!(merged["journal"], "Filled Journal");
+        assert_eq!(merged["volume"], "3");
+        assert_eq!(merged["title"], "Short");
+    }
+
+    #[test]
+    fn a_provider_without_a_doi_still_fills_empty_fields() {
+        let stored = json!({
+            "doi": "10.1000/same",
+            "title": "Kept title"
+        });
+        let provider = json!({
+            "crossref": {
+                "type": "journal-article",
+                "title": ["Kept title"],
+                "container-title": ["Filled Journal"],
+                "issued": {"date-parts": [[2020]]}
+            }
+        });
+        let merged = merge_provider_metadata(&stored, &provider);
+        assert_eq!(merged["doi"], "10.1000/same");
+        assert_eq!(merged["journal"], "Filled Journal");
+        assert_eq!(merged["title"], "Kept title");
     }
 
     #[test]

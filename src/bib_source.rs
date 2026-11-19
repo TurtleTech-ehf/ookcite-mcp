@@ -6,9 +6,10 @@
 //! override file. Export prints that record.
 //!
 //! What is normalised, and nothing else:
-//! - the entry type and field names are lower case;
+//! - the entry type is lower case, and a field name keeps the source spelling;
 //! - field order is the source order;
-//! - each field is written as `  name = {value}`, with a comma between
+//! - each field is written as `  name = {value}`, keeping the source
+//!   characters between the name and the value, with a comma between
 //!   fields and no comma after the last;
 //! - entries are separated by a blank line, and the text ends at the last
 //!   entry's closing line;
@@ -16,9 +17,13 @@
 //! - `#` concatenation of braced text is joined. A value that names an
 //!   `@string` macro is written bare, so `month = jan` stays `month = jan`;
 //! - `doi`, `url`, and `eprint` are copied verbatim;
-//! - a Unicode en dash or em dash is written `--` or `---`;
-//! - a bare `&`, `%`, `#`, or `_` in any other field is escaped, and an
-//!   escaped one is not escaped again.
+//! - a kept source is copied with its characters, including a Unicode dash;
+//! - a bare `&`, `%`, `#`, or `_` outside a `\url{}` or `\href{}{}` argument
+//!   and outside `$...$` or `$$...$$` is escaped, and an escaped one is not
+//!   escaped again.
+//!
+//! Dash normalization belongs to a server-rendered entry that has no kept
+//! source. It is not applied on the way back out of a kept source.
 //!
 //! Braces, `--`, name particles, and LaTeX accents are copied as written.
 //! A citation key is kept. A key is generated only when the source entry
@@ -46,6 +51,10 @@ pub struct BibSource {
     pub entry_type: String,
     #[serde(default)]
     pub fields: Vec<(String, String)>,
+    /// Characters between each field name and its value, including `=`.
+    /// Empty means the spaced form ` = `.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub separators: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,21 +86,30 @@ impl BibSource {
     }
 
     pub fn set_field(&mut self, name: &str, value: String) {
-        let name = name.to_ascii_lowercase();
         if let Some(existing) = self
             .fields
             .iter_mut()
-            .find(|(field, _)| field.eq_ignore_ascii_case(&name))
+            .find(|(field, _)| field.eq_ignore_ascii_case(name))
         {
             existing.1 = value;
-        } else {
-            self.fields.push((name, value));
+            return;
         }
+        self.fields.push((name.to_string(), value));
+        self.separators.push(" = ".into());
     }
 
     pub fn remove_field(&mut self, name: &str) {
-        self.fields
-            .retain(|(field, _)| !field.eq_ignore_ascii_case(name));
+        let Some(index) = self
+            .fields
+            .iter()
+            .position(|(field, _)| field.eq_ignore_ascii_case(name))
+        else {
+            return;
+        };
+        self.fields.remove(index);
+        if index < self.separators.len() {
+            self.separators.remove(index);
+        }
     }
 }
 
@@ -102,10 +120,11 @@ pub fn source_from_meta(meta: &Value) -> Option<BibSource> {
 /// Parse a bibliography and attach each entry to the server record it became.
 ///
 /// A normalized DOI matches first. What is left matches one record by arXiv or
-/// eprint id, then by ISBN, then by the original citation key. A title and year
-/// match only when both are present and that pair hits one record on each side.
-/// An entry that matches nothing is still returned, with no entry id, so its
-/// source snapshot stays.
+/// eprint id, then by ISBN, then by the original citation key, then by URL.
+/// A title matches when that title hits one record on each side. Years have to
+/// agree when both sides have one. A title with no year on either side still
+/// matches. An entry that matches nothing is still returned, with no entry id,
+/// so its source snapshot stays.
 pub fn pair_with_server(
     content: &str,
     server: &[Value],
@@ -169,6 +188,14 @@ pub fn pair_with_server(
         &mut source_left,
         &mut server_left,
         &mut paired,
+        |entry, record| same_id(source_page_url(entry), server_page_url(record)),
+    );
+    take_unique_matches(
+        &entries,
+        server,
+        &mut source_left,
+        &mut server_left,
+        &mut paired,
         |entry, record| {
             let title = loose_title(field_raw(entry, "title").unwrap_or(""));
             if title.is_empty() || loose_title(&server_title(record)) != title {
@@ -176,6 +203,7 @@ pub fn pair_with_server(
             }
             match (entry_year(entry), server_year(record)) {
                 (Some(source_year), Some(record_year)) => source_year == record_year,
+                (None, None) => true,
                 _ => false,
             }
         },
@@ -340,7 +368,7 @@ fn server_title(record: &Value) -> String {
         .to_string()
 }
 
-fn server_year(record: &Value) -> Option<i32> {
+pub(crate) fn server_year(record: &Value) -> Option<i32> {
     let meta = record.get("metadata").unwrap_or(record);
     if let Some(year) = meta
         .get("year")
@@ -360,7 +388,7 @@ fn entry_year(entry: &RawBibEntry) -> Option<i32> {
     field_raw(entry, "year").and_then(first_year)
 }
 
-fn loose_title(value: &str) -> String {
+pub(crate) fn loose_title(value: &str) -> String {
     let mut out = String::new();
     for ch in value.chars() {
         if ch == '{' || ch == '}' {
@@ -409,12 +437,21 @@ pub fn render_entry(
         entry_type.as_str()
     };
     let mut lines = Vec::new();
-    for (name, value) in &entry.fields {
-        let name = name.trim().to_ascii_lowercase();
-        if name.is_empty() || name == "citation_key" || name == "entry_type" {
+    for (index, (name, value)) in entry.fields.iter().enumerate() {
+        let name = name.trim();
+        if name.is_empty()
+            || name.eq_ignore_ascii_case("citation_key")
+            || name.eq_ignore_ascii_case("entry_type")
+        {
             continue;
         }
-        if let Some(line) = format_field_line(&name, value) {
+        let separator = entry
+            .separators
+            .get(index)
+            .map(String::as_str)
+            .filter(|text| text.contains('='))
+            .unwrap_or(" = ");
+        if let Some(line) = format_field_line(name, value, separator) {
             lines.push(line);
         }
     }
@@ -448,13 +485,106 @@ pub fn prepare_field_value(value: &str) -> String {
 pub fn escape_latex_specials(value: &str) -> String {
     let chars: Vec<char> = value.chars().collect();
     let mut out = String::new();
-    for (index, ch) in chars.iter().enumerate() {
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some(end) =
+            verbatim_command_end(&chars, index).or_else(|| math_span_end(&chars, index))
+        {
+            for ch in &chars[index..end] {
+                out.push(*ch);
+            }
+            index = end;
+            continue;
+        }
+        let ch = chars[index];
         if matches!(ch, '&' | '%' | '#' | '_') && (index == 0 || chars[index - 1] != '\\') {
             out.push('\\');
         }
-        out.push(*ch);
+        out.push(ch);
+        index += 1;
     }
     out
+}
+
+/// Byte after a complete `\url{...}` or `\href{...}{...}` that starts at `index`.
+///
+/// Arguments of those commands are copied unchanged, so a path underscore is
+/// not turned into `\_`. An incomplete command is not treated as protected.
+fn verbatim_command_end(chars: &[char], index: usize) -> Option<usize> {
+    if chars.get(index) != Some(&'\\') {
+        return None;
+    }
+    let (name, mut cursor) = command_name(chars, index + 1)?;
+    let groups = match name.as_str() {
+        "url" => 1,
+        "href" => 2,
+        _ => return None,
+    };
+    for _ in 0..groups {
+        if chars.get(cursor) != Some(&'{') {
+            return None;
+        }
+        cursor = end_of_brace_group(chars, cursor)?;
+    }
+    Some(cursor)
+}
+
+fn command_name(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut end = start;
+    while end < chars.len() && chars[end].is_ascii_alphabetic() {
+        end += 1;
+    }
+    if end == start {
+        None
+    } else {
+        Some((chars[start..end].iter().collect(), end))
+    }
+}
+
+/// Byte after a complete `$...$` or `$$...$$` that starts at `index`.
+///
+/// An escaped `\$` does not open math. An unclosed opener is not protected.
+fn math_span_end(chars: &[char], index: usize) -> Option<usize> {
+    if chars.get(index) != Some(&'$') || (index > 0 && chars[index - 1] == '\\') {
+        return None;
+    }
+    if chars.get(index + 1) == Some(&'$') {
+        let mut cursor = index + 2;
+        while cursor + 1 < chars.len() {
+            if chars[cursor] == '$' && chars[cursor + 1] == '$' {
+                return Some(cursor + 2);
+            }
+            cursor += 1;
+        }
+        return None;
+    }
+    let mut cursor = index + 1;
+    while cursor < chars.len() {
+        if chars[cursor] == '$' {
+            return Some(cursor + 1);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn end_of_brace_group(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < chars.len() {
+        match chars[index] {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 pub fn unicode_dashes_to_tex(value: &str) -> String {
@@ -474,9 +604,9 @@ pub fn unicode_dashes_to_tex(value: &str) -> String {
 /// Entries are aligned by DOI, then by a brace-stripped title, then by
 /// position. `entries_differing` counts an entry whose type or fields differ.
 /// A key change alone does not. Values are compared after collapsing
-/// whitespace. A source value is escaped, and its Unicode dashes are turned
-/// into TeX dashes, before that comparison, except `doi`, `url`, `eprint`,
-/// and a bare macro, which are compared as written.
+/// whitespace. A source value is escaped before that comparison, except
+/// `doi`, `url`, `eprint`, and a bare macro, which are compared as written.
+/// A Unicode dash is compared as written.
 #[cfg(test)]
 pub fn diff_bibliographies(source: &str, exported: &str) -> Result<BibliographyDiff, String> {
     compare_bibliographies(source, exported, true)
@@ -550,7 +680,7 @@ fn values_equal(name: &str, source: &str, exported: &str, canonical: bool) -> bo
     let exported = collapse_whitespace(exported);
     let verbatim = matches!(name, "doi" | "url" | "eprint") || bare_expr(&source).is_some();
     if canonical && !verbatim {
-        prepare_field_value(&source) == exported
+        escape_latex_specials(&source) == exported
     } else {
         source == exported
     }
@@ -654,6 +784,7 @@ fn to_source(
             key: String::new(),
             entry_type: entry.entry_type.clone(),
             fields: entry.fields.clone(),
+            separators: entry.separators.clone(),
         };
         key = generate_key(&draft);
     }
@@ -665,7 +796,25 @@ fn to_source(
         key,
         entry_type: entry.entry_type.clone(),
         fields: entry.fields.clone(),
+        separators: entry.separators.clone(),
     })
+}
+
+pub(crate) fn normalized_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn source_page_url(entry: &RawBibEntry) -> Option<String> {
+    field_raw(entry, "url").and_then(normalized_url)
+}
+
+fn server_page_url(record: &Value) -> Option<String> {
+    meta_str(record, "url").and_then(normalized_url)
 }
 
 /// The first valid DOI among the `doi` field and then the `url` field.
@@ -762,7 +911,7 @@ fn fold_key(value: &str) -> String {
     out
 }
 
-fn first_year(value: &str) -> Option<i32> {
+pub(crate) fn first_year(value: &str) -> Option<i32> {
     let digits: String = value
         .chars()
         .skip_while(|ch| !ch.is_ascii_digit())
@@ -786,24 +935,25 @@ pub(crate) fn bare_expr(value: &str) -> Option<&str> {
     value.strip_prefix(BARE_VALUE)
 }
 
-fn format_field_line(name: &str, value: &str) -> Option<String> {
+fn format_field_line(name: &str, value: &str, separator: &str) -> Option<String> {
     if let Some(expr) = bare_expr(value) {
         let expr = expr.trim();
         if expr.is_empty() {
             return None;
         }
-        return Some(format!("  {name} = {expr}"));
+        return Some(format!("  {name}{separator}{expr}"));
     }
-    let verbatim = matches!(name, "doi" | "url" | "eprint");
+    let folded = name.to_ascii_lowercase();
+    let verbatim = matches!(folded.as_str(), "doi" | "url" | "eprint");
     let value = if verbatim {
         value.trim().to_string()
     } else {
-        prepare_field_value(value)
+        escape_latex_specials(value.trim())
     };
     if value.trim().is_empty() {
         return None;
     }
-    Some(format!("  {name} = {{{value}}}"))
+    Some(format!("  {name}{separator}{{{value}}}"))
 }
 
 /// Longest disambiguating suffix. `a`–`z`, then `aa`–`zz`, and then stop.
@@ -930,6 +1080,77 @@ mod tests {
         let generated = round_trip("@article{,\n  title = {A title about atoms},\n  author = {van der Spoel, David},\n  year = {2001}\n}\n");
         assert!(generated.contains("@article{spoel"), "{generated}");
         assert!(!generated.contains("@article{,"), "{generated}");
+    }
+
+    #[test]
+    fn a_capitalized_doi_field_keeps_its_underscore() {
+        let bib = "@article{capdoi,\n  DOI={10.1000/a_b}\n}\n";
+        let out = round_trip(bib);
+        assert!(out.contains("DOI={10.1000/a_b}"), "{out}");
+        assert!(!out.contains('\\'), "{out}");
+    }
+
+    #[test]
+    fn replacing_a_field_does_not_emit_it_twice() {
+        let entries = parse_bibtex_raw("@article{v,\n  title={T},\n  version={1}\n}\n").unwrap();
+        let mut used = HashSet::new();
+        let mut source = to_source(&entries[0], &mut used).unwrap();
+        source.set_field("version", "2".into());
+        let out = render_entry(&source, &mut HashSet::new()).unwrap();
+        assert!(out.contains("title={T}"), "{out}");
+        assert!(out.contains("version={2}"), "{out}");
+        assert_eq!(out.matches("version").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn removing_a_field_keeps_the_next_separator() {
+        let entries =
+            parse_bibtex_raw("@article{v,\n  title={T},\n  note = {N},\n  year={2020}\n}\n")
+                .unwrap();
+        let mut used = HashSet::new();
+        let mut source = to_source(&entries[0], &mut used).unwrap();
+        source.remove_field("note");
+        let out = render_entry(&source, &mut HashSet::new()).unwrap();
+        assert!(out.contains("title={T}"), "{out}");
+        assert!(out.contains("year={2020}"), "{out}");
+        assert!(!out.contains("year ="), "{out}");
+        assert!(!out.contains("note"), "{out}");
+    }
+
+    #[test]
+    fn removing_a_field_with_no_separator_does_not_panic() {
+        let mut source = BibSource {
+            key: "k".into(),
+            entry_type: "article".into(),
+            fields: vec![("title".into(), "T".into()), ("year".into(), "2020".into())],
+            separators: Vec::new(),
+        };
+        source.remove_field("title");
+        assert_eq!(source.fields.len(), 1);
+        assert_eq!(source.fields[0].0, "year");
+        let out = render_entry(&source, &mut HashSet::new()).unwrap();
+        assert!(out.contains("year = {2020}"), "{out}");
+        assert!(!out.contains("title"), "{out}");
+    }
+
+    #[test]
+    fn citation_key_and_entry_type_fields_are_not_emitted() {
+        let source = BibSource {
+            key: "kept".into(),
+            entry_type: "article".into(),
+            fields: vec![
+                ("citation_key".into(), "other".into()),
+                ("entry_type".into(), "book".into()),
+                ("title".into(), "T".into()),
+            ],
+            separators: vec![" = ".into(), " = ".into(), " = ".into()],
+        };
+        let out = render_entry(&source, &mut HashSet::new()).unwrap();
+        assert!(out.starts_with("@article{kept,"), "{out}");
+        assert!(out.contains("title = {T}"), "{out}");
+        assert!(!out.contains("citation_key"), "{out}");
+        assert!(!out.contains("entry_type"), "{out}");
+        assert!(!out.contains("book"), "{out}");
     }
 
     #[test]
@@ -1088,6 +1309,8 @@ mod tests {
                 ("title".into(), "Source title".into()),
                 ("pages".into(), "1--5".into()),
             ],
+
+            separators: Vec::new(),
         };
         fill_empty(
             &mut source,
@@ -1102,6 +1325,287 @@ mod tests {
         assert_eq!(source.field("pages"), Some("1--5"));
         assert_eq!(source.field("volume"), Some("74"));
         assert_eq!(source.field("issn"), Some("0000-0000"));
+    }
+
+    #[test]
+    fn a_kept_bradley_title_keeps_its_em_dash() {
+        let bib = "@article{Bradley2017MMTF,\n  title = {MMTF\u{2014}An efficient file format},\n  year = {2017}\n}\n";
+        let out = round_trip(bib);
+        assert!(
+            out.contains("MMTF\u{2014}An efficient file format"),
+            "{out}"
+        );
+        assert!(!out.contains("MMTF---"), "{out}");
+    }
+
+    #[test]
+    fn a_kept_sehnal_title_keeps_its_em_dash() {
+        let bib = "@article{Sehnal2020BinaryCIF,\n  title = {BinaryCIF and CIFTools\u{2014}Lightweight},\n  year = {2020}\n}\n";
+        let out = round_trip(bib);
+        assert!(
+            out.contains("BinaryCIF and CIFTools\u{2014}Lightweight"),
+            "{out}"
+        );
+        assert!(!out.contains("CIFTools---"), "{out}");
+    }
+
+    #[test]
+    fn a_kept_westendorp_title_keeps_its_em_dash() {
+        let bib = "@misc{Westendorp2026Molly,\n  title = {Molly\u{2014}a fast reader},\n  year = {2026}\n}\n";
+        let out = round_trip(bib);
+        assert!(out.contains("Molly\u{2014}a fast reader"), "{out}");
+        assert!(!out.contains("Molly---"), "{out}");
+    }
+
+    #[test]
+    fn a_kept_field_keeps_padding_out_and_an_en_dash() {
+        let source = BibSource {
+            key: "k".into(),
+            entry_type: "article".into(),
+            fields: vec![
+                ("title".into(), "  Keep\u{2014}this  ".into()),
+                ("pages".into(), "1\u{2013}2".into()),
+            ],
+
+            separators: Vec::new(),
+        };
+        let out = render_bibliography(&[source]).unwrap();
+        assert!(out.contains("title = {Keep\u{2014}this}"), "{out}");
+        assert!(out.contains("pages = {1\u{2013}2}"), "{out}");
+        assert!(!out.contains("---"), "{out}");
+        assert!(!out.contains("--"), "{out}");
+    }
+
+    #[test]
+    fn escape_leaves_url_and_href_arguments_unchanged() {
+        let out = escape_latex_specials(r"\url{https://ex.org/a_b%20c#d&e} and f_g 100% C#");
+        assert_eq!(out, r"\url{https://ex.org/a_b%20c#d&e} and f\_g 100\% C\#");
+        let href = escape_latex_specials(r"\href{https://ex.org/a_b}{see {c_d}} tail_e");
+        assert_eq!(href, r"\href{https://ex.org/a_b}{see {c_d}} tail\_e");
+        let open = escape_latex_specials(r"\url{http://a_b and c_d");
+        assert!(open.contains(r"c\_d"), "{open}");
+        let outside = escape_latex_specials(r"a_b \unknown{c_d}");
+        assert!(outside.contains(r"a\_b"), "{outside}");
+        assert!(outside.contains(r"c\_d"), "{outside}");
+        assert_eq!(escape_latex_specials(r"\url"), r"\url");
+        assert_eq!(escape_latex_specials(r"\href"), r"\href");
+        assert_eq!(
+            escape_latex_specials(r"{SO}$_4^{2-}$ and a_b"),
+            r"{SO}$_4^{2-}$ and a\_b"
+        );
+        assert_eq!(escape_latex_specials(r"$$x_y$$ z_w"), r"$$x_y$$ z\_w");
+        assert_eq!(escape_latex_specials(r"$$a_b$ c_d$$"), r"$$a_b$ c_d$$");
+        let open_double = escape_latex_specials(r"$$a_b");
+        assert!(open_double.contains(r"a\_b"), "{open_double}");
+        assert_eq!(escape_latex_specials(r"$$a_b$"), r"$$a_b$");
+        assert_eq!(escape_latex_specials(r"$a_b$"), r"$a_b$");
+        assert_eq!(escape_latex_specials(r"$ab_$"), r"$ab_$");
+        assert_eq!(escape_latex_specials(r"$a$b_c$"), r"$a$b\_c$");
+        assert_eq!(escape_latex_specials(r"\$a_b$"), r"\$a\_b$");
+        let open = escape_latex_specials(r"$a_b and c_d");
+        assert!(open.contains(r"a\_b"), "{open}");
+        assert!(open.contains(r"c\_d"), "{open}");
+    }
+
+    #[test]
+    fn an_underscore_inside_url_or_href_is_not_escaped() {
+        let bib = r#"@misc{lammpsHowtoTriclinic2026,
+  howpublished = {\url{https://docs.lammps.org/Howto_triclinic.html}},
+  note = {\href{https://ex.org/a_b}{see_c} and d_e},
+  url = {https://example.org/a_b%20c#frag},
+  doi = {10.1000/a_b}
+}
+"#;
+        let out = round_trip(bib);
+        assert!(
+            out.contains(r"howpublished = {\url{https://docs.lammps.org/Howto_triclinic.html}}"),
+            "{out}"
+        );
+        assert!(!out.contains(r"Howto\_triclinic"), "{out}");
+        assert!(
+            out.contains(r"note = {\href{https://ex.org/a_b}{see_c} and d\_e}"),
+            "{out}"
+        );
+        assert!(!out.contains(r"a\_b"), "{out}");
+        assert!(!out.contains(r"see\_c"), "{out}");
+        assert!(
+            out.contains("url = {https://example.org/a_b%20c#frag}"),
+            "{out}"
+        );
+        assert!(out.contains("doi = {10.1000/a_b}"), "{out}");
+        assert!(!out.contains(r"\%"), "{out}");
+        assert!(!out.contains(r"\#"), "{out}");
+    }
+
+    #[test]
+    fn a_compact_field_keeps_its_equals_spacing() {
+        let bib = "\
+@article{compact2020,
+  title={Compact title},
+  year = {2020},
+  doi={10.1000/compact}
+}
+";
+        assert_eq!(round_trip(bib), bib);
+    }
+
+    #[test]
+    fn an_underscore_inside_math_is_not_escaped() {
+        let bib = "\
+@article{ion2019,
+  title = {{SO}$_4^{2-}$ and H_2O},
+  year = {2019}
+}
+";
+        let out = round_trip(bib);
+        assert!(out.contains("{SO}$_4^{2-}$ and H\\_2O"), "{out}");
+        assert!(!out.contains(r"\_4"), "{out}");
+    }
+
+    #[test]
+    fn a_field_name_keeps_its_capital_letters() {
+        let bib = "\
+@article{note2026,
+  title = {A note},
+  archivePrefix = {arXiv},
+  eprint = {1234.56789}
+}
+";
+        let out = round_trip(bib);
+        assert!(out.contains("archivePrefix = {arXiv}"), "{out}");
+        assert!(!out.contains("archiveprefix"), "{out}");
+    }
+
+    #[test]
+    fn a_repeated_field_keeps_the_first_spelling() {
+        let bib = "\
+@article{twice,
+  Title = {First},
+  title = {Second}
+}
+";
+        let out = round_trip(bib);
+        assert!(out.contains("Title = {Second}"), "{out}");
+        assert!(!out.contains("title ="), "{out}");
+    }
+
+    #[test]
+    fn a_manual_without_a_year_pairs_by_its_url() {
+        let bib = "\
+@manual{h5md110,
+  author = {{H5MD developers}},
+  title = {H5MD format specification version 1.1.0},
+  version = {1.1.0},
+  url = {https://h5md.nongnu.org/releases/h5md-1.1.0.html}
+}
+";
+        let server = vec![json!({
+            "id": "hmddevelopersH5mdFormatSpecification",
+            "render": {"citation_key": "hmddevelopersH5mdFormatSpecification"},
+            "metadata": {
+                "title": "Resolved manual page",
+                "entry_type": "article",
+                "authors": [{"family": "H5MD developers"}],
+                "url": "https://h5md.nongnu.org/releases/h5md-1.1.0.html/ "
+            }
+        })];
+        let paired = pair_with_server(bib, &server).unwrap();
+        assert_eq!(paired.len(), 1, "{paired:?}");
+        assert_eq!(
+            paired[0].entry_id.as_deref(),
+            Some("hmddevelopersH5mdFormatSpecification"),
+            "{paired:?}"
+        );
+        assert_eq!(paired[0].source.entry_type, "manual");
+        assert_eq!(paired[0].source.field("version"), Some("1.1.0"));
+        assert_eq!(paired[0].doi, None);
+    }
+
+    #[test]
+    fn duplicate_urls_stay_unpaired() {
+        let bib = "\
+@manual{one,
+  title = {First page},
+  url = {https://example.org/spec}
+}
+@manual{two,
+  title = {Second page},
+  url = {https://example.org/spec/}
+}
+";
+        let server = vec![json!({
+            "id": "s-spec",
+            "metadata": {"title": "Elsewhere", "url": "https://example.org/spec"}
+        })];
+        let paired = pair_with_server(bib, &server).unwrap();
+        assert!(
+            paired.iter().all(|item| item.entry_id.is_none()),
+            "{paired:?}"
+        );
+    }
+
+    #[test]
+    fn a_yearless_title_pairs_when_the_server_title_is_unique() {
+        let bib = "\
+@manual{spec,
+  title = {{H5MD} format specification},
+  version = {1.1.0}
+}
+";
+        let server = vec![json!({
+            "id": "s-spec",
+            "metadata": {
+                "title": "H5MD format specification",
+                "entry_type": "article"
+            }
+        })];
+        let paired = pair_with_server(bib, &server).unwrap();
+        assert_eq!(paired[0].entry_id.as_deref(), Some("s-spec"), "{paired:?}");
+        assert_eq!(paired[0].source.field("version"), Some("1.1.0"));
+    }
+
+    #[test]
+    fn a_blank_url_does_not_pair() {
+        let bib = "@manual{one,\n  title = {One manual},\n  url = {/}\n}\n";
+        let server = vec![json!({
+            "id": "s-blank",
+            "metadata": {"title": "Other manual", "url": "   "}
+        })];
+        let paired = pair_with_server(bib, &server).unwrap();
+        assert_eq!(paired[0].entry_id, None, "{paired:?}");
+    }
+
+    #[test]
+    fn a_title_pairs_on_a_string_year_or_a_nested_date_year() {
+        let bib = "\
+@manual{stringy,
+  title = {String year manual},
+  year = {2017}
+}
+@manual{nested,
+  title = {Nested year manual},
+  year = {2018}
+}
+@manual{ancient,
+  title = {Out of range manual},
+  year = {999}
+}
+";
+        let server = vec![
+            json!({"id": "s-string", "metadata": {"title": "String year manual", "year": "2017"}}),
+            json!({"id": "s-nested", "metadata": {"title": "Nested year manual", "date": {"year": 2018}}}),
+            json!({"id": "s-ancient", "metadata": {"title": "Out of range manual", "year": 999}}),
+        ];
+        let paired = pair_with_server(bib, &server).unwrap();
+        let id = |key: &str| {
+            paired
+                .iter()
+                .find(|item| item.source.key == key)
+                .and_then(|item| item.entry_id.clone())
+        };
+        assert_eq!(id("stringy").as_deref(), Some("s-string"), "{paired:?}");
+        assert_eq!(id("nested").as_deref(), Some("s-nested"), "{paired:?}");
+        assert_eq!(id("ancient").as_deref(), Some("s-ancient"), "{paired:?}");
     }
 
     #[test]
@@ -1501,6 +2005,8 @@ mod tests {
                     key: "same".into(),
                     entry_type: "article".into(),
                     fields: vec![("title".into(), format!("Paper {index}"))],
+
+                    separators: Vec::new(),
                 })
                 .collect();
             let exported = render_bibliography(&colliding).expect("export");
@@ -1562,6 +2068,8 @@ mod tests {
                 key: "same".into(),
                 entry_type: "article".into(),
                 fields: vec![("title".into(), format!("Paper {index}"))],
+
+                separators: Vec::new(),
             })
             .collect();
         let export_error = render_bibliography(&colliding).unwrap_err();

@@ -1918,7 +1918,7 @@ impl Server {
 
     #[tool(
         name = "export_collection",
-        description = "Export a collection as BibTeX (format=bib, default) or CSL bibliography text (format=csl, or pass a CSL style id such as apa/ieee). An imported bibliography is exported from the source entry kept on this machine: the citation key, entry type, braces, name particles, LaTeX accents, and every source field are kept, and a resolver value does not replace them. enrich=true fills only a field the source left empty. Without a source entry, BibTeX is rendered here from Crossref or DataCite fields: proceedings get a booktitle, types and numbers follow the provider, a stored citation_key is kept, and a DOI is not repeated as a URL. Local overrides recorded by update_entry_metadata are applied first when this server keeps them (stdio, or HTTP with auth=none); local_overrides=false skips them, and an unreadable override file is skipped with a warning comment. software_entry=misc writes @misc with howpublished instead of @software for a provider software record. eid_as=pages or eid_as=note places an article number where styles that ignore eid, such as elsarticle-num, print it. Call this when the user wants the collection as a file or as formatted copy-out.",
+        description = "Export a collection as BibTeX (format=bib, default) or CSL bibliography text (format=csl, or pass a CSL style id such as apa/ieee). An imported bibliography is exported from the source entry kept on this machine: the citation key, entry type, field-name case, spacing around '=', braces, name particles, LaTeX accents, and every source field are kept, and a resolver value does not replace them. enrich=true fills only a field the source left empty. Without a source entry, BibTeX is rendered here from Crossref or DataCite fields. An entry with no kept source, including one imported before source copies were kept, can lose a citation key, brace, or field; re-import the bibliography to keep the original. From the server record, proceedings get a booktitle, types and numbers follow the provider, a stored citation_key is kept, and a DOI is not repeated as a URL. Local overrides recorded by update_entry_metadata are applied first when this server keeps them (stdio, or HTTP with auth=none); local_overrides=false skips them, and an unreadable override file is skipped with a warning comment. software_entry=misc writes @misc with howpublished instead of @software for a provider software record. eid_as=pages or eid_as=note places an article number where styles that ignore eid, such as elsarticle-num, print it. Call this when the user wants the collection as a file or as formatted copy-out.",
         annotations(
             title = "Export collection bibliography",
             read_only_hint = true,
@@ -1956,7 +1956,15 @@ impl Server {
                 let mut warning = None;
                 if args.local_overrides {
                     match self.overrides.load_for_export(&args.collection) {
-                        overrides::Loaded::Store(store) => store.apply_to_entries(&mut entries),
+                        overrides::Loaded::Store(store) => {
+                            store.apply_to_entries(&mut entries);
+                            if let Some(note) = overrides::source_gap_note(&entries) {
+                                warning = Some(match warning {
+                                    Some(previous) => format!("{previous} {note}"),
+                                    None => note,
+                                });
+                            }
+                        }
                         overrides::Loaded::Skipped(note) => warning = note,
                     }
                 }
@@ -2609,6 +2617,25 @@ impl Server {
     }
 
     /// Keep the imported BibTeX on a single-user server so export can print it.
+    fn append_kept_sources(
+        message: &mut String,
+        recorded: &overrides::RecordedSources,
+        offered: usize,
+    ) {
+        message.push_str(&format!(
+            " Kept {} source entries for export.",
+            recorded.kept
+        ));
+        if recorded.kept != offered {
+            let missed = offered.saturating_sub(recorded.kept);
+            message.push_str(&format!(" {missed} imported entries were not stored."));
+        }
+        for conflict in &recorded.conflicts {
+            message.push(' ');
+            message.push_str(conflict);
+        }
+    }
+
     async fn keep_import_source(
         &self,
         collection: &str,
@@ -2654,15 +2681,8 @@ impl Server {
                     }
                 };
                 match self.overrides.record_sources(collection, &paired) {
-                    Ok(conflicts) => {
-                        message.push_str(&format!(
-                            " Kept {} source entries for export.",
-                            paired.len()
-                        ));
-                        for conflict in conflicts {
-                            message.push(' ');
-                            message.push_str(&conflict);
-                        }
+                    Ok(recorded) => {
+                        Self::append_kept_sources(&mut message, &recorded, paired.len());
                         message
                     }
                     Err(error) => {
@@ -9633,6 +9653,266 @@ mod tests {
             }
         }
         0
+    }
+
+    #[test]
+    fn kept_source_note_counts_only_what_was_stored() {
+        let mut matched = String::new();
+        super::Server::append_kept_sources(
+            &mut matched,
+            &overrides::RecordedSources {
+                kept: 5,
+                conflicts: Vec::new(),
+            },
+            5,
+        );
+        assert_eq!(matched, " Kept 5 source entries for export.");
+
+        let mut missed = String::new();
+        super::Server::append_kept_sources(
+            &mut missed,
+            &overrides::RecordedSources {
+                kept: 4,
+                conflicts: vec![
+                    "Citation key h5md110 kept the first source; a later entry with that key was not stored."
+                        .into(),
+                ],
+            },
+            5,
+        );
+        assert!(missed.contains("Kept 4 source entries"), "{missed}");
+        assert!(
+            missed.contains("1 imported entries were not stored."),
+            "{missed}"
+        );
+        assert!(missed.contains("Citation key h5md110"), "{missed}");
+
+        let mut extra = String::new();
+        super::Server::append_kept_sources(
+            &mut extra,
+            &overrides::RecordedSources {
+                kept: 2,
+                conflicts: Vec::new(),
+            },
+            1,
+        );
+        assert!(
+            extra.contains("0 imported entries were not stored."),
+            "{extra}"
+        );
+    }
+
+    fn kept_count(message: &str) -> usize {
+        let rest = message
+            .split("Kept ")
+            .nth(1)
+            .expect("import message names the kept count");
+        rest.split_whitespace()
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn import_keeps_every_source_and_the_count_matches_the_store() {
+        let bib = "\
+@article{Bradley2017MMTF,
+  title = {MMTF\u{2014}An efficient file format},
+  year = {2017},
+  doi = {10.1371/journal.pcbi.1005575}
+}
+@article{Sehnal2020BinaryCIF,
+  title = {BinaryCIF and CIFTools\u{2014}Lightweight},
+  year = {2020},
+  doi = {10.1371/journal.pcbi.1008247}
+}
+@misc{Westendorp2026Molly,
+  title = {Molly\u{2014}a fast reader},
+  year = {2026},
+  doi = {10.5281/zenodo.18902574}
+}
+@misc{lammpsHowtoTriclinic2026,
+  title = {{LAMMPS} Documentation},
+  author = {{LAMMPS developers}},
+  year = {2026},
+  howpublished = {\\url{https://docs.lammps.org/Howto_triclinic.html}}
+}
+@manual{h5md110,
+  author = {{H5MD developers}},
+  title = {H5MD format specification version 1.1.0},
+  version = {1.1.0},
+  url = {https://h5md.nongnu.org/releases/h5md-1.1.0.html}
+}
+";
+        let mock = MockServer::start().await;
+        let col_id = "col-rt";
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": col_id, "name": "manuals"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/collections/{col_id}/import")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "added": 5,
+                "duplicates_skipped": 0
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/collections/{col_id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": col_id,
+                "name": "manuals",
+                "entries": [
+                    {
+                        "id": "e-bradley",
+                        "metadata": {
+                            "doi": "10.1371/journal.pcbi.1005575",
+                            "title": "MMTF---An efficient file format",
+                            "entry_type": "article",
+                            "year": 2017
+                        }
+                    },
+                    {
+                        "id": "e-sehnal",
+                        "metadata": {
+                            "doi": "10.1371/journal.pcbi.1008247",
+                            "title": "BinaryCIF and CIFTools---Lightweight",
+                            "entry_type": "article",
+                            "year": 2020
+                        }
+                    },
+                    {
+                        "id": "e-molly",
+                        "metadata": {
+                            "doi": "10.5281/zenodo.18902574",
+                            "title": "Molly---a fast reader",
+                            "entry_type": "misc",
+                            "year": 2026
+                        }
+                    },
+                    {
+                        "id": "e-lammps",
+                        "metadata": {
+                            "citation_key": "lammpsHowtoTriclinic2026",
+                            "title": "LAMMPS Documentation",
+                            "entry_type": "misc",
+                            "year": 2026
+                        }
+                    },
+                    {
+                        "id": "hmddevelopersH5mdFormatSpecification",
+                        "render": {"citation_key": "hmddevelopersH5mdFormatSpecification"},
+                        "metadata": {
+                            "title": "H5MD format specification version 1.1.0",
+                            "entry_type": "article",
+                            "authors": [{"family": "H5MD developers"}],
+                            "url": "https://h5md.nongnu.org/releases/h5md-1.1.0.html"
+                        }
+                    }
+                ]
+            })))
+            .mount(&mock)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let server = test_server(&mock.uri())
+            .with_overrides(overrides::OverrideStore::Enabled(dir.path().to_path_buf()));
+        let imported = server
+            .import_bibliography(Parameters(ImportBibliographyArgs {
+                collection: Some("manuals".into()),
+                content: bib.into(),
+                format: "bibtex".into(),
+                style: None,
+            }))
+            .await;
+        let store = overrides::load_from(dir.path(), "manuals").unwrap();
+        let mut stored_keys = Vec::new();
+        for entry in store.entries.values() {
+            if let Some(source) = &entry.source {
+                if !stored_keys.contains(&source.key) {
+                    stored_keys.push(source.key.clone());
+                }
+            }
+        }
+        let exported = server
+            .export_collection(Parameters(ExportCollectionArgs {
+                collection: "manuals".into(),
+                format: "bib".into(),
+                style: "apa".into(),
+                software_entry: "misc".into(),
+                eid_as: "pages".into(),
+                local_overrides: true,
+                enrich: false,
+            }))
+            .await;
+        let mut problems = Vec::new();
+        let kept = kept_count(&imported);
+        if kept != stored_keys.len() {
+            problems.push(format!(
+                "kept count {kept} != stored keys {stored_keys:?} in {imported}"
+            ));
+        }
+        if !stored_keys.iter().any(|key| key == "h5md110") {
+            problems.push(format!("h5md110 was not stored: {stored_keys:?}"));
+        }
+        for needle in [
+            "@manual{h5md110,",
+            "author = {{H5MD developers}}",
+            "version = {1.1.0}",
+            "url = {https://h5md.nongnu.org/releases/h5md-1.1.0.html}",
+            "MMTF\u{2014}An efficient",
+            "CIFTools\u{2014}Lightweight",
+            "Molly\u{2014}a fast reader",
+            r"\url{https://docs.lammps.org/Howto_triclinic.html}",
+        ] {
+            if !exported.contains(needle) {
+                problems.push(format!("export missing {needle}"));
+            }
+        }
+        if exported.contains("hmddevelopersH5mdFormatSpecification") {
+            problems.push("export rekeyed h5md110".into());
+        }
+        if exported.contains("---") {
+            problems.push("export rewrote an em dash to ---".into());
+        }
+        if exported.contains(r"Howto\_triclinic") {
+            problems.push("export escaped an underscore inside \\url".into());
+        }
+        assert!(problems.is_empty(), "{problems:#?}\n{exported}");
+    }
+
+    #[tokio::test]
+    async fn export_says_when_an_entry_has_no_kept_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut planted = overrides::CollectionOverrides::new("Refs");
+        planted.entries.insert(
+            "key:other".into(),
+            overrides::EntryOverride {
+                source: Some(crate::bib_source::BibSource {
+                    key: "other".into(),
+                    entry_type: "article".into(),
+                    fields: vec![("title".into(), "Unrelated specification".into())],
+
+                    separators: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        overrides::save_to(dir.path(), "Refs", &planted).unwrap();
+        let mock = MockServer::start().await;
+        mount_refs_collection(&mock).await;
+        let server = test_server(&mock.uri())
+            .with_overrides(overrides::OverrideStore::Enabled(dir.path().to_path_buf()));
+        let bib = server.export_collection(Parameters(export_args())).await;
+        assert!(bib.contains("no kept source"), "{bib}");
+        assert!(bib.contains("Re-import"), "{bib}");
+        assert!(!bib.contains("Unrelated specification"), "{bib}");
+        assert!(bib.contains("@article{"), "{bib}");
     }
 
     #[tokio::test]

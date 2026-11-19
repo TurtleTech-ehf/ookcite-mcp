@@ -36,6 +36,8 @@ pub struct RawBibEntry {
     pub key: String,
     pub entry_type: String,
     pub fields: Vec<(String, String)>,
+    /// Characters between each field name and its value, including `=`.
+    pub separators: Vec<String>,
 }
 
 impl BibEntry {
@@ -319,11 +321,14 @@ pub fn parse_bibtex_raw(content: &str) -> Result<Vec<RawBibEntry>, String> {
             }
         };
         let key = scan.read_key(closer)?;
-        let fields = scan.read_fields_ordered(closer)?;
+        let ordered = scan.read_fields_ordered(closer)?;
+        let fields = ordered.fields;
+        let separators = ordered.separators;
         entries.push(RawBibEntry {
             key,
             entry_type: entry_type.to_ascii_lowercase(),
             fields,
+            separators,
         });
         if entries.len() > crate::constants::AUDIT_BIB_MAX_ENTRIES {
             return Err(format!(
@@ -957,6 +962,11 @@ enum ValuePart {
     Macro(String),
 }
 
+struct OrderedFields {
+    fields: Vec<(String, String)>,
+    separators: Vec<String>,
+}
+
 struct Scan<'a> {
     src: &'a str,
     i: usize,
@@ -1059,18 +1069,19 @@ impl<'a> Scan<'a> {
     fn read_fields(&mut self, closer: char) -> Result<HashMap<String, String>, String> {
         let ordered = self.read_fields_ordered(closer)?;
         let mut fields = HashMap::new();
-        for (name, value) in ordered {
-            fields.insert(name, value);
+        for (name, value) in ordered.fields {
+            fields.insert(name.to_ascii_lowercase(), value);
         }
         Ok(fields)
     }
 
-    fn read_fields_ordered(&mut self, closer: char) -> Result<Vec<(String, String)>, String> {
+    fn read_fields_ordered(&mut self, closer: char) -> Result<OrderedFields, String> {
         self.skip_trivia();
         if self.peek() == Some(',') {
             self.bump();
         }
-        let mut fields = Vec::new();
+        let mut fields: Vec<(String, String)> = Vec::new();
+        let mut separators: Vec<String> = Vec::new();
         loop {
             self.skip_trivia();
             let Some(ch) = self.peek() else {
@@ -1089,11 +1100,11 @@ impl<'a> Scan<'a> {
             if name.is_empty() {
                 return Err(format!("BibTeX field name missing at byte {name_at}"));
             }
-            self.skip_trivia();
+            let before = self.take_trivia();
             if self.bump() != Some('=') {
                 return Err(format!("BibTeX field {name} is missing '='"));
             }
-            self.skip_trivia();
+            let after = self.take_trivia();
             let value = self.read_value()?;
             if value.len() > crate::constants::AUDIT_BIB_MAX_FIELD_BYTES {
                 return Err(format!(
@@ -1102,18 +1113,27 @@ impl<'a> Scan<'a> {
                     crate::constants::AUDIT_BIB_MAX_FIELD_BYTES
                 ));
             }
-            let name = name.to_ascii_lowercase();
-            if let Some(existing) = fields.iter_mut().find(|(field, _)| field == &name) {
+            if let Some(existing) = fields
+                .iter_mut()
+                .find(|(field, _)| field.eq_ignore_ascii_case(&name))
+            {
                 existing.1 = value;
             } else {
                 fields.push((name, value));
+                separators.push(format!("{before}={after}"));
             }
             self.skip_trivia();
             if self.peek() == Some(',') {
                 self.bump();
             }
         }
-        Ok(fields)
+        Ok(OrderedFields { fields, separators })
+    }
+
+    fn take_trivia(&mut self) -> String {
+        let start = self.i;
+        self.skip_trivia();
+        self.src[start..self.i].to_string()
     }
 
     fn read_value(&mut self) -> Result<String, String> {
@@ -1243,6 +1263,12 @@ mod tests {
             anon_daily: crate::constants::ANON_DAILY_LOOKUPS,
             free_daily: crate::constants::FREE_DAILY_LOOKUPS,
         }
+    }
+
+    #[test]
+    fn a_capitalized_title_field_is_still_the_title() {
+        let entries = parse_bibtex("@article{k,\n  Title = {Hello there}\n}\n").unwrap();
+        assert_eq!(entries[0].title.as_deref(), Some("Hello there"));
     }
 
     #[test]
