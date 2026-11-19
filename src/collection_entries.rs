@@ -1,5 +1,6 @@
 //! Collection entry identity helpers (canonical ids, DOI aliases, search lines).
 
+use crate::bib_names;
 use crate::tool_args::UpdateEntryMetadataArgs;
 
 pub fn normalize_doi_token(raw: &str) -> String {
@@ -77,13 +78,16 @@ pub fn person_from_name(raw: &str) -> serde_json::Value {
     if let Some(name) = braced_literal(trimmed) {
         return serde_json::json!({ "family": name, "literal": true });
     }
-    if let Some((family, given)) = trimmed.split_once(',') {
-        let family = family.trim();
-        let given = given.trim();
-        if given.is_empty() {
-            return serde_json::json!({ "family": family });
+    if let Some(name) = bib_names::parse_list(trimmed).into_iter().next() {
+        // A comma form, a von particle, or a junior is already split. A plain
+        // "First Last" with no particle stays on the last-token rule below,
+        // because that parse keeps every token in the last name.
+        if !name.literal
+            && !trimmed.contains(" and ")
+            && (trimmed.contains(',') || !name.von.is_empty() || !name.jr.is_empty())
+        {
+            return person_json(&name);
         }
-        return serde_json::json!({ "family": family, "given": given });
     }
     match trimmed.rsplit_once(char::is_whitespace) {
         Some((given, family)) => {
@@ -91,6 +95,21 @@ pub fn person_from_name(raw: &str) -> serde_json::Value {
         }
         None => serde_json::json!({ "family": trimmed }),
     }
+}
+
+fn person_json(name: &bib_names::BibName) -> serde_json::Value {
+    let mut person = serde_json::Map::new();
+    person.insert("family".into(), serde_json::json!(name.last));
+    if !name.first.is_empty() {
+        person.insert("given".into(), serde_json::json!(name.first));
+    }
+    if !name.von.is_empty() {
+        person.insert("prefix".into(), serde_json::json!(name.von));
+    }
+    if !name.jr.is_empty() {
+        person.insert("suffix".into(), serde_json::json!(name.jr));
+    }
+    serde_json::Value::Object(person)
 }
 
 fn braced_literal(value: &str) -> Option<String> {

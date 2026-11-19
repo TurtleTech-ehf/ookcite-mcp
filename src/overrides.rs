@@ -123,9 +123,23 @@ impl OverrideStore {
     }
 
     /// Store the source of every imported entry, under its id and its DOI.
-    pub fn record_sources(&self, collection: &str, pairs: &[PairedSource]) -> Result<(), String> {
+    ///
+    /// The `Ok` value lists DOIs that belonged to more than one entry. Both
+    /// sources are kept: the first stays on the DOI key and each entry stays
+    /// on its id.
+    pub fn record_sources(
+        &self,
+        collection: &str,
+        pairs: &[PairedSource],
+    ) -> Result<Vec<String>, String> {
         match self {
-            Self::Enabled(dir) => update_in(dir, collection, |store| store.record_sources(pairs)),
+            Self::Enabled(dir) => {
+                let mut conflicts = Vec::new();
+                update_in(dir, collection, |store| {
+                    conflicts = store.record_sources(pairs);
+                })?;
+                Ok(conflicts)
+            }
             Self::Unavailable => Err(UNAVAILABLE_MESSAGE.into()),
             Self::Disabled => Err(DISABLED_MESSAGE.into()),
         }
@@ -349,9 +363,22 @@ impl CollectionOverrides {
     }
 
     /// The override for an entry, matched by DOI first and then by entry id.
+    ///
+    /// When the same DOI was imported twice, the id record holds that entry's
+    /// own source and wins over the shared DOI record.
     pub fn for_entry(&self, entry_id: Option<&str>, doi: Option<&str>) -> Option<&EntryOverride> {
-        doi.and_then(|doi| self.entries.get(&doi_key(doi)))
-            .or_else(|| entry_id.and_then(|id| self.entries.get(&id_key(id))))
+        let by_id = entry_id.and_then(|id| self.entries.get(&id_key(id)));
+        let by_doi = doi.and_then(|doi| self.entries.get(&doi_key(doi)));
+        match (by_id, by_doi) {
+            (Some(id_override), Some(doi_override))
+                if sources_differ(id_override, doi_override) =>
+            {
+                Some(id_override)
+            }
+            (_, Some(doi_override)) => Some(doi_override),
+            (Some(id_override), None) => Some(id_override),
+            (None, None) => None,
+        }
     }
 
     /// Store key for an entry: its DOI when it has one, else its entry id.
@@ -370,7 +397,8 @@ impl CollectionOverrides {
         }
     }
 
-    pub fn record_sources(&mut self, pairs: &[PairedSource]) {
+    pub fn record_sources(&mut self, pairs: &[PairedSource]) -> Vec<String> {
+        let mut conflicts = Vec::new();
         for pair in pairs {
             if let Some(id) = pair
                 .entry_id
@@ -386,9 +414,23 @@ impl CollectionOverrides {
                 .map(str::trim)
                 .filter(|doi| !doi.is_empty())
             {
-                self.put_source(doi_key(doi), pair.source.clone());
+                let key = doi_key(doi);
+                if let Some(existing) = self
+                    .entries
+                    .get(&key)
+                    .and_then(|entry| entry.source.clone())
+                {
+                    if existing != pair.source {
+                        conflicts.push(format!(
+                            "Duplicate DOI {doi} kept the first source; the other entry stays under its id."
+                        ));
+                        continue;
+                    }
+                }
+                self.put_source(key, pair.source.clone());
             }
         }
+        conflicts
     }
 
     fn put_source(&mut self, key: String, source: BibSource) {
@@ -428,6 +470,13 @@ pub fn doi_key(doi: &str) -> String {
 
 fn id_key(id: &str) -> String {
     format!("id:{}", id.trim())
+}
+
+fn sources_differ(left: &EntryOverride, right: &EntryOverride) -> bool {
+    match (&left.source, &right.source) {
+        (Some(left), Some(right)) => left != right,
+        _ => false,
+    }
 }
 
 /// Stored metadata with one override laid over it. Every touched field is
@@ -679,7 +728,10 @@ mod tests {
         assert_eq!(entry.fields["journal"], None);
         assert_eq!(entry.editor, Some(Vec::new()));
         let authors = entry.authors.as_ref().unwrap();
-        assert_eq!(authors[0], json!({"family": "de Buyl", "given": "Pierre"}));
+        assert_eq!(
+            authors[0],
+            json!({"family": "Buyl", "given": "Pierre", "prefix": "de"})
+        );
         assert_eq!(
             authors[1],
             json!({"family": "FORCE11 Group", "literal": true})
@@ -854,6 +906,50 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("year")));
+    }
+
+    #[test]
+    fn a_duplicate_doi_keeps_both_sources() {
+        use crate::bib_source::{BibSource, PairedSource};
+        let mut store = CollectionOverrides::new("paper");
+        let source = |key: &str, title: &str| BibSource {
+            key: key.into(),
+            entry_type: "article".into(),
+            fields: vec![("title".into(), title.into())],
+        };
+        let conflicts = store.record_sources(&[
+            PairedSource {
+                entry_id: Some("e1".into()),
+                doi: Some("10.1000/shared".into()),
+                source: source("first", "One"),
+            },
+            PairedSource {
+                entry_id: Some("e2".into()),
+                doi: Some("10.1000/Shared".into()),
+                source: source("second", "Two"),
+            },
+        ]);
+        assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        assert!(conflicts[0].contains("10.1000/Shared"), "{conflicts:?}");
+        assert_eq!(
+            store.entries["doi:10.1000/shared"]
+                .source
+                .as_ref()
+                .unwrap()
+                .key,
+            "first"
+        );
+        assert_eq!(
+            store.entries["id:e2"].source.as_ref().unwrap().key,
+            "second"
+        );
+        let mut entries = vec![
+            json!({"id": "e1", "metadata": {"doi": "10.1000/shared"}}),
+            json!({"id": "e2", "metadata": {"doi": "10.1000/shared"}}),
+        ];
+        store.apply_to_entries(&mut entries);
+        assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "first");
+        assert_eq!(entries[1]["metadata"]["bib_source"]["key"], "second");
     }
 
     #[test]

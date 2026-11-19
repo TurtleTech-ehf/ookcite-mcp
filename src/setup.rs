@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn automatic_configuration_refuses_an_existing_named_server() {
         assert!(listing_contains_ookcite(
-            "Cursor\n  ookcite  stdio  npx -y @turtletech/ookcite-mcp\n"
+            "Editor\n  ookcite  stdio  npx -y @turtletech/ookcite-mcp\n"
         ));
         assert!(listing_contains_ookcite("ookcite: configured\n"));
         assert!(!listing_contains_ookcite("context7\nother-citation-tool\n"));

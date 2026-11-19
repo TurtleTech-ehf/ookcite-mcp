@@ -16,11 +16,19 @@ pub struct BibName {
 }
 
 pub fn parse_list(value: &str) -> Vec<BibName> {
-    split_and(value)
+    parse_names(value).0
+}
+
+/// Parsed names, and an error when a `}` had no matching `{`.
+/// Depth is clamped at zero, so the extra brace does not glue the tokens together.
+pub fn parse_names(value: &str) -> (Vec<BibName>, Option<String>) {
+    let mut error = None;
+    let names = split_and(value, &mut error)
         .into_iter()
-        .map(|name| parse_name(name.trim()))
+        .map(|name| parse_name(name.trim(), &mut error))
         .filter(|name| !name.last.is_empty() || !name.first.is_empty())
-        .collect()
+        .collect();
+    (names, error)
 }
 
 #[cfg(test)]
@@ -64,9 +72,9 @@ pub fn format_name(name: &BibName) -> String {
     }
 }
 
-fn parse_name(name: &str) -> BibName {
+fn parse_name(name: &str, error: &mut Option<String>) -> BibName {
     let name = name.trim().trim_end_matches(',').trim();
-    if let Some(inner) = whole_brace_group(name) {
+    if let Some(inner) = whole_brace_group(name, error) {
         return BibName {
             first: String::new(),
             von: String::new(),
@@ -75,7 +83,7 @@ fn parse_name(name: &str) -> BibName {
             literal: true,
         };
     }
-    let parts = split_commas(name);
+    let parts = split_commas(name, error);
     match parts.len() {
         0 => BibName {
             first: String::new(),
@@ -84,9 +92,9 @@ fn parse_name(name: &str) -> BibName {
             jr: String::new(),
             literal: false,
         },
-        1 => split_first_von_last(&parts[0]),
+        1 => split_first_von_last(&parts[0], error),
         2 => {
-            let (von, last) = split_von_last(&parts[0]);
+            let (von, last) = split_von_last(&parts[0], error);
             BibName {
                 first: parts[1].trim().to_string(),
                 von,
@@ -96,7 +104,7 @@ fn parse_name(name: &str) -> BibName {
             }
         }
         _ => {
-            let (von, last) = split_von_last(&parts[0]);
+            let (von, last) = split_von_last(&parts[0], error);
             let jr = parts[1..parts.len() - 1]
                 .iter()
                 .map(|part| part.trim())
@@ -115,8 +123,8 @@ fn parse_name(name: &str) -> BibName {
 }
 
 /// No comma: first, then von, then last. The last token stays in the last name.
-fn split_first_von_last(value: &str) -> BibName {
-    let tokens = tokens(value);
+fn split_first_von_last(value: &str, error: &mut Option<String>) -> BibName {
+    let tokens = tokens(value, error);
     if tokens.is_empty() {
         return BibName {
             first: String::new(),
@@ -131,7 +139,7 @@ fn split_first_von_last(value: &str) -> BibName {
         .iter()
         .enumerate()
         .take(last_index)
-        .find(|(_, token)| is_von(token))
+        .find(|(_, token)| is_von(token, error))
         .map(|(index, _)| index);
     let Some(von_at) = von_at else {
         return BibName {
@@ -143,7 +151,7 @@ fn split_first_von_last(value: &str) -> BibName {
         };
     };
     let mut von_end = von_at;
-    while von_end < last_index && is_von(&tokens[von_end]) {
+    while von_end < last_index && is_von(&tokens[von_end], error) {
         von_end += 1;
     }
     BibName {
@@ -157,20 +165,20 @@ fn split_first_von_last(value: &str) -> BibName {
 
 /// The part before a comma is von plus last. Von is only the leading run.
 /// The last token stays in the last name even when it is lowercase.
-fn split_von_last(value: &str) -> (String, String) {
-    let tokens = tokens(value);
+fn split_von_last(value: &str, error: &mut Option<String>) -> (String, String) {
+    let tokens = tokens(value, error);
     if tokens.is_empty() {
         return (String::new(), String::new());
     }
     let last_index = tokens.len() - 1;
     let mut von_end = 0;
-    while von_end < last_index && is_von(&tokens[von_end]) {
+    while von_end < last_index && is_von(&tokens[von_end], error) {
         von_end += 1;
     }
     (tokens[..von_end].join(" "), tokens[von_end..].join(" "))
 }
 
-fn tokens(value: &str) -> Vec<String> {
+fn tokens(value: &str, error: &mut Option<String>) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut depth: i32 = 0;
@@ -181,7 +189,7 @@ fn tokens(value: &str) -> Vec<String> {
                 current.push(ch);
             }
             '}' => {
-                depth -= 1;
+                close_brace(&mut depth, error);
                 current.push(ch);
             }
             ch if ch.is_whitespace() && depth == 0 => {
@@ -198,12 +206,14 @@ fn tokens(value: &str) -> Vec<String> {
     out
 }
 
-fn is_von(token: &str) -> bool {
+fn is_von(token: &str, error: &mut Option<String>) -> bool {
     let mut depth: i32 = 0;
     for ch in token.chars() {
         match ch {
             '{' => depth += 1,
-            '}' => depth -= 1,
+            '}' => {
+                close_brace(&mut depth, error);
+            }
             ch if depth == 0 && ch.is_alphabetic() => return ch.is_lowercase(),
             _ => {}
         }
@@ -211,7 +221,17 @@ fn is_von(token: &str) -> bool {
     false
 }
 
-fn whole_brace_group(value: &str) -> Option<String> {
+fn close_brace(depth: &mut i32, error: &mut Option<String>) {
+    if *depth == 0 {
+        if error.is_none() {
+            *error = Some("unmatched '}' in a BibTeX name".into());
+        }
+    } else {
+        *depth -= 1;
+    }
+}
+
+fn whole_brace_group(value: &str, error: &mut Option<String>) -> Option<String> {
     let chars: Vec<char> = value.chars().collect();
     if chars.first() != Some(&'{') {
         return None;
@@ -222,7 +242,7 @@ fn whole_brace_group(value: &str) -> Option<String> {
         match ch {
             '{' => depth += 1,
             '}' => {
-                depth -= 1;
+                close_brace(&mut depth, error);
                 if depth == 0 {
                     closed = Some(index);
                     break;
@@ -244,19 +264,19 @@ fn whole_brace_group(value: &str) -> Option<String> {
     }
 }
 
-fn split_and(value: &str) -> Vec<String> {
-    split_on(value, " and ")
+fn split_and(value: &str, error: &mut Option<String>) -> Vec<String> {
+    split_on(value, " and ", error)
 }
 
-fn split_commas(value: &str) -> Vec<String> {
-    split_on(value, ",")
+fn split_commas(value: &str, error: &mut Option<String>) -> Vec<String> {
+    split_on(value, ",", error)
         .into_iter()
         .map(|part| part.trim().to_string())
         .filter(|part| !part.is_empty())
         .collect()
 }
 
-fn split_on(value: &str, needle: &str) -> Vec<String> {
+fn split_on(value: &str, needle: &str, error: &mut Option<String>) -> Vec<String> {
     let chars: Vec<char> = value.chars().collect();
     let needle: Vec<char> = needle.chars().collect();
     let mut parts = Vec::new();
@@ -266,7 +286,9 @@ fn split_on(value: &str, needle: &str) -> Vec<String> {
     while index < chars.len() {
         match chars[index] {
             '{' => depth += 1,
-            '}' => depth -= 1,
+            '}' => {
+                close_brace(&mut depth, error);
+            }
             _ if depth == 0 && chars[index..].starts_with(&needle) => {
                 parts.push(chars[start..index].iter().collect());
                 index += needle.len();
@@ -372,5 +394,19 @@ mod tests {
         let parsed = parse_list("{National Institute of Standards and Technology}");
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].literal);
+    }
+
+    #[test]
+    fn an_unmatched_brace_is_clamped_and_reported() {
+        let (names, error) = parse_names("van der} Spoel, David");
+        assert_eq!(error.as_deref(), Some("unmatched '}' in a BibTeX name"));
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].last, "Spoel");
+        assert_eq!(names[0].first, "David");
+        assert!(names[0].von.starts_with("van der"), "{}", names[0].von);
+        let (balanced, none) = parse_names("van der Spoel, David");
+        assert!(none.is_none());
+        assert_eq!(balanced[0].von, "van der");
+        assert_eq!(balanced[0].last, "Spoel");
     }
 }

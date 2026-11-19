@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file. See [conven
 #### Bugfixes
 - (**bibtex**) keep an imported bibliography's keys, types, and fields on export
 - (**bibtex**) disambiguate a run of identical citation keys without stalling
+- (**bibtex**) copy doi, url, and eprint verbatim and keep an @string macro bare
+- (**bibtex**) pair leftover entries by citation key, title, and year
+- (**bibtex**) keep both sources when two entries share a DOI
+- (**bibtex**) do not refill a cleared field when enrich is set
+- (**bibtex**) keep a von particle on a First von Last name
+- (**bibtex**) report an unmatched brace in a name instead of letting depth go negative
 
 - - -
 ## v0.6.5 - 2026-10-04

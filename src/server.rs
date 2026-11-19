@@ -2648,11 +2648,15 @@ impl Server {
                     }
                 };
                 match self.overrides.record_sources(collection, &paired) {
-                    Ok(()) => {
+                    Ok(conflicts) => {
                         message.push_str(&format!(
                             " Kept {} source entries for export.",
                             paired.len()
                         ));
+                        for conflict in conflicts {
+                            message.push(' ');
+                            message.push_str(&conflict);
+                        }
                         message
                     }
                     Err(error) => {
@@ -8265,6 +8269,14 @@ mod tests {
             person_from_name("{IEEE Computer Society},"),
             serde_json::json!({"family": "IEEE Computer Society", "literal": true})
         );
+        assert_eq!(
+            person_from_name("David van der Spoel"),
+            serde_json::json!({"family": "Spoel", "given": "David", "prefix": "van der"})
+        );
+        assert_eq!(
+            person_from_name("De Souza, Roger A."),
+            serde_json::json!({"family": "De Souza", "given": "Roger A."})
+        );
     }
 
     #[test]
@@ -9554,42 +9566,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_bibliographies_round_trip_when_present() {
-        let cases = [
-            (
-                "readcon",
-                "/cursor/stores/bot/ttkit/readcon-ookcite-repro/rg_main.bib",
-                "/cursor/stores/bot/ttkit/readcon-ookcite-repro/readcon-cpc.bib",
-                99,
-                3,
-                178,
-            ),
-            (
-                "amsel",
-                "/cursor/stores/bot/ttkit/amsel-ookcite-repro/amsel-refs.bib",
-                "/cursor/stores/bot/ttkit/amsel-ookcite-repro/export-diagnostic.bib",
-                76,
-                5,
-                76,
-            ),
-        ];
-        for (name, source_path, before_path, keys, types, differing) in cases {
-            if !std::path::Path::new(source_path).exists() {
-                continue;
-            }
-            let source = std::fs::read_to_string(source_path).unwrap();
-            if std::path::Path::new(before_path).exists() {
-                let before = std::fs::read_to_string(before_path).unwrap();
-                let diff = crate::bib_source::diff_report(&source, &before).unwrap();
-                assert_eq!(diff.key_changes, keys, "{name} before keys {diff:?}");
-                assert_eq!(diff.type_changes, types, "{name} before types {diff:?}");
-                assert_eq!(
-                    diff.entries_differing, differing,
-                    "{name} before entries {diff:?}"
-                );
-            }
-            let exported = import_and_export(name, &source).await;
-            assert_round_trip(&source, &exported);
+    async fn private_bibliographies_round_trip_when_configured() {
+        let Ok(dir) = std::env::var("OOKCITE_PRIVATE_BIB_DIR") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(dir);
+        if !root.is_dir() {
+            return;
+        }
+        let mut files = Vec::new();
+        collect_bib_files(&root, &mut files);
+        files.sort();
+        assert!(
+            !files.is_empty(),
+            "OOKCITE_PRIVATE_BIB_DIR has no BibTeX files"
+        );
+        for path in files {
+            let source = std::fs::read_to_string(&path).unwrap();
+            let label = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("bibliography")
+                .to_string();
+            let exported = import_and_export(&label, &source).await;
+            let diff = crate::bib_source::diff_bibliographies(&source, &exported).unwrap();
+            println!(
+                "{label}: entries {} key {} type {} dropped {} added {} value {} differing {}",
+                diff.source_entries,
+                diff.key_changes,
+                diff.type_changes,
+                diff.dropped_fields,
+                diff.added_fields,
+                diff.value_changes,
+                diff.entries_differing
+            );
+            assert_eq!(diff.key_changes, 0, "{label} {diff:?}");
+            assert_eq!(diff.type_changes, 0, "{label} {diff:?}");
+            assert_eq!(diff.dropped_fields, 0, "{label} {diff:?}");
+            assert_eq!(diff.added_fields, 0, "{label} {diff:?}");
+            assert_eq!(diff.value_changes, 0, "{label} {diff:?}");
+            assert_eq!(diff.entries_differing, 0, "{label} {diff:?}");
+            assert_eq!(diff.export_entries, diff.source_entries, "{label} {diff:?}");
             for style in ["elsarticle-num", "aipnum4-2"] {
                 let Some((source_errors, source_warnings)) = bibtex_counts(&source, style) else {
                     continue;
@@ -9597,12 +9614,30 @@ mod tests {
                 let (errors, warnings) = bibtex_counts(&exported, style).unwrap();
                 assert_eq!(
                     errors, 0,
-                    "{name} {style} errors, source had {source_errors}"
+                    "{label} {style} errors, source had {source_errors}"
                 );
                 assert!(
                     warnings <= source_warnings,
-                    "{name} {style} warnings {warnings} exceed the source {source_warnings}"
+                    "{label} {style} warnings {warnings} exceed the source {source_warnings}"
                 );
+            }
+        }
+    }
+
+    fn collect_bib_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_bib_files(&path, out);
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("bib"))
+            {
+                out.push(path);
             }
         }
     }

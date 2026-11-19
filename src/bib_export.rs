@@ -165,7 +165,11 @@ pub fn render_pairs(pairs: &[(Value, Option<Value>)], options: &BibOptions) -> S
             separate_entries(&mut out);
             if options.enrich {
                 if let Some(provider) = provider {
-                    let additions = additions_from_provider(provider);
+                    let locked = user_fields(stored);
+                    let additions = additions_from_provider(provider)
+                        .into_iter()
+                        .filter(|(name, _)| !clear_blocks(&locked, name))
+                        .collect::<Vec<_>>();
                     crate::bib_source::fill_empty(&mut source, &additions);
                 }
             }
@@ -496,6 +500,19 @@ fn additions_from_provider(record: &Value) -> Vec<(String, String)> {
         push("url", url);
     }
     out
+}
+
+/// A cleared field is listed in `user_fields` and absent from the source.
+/// Enrichment must not put the resolver value back.
+fn clear_blocks(locked: &HashSet<String>, field: &str) -> bool {
+    let names: &[&str] = match field {
+        "number" => &["number", "issue"],
+        "author" => &["author", "authors"],
+        "editor" => &["editor", "editors"],
+        "year" => &["year", "date"],
+        other => return locked.contains(other),
+    };
+    names.iter().any(|name| locked.contains(*name))
 }
 
 fn user_fields(meta: &Value) -> HashSet<String> {
@@ -2760,7 +2777,7 @@ mod tests {
 
     #[test]
     fn round_trip_of_the_readcon_bibliography() {
-        let bib_src = include_str!("../tests/fixtures/readcon-cpc.bib");
+        let bib_src = include_str!("../tests/fixtures/sample-bibliography.bib");
         let providers: HashMap<String, Value> =
             serde_json::from_str(include_str!("../tests/fixtures/providers.json")).unwrap();
         let mut dois = Vec::new();
@@ -2922,6 +2939,78 @@ mod tests {
         assert!(bib.contains("series = {NATO Science Series}"), "{bib}");
         assert!(bib.contains("organization = {H5MD}"), "{bib}");
         assert!(bib.contains("address = {Dordrecht}"), "{bib}");
+    }
+
+    #[test]
+    fn thirty_duplicate_keys_have_no_braces_and_reparse() {
+        let entries: Vec<Value> = (0..30)
+            .map(|index| {
+                json!({
+                    "title": format!("Paper {index}"),
+                    "citation_key": "same",
+                    "entry_type": "article",
+                    "date": {"year": 2020},
+                })
+            })
+            .collect();
+        let bib = render_stored_entries(&entries);
+        let parsed = crate::bib_audit::parse_bibtex_raw(&bib).expect("export re-parses");
+        assert_eq!(parsed.len(), 30, "{bib}");
+        let unique: HashSet<_> = parsed.iter().map(|entry| entry.key.as_str()).collect();
+        assert_eq!(unique.len(), 30);
+        for entry in &parsed {
+            assert!(
+                !entry.key.contains('{') && !entry.key.contains('}'),
+                "{}",
+                entry.key
+            );
+        }
+        assert_eq!(parsed[0].key, "same");
+        assert_eq!(parsed[1].key, "samea");
+        assert_eq!(parsed[2].key, "sameb");
+        assert_eq!(parsed[3].key, "samec");
+        assert_eq!(parsed[27].key, "sameaa");
+    }
+
+    #[test]
+    fn enrich_does_not_refill_a_cleared_field() {
+        let stored = json!({
+            "doi": "10.1000/example",
+            "user_fields": ["url", "volume", "issue"],
+            "bib_source": {
+                "key": "sample",
+                "entry_type": "article",
+                "fields": [
+                    ["title", "Kept"],
+                    ["year", "2020"]
+                ]
+            }
+        });
+        let provider = json!({
+            "crossref": {
+                "type": "journal-article",
+                "title": ["Resolver title"],
+                "volume": "9",
+                "issue": "4",
+                "URL": "https://example.org/resolver",
+                "DOI": "10.1000/example",
+                "container-title": ["Journal of Testing"],
+                "issued": {"date-parts": [[2020]]}
+            }
+        });
+        let bib = render_pairs(
+            &[(stored, Some(provider))],
+            &BibOptions {
+                enrich: true,
+                ..BibOptions::default()
+            },
+        );
+        assert!(bib.contains("title = {Kept}"), "{bib}");
+        assert!(bib.contains("journal = {Journal of Testing}"), "{bib}");
+        assert!(!bib.contains("url ="), "{bib}");
+        assert!(!bib.contains("volume ="), "{bib}");
+        assert!(!bib.contains("number ="), "{bib}");
+        assert!(!bib.contains("example.org/resolver"), "{bib}");
     }
 
     #[test]

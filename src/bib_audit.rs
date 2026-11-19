@@ -397,7 +397,8 @@ fn doi_from_fields(fields: &HashMap<String, String>) -> (Option<String>, Option<
 
 pub(crate) fn clean_doi(raw: &str) -> Option<String> {
     let glued: String = raw.split_whitespace().collect();
-    let trimmed = glued.trim().trim_end_matches(['.', ',', ';', ')']);
+    let unescaped = unescape_bib_specials(&glued);
+    let trimmed = unescaped.trim().trim_end_matches(['.', ',', ';', ')']);
     let lower = trimmed.to_ascii_lowercase();
     let rest = strip_doi_prefix(&lower);
     if looks_like_doi_token(rest) {
@@ -405,6 +406,26 @@ pub(crate) fn clean_doi(raw: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Turn `\_`, `\%`, `\#`, and `\&` back into the character. A DOI or URL copied
+/// from an escaped BibTeX field still has to match.
+fn unescape_bib_specials(value: &str) -> String {
+    let mut out = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.peek().copied() {
+                if matches!(next, '&' | '%' | '#' | '_') {
+                    chars.next();
+                    out.push(next);
+                    continue;
+                }
+            }
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn strip_doi_prefix(lower: &str) -> &str {
@@ -426,6 +447,7 @@ fn strip_doi_prefix(lower: &str) -> &str {
 }
 
 fn plain_text(value: &str) -> String {
+    let value = value.strip_prefix('\u{1}').unwrap_or(value);
     let stripped: String = value
         .chars()
         .filter(|ch| *ch != '{' && *ch != '}')
@@ -929,6 +951,12 @@ fn kind_rank(kind: NoticeKind) -> u8 {
     }
 }
 
+enum ValuePart {
+    Text(String),
+    Number(String),
+    Macro(String),
+}
+
 struct Scan<'a> {
     src: &'a str,
     i: usize,
@@ -1090,13 +1118,17 @@ impl<'a> Scan<'a> {
 
     fn read_value(&mut self) -> Result<String, String> {
         let mut parts = Vec::new();
+        let mut bare = false;
         loop {
             self.skip_trivia();
             let part = match self.peek() {
-                Some('{') => self.read_braced()?,
-                Some('"') => self.read_quoted()?,
-                Some(ch) if ch.is_ascii_digit() => self.read_number(),
-                Some(_) => self.read_macro()?,
+                Some('{') => ValuePart::Text(self.read_braced()?),
+                Some('"') => ValuePart::Text(self.read_quoted()?),
+                Some(ch) if ch.is_ascii_digit() => ValuePart::Number(self.read_number()),
+                Some(_) => {
+                    bare = true;
+                    ValuePart::Macro(self.read_macro()?)
+                }
                 None => return Err("BibTeX value ended early".into()),
             };
             parts.push(part);
@@ -1107,7 +1139,26 @@ impl<'a> Scan<'a> {
             }
             break;
         }
-        Ok(parts.concat())
+        if bare {
+            let expr = parts
+                .iter()
+                .map(|part| match part {
+                    ValuePart::Text(text) => format!("{{{text}}}"),
+                    ValuePart::Number(text) | ValuePart::Macro(text) => text.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(" # ");
+            Ok(crate::bib_source::bare_value(&expr))
+        } else {
+            Ok(parts
+                .into_iter()
+                .map(|part| match part {
+                    ValuePart::Text(text) | ValuePart::Number(text) | ValuePart::Macro(text) => {
+                        text
+                    }
+                })
+                .collect())
+        }
     }
 
     fn read_braced(&mut self) -> Result<String, String> {
@@ -1279,7 +1330,7 @@ mod tests {
 
     #[test]
     fn measured_fixture_catalogue_parses_entry_for_entry() {
-        let bib = include_str!("../tests/fixtures/readcon-cpc.bib");
+        let bib = include_str!("../tests/fixtures/sample-bibliography.bib");
         let declared = bib.lines().filter(|line| line.starts_with('@')).count();
         let entries = parse_bibtex(bib).unwrap();
         assert_eq!(

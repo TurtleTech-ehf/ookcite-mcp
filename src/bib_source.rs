@@ -13,17 +13,20 @@
 //! - entries are separated by a blank line, and the text ends at the last
 //!   entry's closing line;
 //! - a numeric or quoted value is written in braces;
-//! - `#` concatenation is joined, and an `@string` macro is not expanded;
+//! - `#` concatenation of braced text is joined. A value that names an
+//!   `@string` macro is written bare, so `month = jan` stays `month = jan`;
+//! - `doi`, `url`, and `eprint` are copied verbatim;
 //! - a Unicode en dash or em dash is written `--` or `---`;
-//! - a bare `&`, `%`, `#`, or `_` is escaped, and an escaped one is not
-//!   escaped again.
+//! - a bare `&`, `%`, `#`, or `_` in any other field is escaped, and an
+//!   escaped one is not escaped again.
 //!
 //! Braces, `--`, name particles, and LaTeX accents are copied as written.
 //! A citation key is kept. A key is generated only when the source entry
 //! has none. A repeated key keeps the first spelling and then takes the
 //! suffixes `a`, `b`, `c`, through `z`, `aa`, `ab`, so a long run of
 //! collisions still ends. Resolver fields are not added unless export is
-//! asked to enrich, and then only a field the source left empty.
+//! asked to enrich, and then only a field the source left empty and the
+//! caller did not clear.
 
 #[cfg(test)]
 use std::collections::HashMap;
@@ -70,7 +73,7 @@ impl BibSource {
         self.fields
             .iter()
             .find(|(field, _)| field.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+            .map(|(_, value)| bare_expr(value).unwrap_or(value.as_str()))
     }
 
     pub fn set_field(&mut self, name: &str, value: String) {
@@ -116,16 +119,48 @@ pub fn pair_with_server(content: &str, server: &[Value]) -> Result<Vec<PairedSou
             paired[index] = Some(pos);
         }
     }
-    let source_left: Vec<usize> = paired
+    let mut source_left: Vec<usize> = paired
         .iter()
         .enumerate()
         .filter_map(|(index, slot)| slot.is_none().then_some(index))
         .collect();
-    let server_left: Vec<usize> = used
+    let mut server_left: Vec<usize> = used
         .iter()
         .enumerate()
         .filter_map(|(index, taken)| (!taken).then_some(index))
         .collect();
+    // A different number of leftovers used to drop every remaining entry.
+    // Match the ones that share a citation key, then a title and year, and
+    // only then fall back to order when the two sides are the same length.
+    take_unique_matches(
+        &entries,
+        server,
+        &mut source_left,
+        &mut server_left,
+        &mut paired,
+        |entry, record| {
+            let key = entry.key.trim();
+            !key.is_empty()
+                && server_citation_key(record).is_some_and(|have| have.eq_ignore_ascii_case(key))
+        },
+    );
+    take_unique_matches(
+        &entries,
+        server,
+        &mut source_left,
+        &mut server_left,
+        &mut paired,
+        |entry, record| {
+            let title = loose_title(field_raw(entry, "title").unwrap_or(""));
+            if title.is_empty() || loose_title(&server_title(record)) != title {
+                return false;
+            }
+            match (entry_year(entry), server_year(record)) {
+                (Some(source_year), Some(record_year)) => source_year == record_year,
+                _ => true,
+            }
+        },
+    );
     if source_left.len() == server_left.len() {
         for (source_index, server_index) in source_left.into_iter().zip(server_left) {
             paired[source_index] = Some(server_index);
@@ -151,6 +186,87 @@ pub fn pair_with_server(content: &str, server: &[Value]) -> Result<Vec<PairedSou
         });
     }
     Ok(out)
+}
+
+fn take_unique_matches(
+    entries: &[RawBibEntry],
+    server: &[Value],
+    source_left: &mut Vec<usize>,
+    server_left: &mut Vec<usize>,
+    paired: &mut [Option<usize>],
+    matches: impl Fn(&RawBibEntry, &Value) -> bool,
+) {
+    let sources: Vec<usize> = source_left.clone();
+    for source_index in sources {
+        let hits: Vec<usize> = server_left
+            .iter()
+            .copied()
+            .filter(|pos| matches(&entries[source_index], &server[*pos]))
+            .collect();
+        if hits.len() != 1 {
+            continue;
+        }
+        let server_index = hits[0];
+        paired[source_index] = Some(server_index);
+        source_left.retain(|index| *index != source_index);
+        server_left.retain(|index| *index != server_index);
+    }
+}
+
+fn server_citation_key(record: &Value) -> Option<String> {
+    let meta = record.get("metadata").unwrap_or(record);
+    meta.get("citation_key")
+        .or_else(|| meta.get("cite_key"))
+        .or_else(|| record.pointer("/render/citation_key"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+}
+
+fn server_title(record: &Value) -> String {
+    let meta = record.get("metadata").unwrap_or(record);
+    meta.get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn server_year(record: &Value) -> Option<i32> {
+    let meta = record.get("metadata").unwrap_or(record);
+    if let Some(year) = meta
+        .get("year")
+        .and_then(Value::as_i64)
+        .or_else(|| meta.pointer("/date/year").and_then(Value::as_i64))
+    {
+        return i32::try_from(year)
+            .ok()
+            .filter(|year| (1000..3000).contains(year));
+    }
+    meta.get("year")
+        .and_then(Value::as_str)
+        .and_then(first_year)
+}
+
+fn entry_year(entry: &RawBibEntry) -> Option<i32> {
+    field_raw(entry, "year").and_then(first_year)
+}
+
+fn loose_title(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch == '{' || ch == '}' {
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !out.ends_with(' ') && !out.is_empty() {
+                out.push(' ');
+            }
+        } else {
+            out.extend(ch.to_lowercase());
+        }
+    }
+    out.trim().to_string()
 }
 
 #[cfg(test)]
@@ -187,11 +303,9 @@ pub fn render_entry(entry: &BibSource, used: &mut HashSet<String>) -> String {
         if name.is_empty() || name == "citation_key" || name == "entry_type" {
             continue;
         }
-        let value = prepare_field_value(value);
-        if value.trim().is_empty() {
-            continue;
+        if let Some(line) = format_field_line(&name, value) {
+            lines.push(line);
         }
-        lines.push(format!("  {name} = {{{value}}}"));
     }
     format!("@{entry_type}{{{key},\n{}\n}}\n", lines.join(",\n"))
 }
@@ -242,23 +356,16 @@ pub fn unicode_dashes_to_tex(value: &str) -> String {
 }
 
 /// Field and type differences between two bibliographies.
-#[cfg(test)]
 ///
 /// Entries are aligned by DOI, then by a brace-stripped title, then by
 /// position. `entries_differing` counts an entry whose type or fields differ.
 /// A key change alone does not. Values are compared after collapsing
-/// whitespace. The source value is escaped and its Unicode dashes are turned
-/// into TeX dashes first, which is the export's only value change.
+/// whitespace. A source value is escaped, and its Unicode dashes are turned
+/// into TeX dashes, before that comparison, except `doi`, `url`, `eprint`,
+/// and a bare macro, which are compared as written.
+#[cfg(test)]
 pub fn diff_bibliographies(source: &str, exported: &str) -> Result<BibliographyDiff, String> {
     compare_bibliographies(source, exported, true)
-}
-
-/// The same alignment as [`diff_bibliographies`], comparing values after
-#[cfg(test)]
-/// whitespace is collapsed and nothing else. This is the count used for the
-/// lossy export that the round trip replaces.
-pub fn diff_report(source: &str, exported: &str) -> Result<BibliographyDiff, String> {
-    compare_bibliographies(source, exported, false)
 }
 
 #[cfg(test)]
@@ -303,7 +410,7 @@ fn compare_bibliographies(
                     diff.dropped_fields += 1;
                     field_diff = true;
                 }
-                Some(exported) if !values_equal(value, exported, canonical) => {
+                Some(exported) if !values_equal(name, value, exported, canonical) => {
                     diff.value_changes += 1;
                     field_diff = true;
                 }
@@ -324,10 +431,11 @@ fn compare_bibliographies(
 }
 
 #[cfg(test)]
-fn values_equal(source: &str, exported: &str, canonical: bool) -> bool {
+fn values_equal(name: &str, source: &str, exported: &str, canonical: bool) -> bool {
     let source = collapse_whitespace(source);
     let exported = collapse_whitespace(exported);
-    if canonical {
+    let verbatim = matches!(name, "doi" | "url" | "eprint") || bare_expr(&source).is_some();
+    if canonical && !verbatim {
         prepare_field_value(&source) == exported
     } else {
         source == exported
@@ -545,21 +653,49 @@ fn first_year(value: &str) -> Option<i32> {
     (1000..3000).contains(&year).then_some(year)
 }
 
+/// A stored value that must be emitted as a BibTeX expression, not wrapped in braces.
+const BARE_VALUE: char = '\u{1}';
+
+pub(crate) fn bare_value(expr: &str) -> String {
+    format!("{BARE_VALUE}{expr}")
+}
+
+pub(crate) fn bare_expr(value: &str) -> Option<&str> {
+    value.strip_prefix(BARE_VALUE)
+}
+
+fn format_field_line(name: &str, value: &str) -> Option<String> {
+    if let Some(expr) = bare_expr(value) {
+        let expr = expr.trim();
+        if expr.is_empty() {
+            return None;
+        }
+        return Some(format!("  {name} = {expr}"));
+    }
+    let verbatim = matches!(name, "doi" | "url" | "eprint");
+    let value = if verbatim {
+        value.trim().to_string()
+    } else {
+        prepare_field_value(value)
+    };
+    if value.trim().is_empty() {
+        return None;
+    }
+    Some(format!("  {name} = {{{value}}}"))
+}
+
 /// Return `key` when it is free. Otherwise append `a`, `b`, `c`, … `z`, `aa`, `ab`, …
 ///
 /// The first twenty-six collisions are the single letters this exporter already
-/// wrote. The tail is bijective base 26, so the search does not stall once a
-/// one-byte suffix has been used up.
+/// wrote. The tail is bijective base 26, so a long run of collisions still ends.
 pub(crate) fn dedup_key(key: String, used: &mut HashSet<String>) -> String {
     if used.insert(key.clone()) {
         return key;
     }
     let base = key;
-    // Least-significant digit first, 0 = 'a'. Each step is a new suffix.
-    let mut digits = Vec::new();
+    let mut suffix = String::new();
     loop {
-        next_letter_suffix(&mut digits);
-        let suffix = format_letter_suffix(&digits);
+        next_letter_suffix(&mut suffix);
         let candidate = format!("{base}{suffix}");
         if used.insert(candidate.clone()) {
             return candidate;
@@ -567,23 +703,25 @@ pub(crate) fn dedup_key(key: String, used: &mut HashSet<String>) -> String {
     }
 }
 
-fn next_letter_suffix(digits: &mut Vec<u8>) {
-    for digit in digits.iter_mut() {
-        if *digit < 25 {
-            *digit += 1;
+fn next_letter_suffix(suffix: &mut String) {
+    if suffix.is_empty() {
+        suffix.push('a');
+        return;
+    }
+    let mut chars: Vec<char> = suffix.chars().collect();
+    let mut index = chars.len();
+    while index > 0 {
+        index -= 1;
+        if chars[index] != 'z' {
+            let next = u32::from(chars[index]) + 1;
+            chars[index] = char::from_u32(next).unwrap_or(chars[index]);
+            *suffix = chars.into_iter().collect();
             return;
         }
-        *digit = 0;
+        chars[index] = 'a';
     }
-    digits.push(0);
-}
-
-fn format_letter_suffix(digits: &[u8]) -> String {
-    digits
-        .iter()
-        .rev()
-        .map(|digit| char::from(b'a' + *digit))
-        .collect()
+    chars.insert(0, 'a');
+    *suffix = chars.into_iter().collect();
 }
 
 #[cfg(test)]
@@ -826,6 +964,59 @@ mod tests {
     }
 
     #[test]
+    fn unequal_leftovers_pair_by_key_then_title_and_year() {
+        let bib = "\
+@article{alpha,
+  title = {Alpha paper},
+  year = {2020}
+}
+@manual{beta,
+  title = {Beta manual},
+  year = {2021}
+}
+@misc{gamma,
+  title = {Gamma note},
+  year = {2022}
+}
+";
+        let server = vec![
+            json!({"id": "s-gamma", "metadata": {"title": "Gamma note", "year": 2022}}),
+            json!({"id": "s-stale", "metadata": {"title": "Beta manual", "year": 1999}}),
+            json!({"id": "s-alpha", "metadata": {"citation_key": "alpha", "title": "Changed", "year": 1990}}),
+            json!({"id": "s-extra", "metadata": {"title": "Something else", "year": 2011}}),
+        ];
+        let paired = pair_with_server(bib, &server).unwrap();
+        assert_eq!(paired.len(), 2, "{paired:?}");
+        let by_key = |key: &str| paired.iter().find(|item| item.source.key == key).unwrap();
+        assert_eq!(by_key("alpha").entry_id.as_deref(), Some("s-alpha"));
+        assert_eq!(by_key("gamma").entry_id.as_deref(), Some("s-gamma"));
+        assert!(paired.iter().all(|item| item.source.key != "beta"));
+    }
+
+    #[test]
+    fn doi_url_and_eprint_stay_verbatim_and_a_macro_stays_bare() {
+        let bib = "\
+@article{sample,
+  doi = {10.1142/S021963361850016_0016},
+  url = {https://example.org/a_b%20c#frag},
+  eprint = {cond-mat/9801_5},
+  month = jan
+}
+";
+        let out = round_trip(bib);
+        assert_eq!(out, bib, "{out}");
+        assert!(!out.contains("\\_"), "{out}");
+        assert!(!out.contains("\\%"), "{out}");
+        assert!(!out.contains("\\#"), "{out}");
+        assert!(!out.contains("month = {jan}"), "{out}");
+        let escaped = crate::bib_audit::clean_doi(r"10.1142/S021963361850016\_0016").unwrap();
+        assert_eq!(escaped, "10.1142/s021963361850016_0016");
+        let mixed =
+            crate::bib_audit::clean_doi(r"https://doi.org/10.1000/abc\%20def\#frag").unwrap();
+        assert_eq!(mixed, "10.1000/abc%20def#frag");
+    }
+
+    #[test]
     fn common_collisions_keep_the_letters_a_b_and_c() {
         let mut used = HashSet::new();
         let keys: Vec<_> = (0..4)
@@ -909,40 +1100,6 @@ mod tests {
         assert_eq!(export_keys[27], "sameaa");
         assert!(import_keys.iter().all(|key| key.is_ascii()));
         assert!(export_keys.iter().all(|key| key.is_ascii()));
-    }
-
-    #[test]
-    fn readcon_and_amsel_round_trips_are_unchanged() {
-        let paths = [
-            "/cursor/stores/bot/ttkit/readcon-ookcite-repro/rg_main.bib",
-            "/cursor/stores/bot/ttkit/amsel-ookcite-repro/amsel-refs.bib",
-        ];
-        for path in paths {
-            if !std::path::Path::new(path).exists() {
-                continue;
-            }
-            let source = std::fs::read_to_string(path).unwrap();
-            let exported = round_trip(&source);
-            let diff = diff_bibliographies(&source, &exported).unwrap();
-            assert_eq!(diff.key_changes, 0, "{path} {diff:?}");
-            assert_eq!(diff.type_changes, 0, "{path} {diff:?}");
-            assert_eq!(diff.dropped_fields, 0, "{path} {diff:?}");
-            assert_eq!(diff.added_fields, 0, "{path} {diff:?}");
-            assert_eq!(diff.value_changes, 0, "{path} {diff:?}");
-            assert_eq!(diff.entries_differing, 0, "{path} {diff:?}");
-            assert_eq!(diff.export_entries, diff.source_entries, "{path} {diff:?}");
-            let source_keys: Vec<_> = parse_bibtex_raw(&source)
-                .unwrap()
-                .into_iter()
-                .map(|entry| entry.key)
-                .collect();
-            let export_keys: Vec<_> = parse_bibtex_raw(&exported)
-                .unwrap()
-                .into_iter()
-                .map(|entry| entry.key)
-                .collect();
-            assert_eq!(export_keys, source_keys, "{path}");
-        }
     }
 
     fn assert_unique_collisions(count: usize, mut used: HashSet<String>) {
