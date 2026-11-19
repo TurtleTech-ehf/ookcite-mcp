@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file. See [conven
 - (**bibtex**) keep an imported bibliography's keys, types, and fields on export
 - (**bibtex**) disambiguate a run of identical citation keys without stalling
 - (**bibtex**) copy doi, url, and eprint verbatim and keep an @string macro bare
+- (**bibtex**) use a doi url when the doi field is malformed
 - (**bibtex**) copy a stored eprint verbatim on the metadata export path
 - (**bibtex**) stop citation-key suffixes at zz and report when none remain
 - (**bibtex**) keep a source snapshot when an imported entry does not pair

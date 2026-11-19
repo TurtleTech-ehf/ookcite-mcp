@@ -668,9 +668,14 @@ fn to_source(
     })
 }
 
+/// The first valid DOI among the `doi` field and then the `url` field.
 fn source_doi(entry: &RawBibEntry) -> Option<String> {
-    let raw = field_raw(entry, "doi").or_else(|| field_raw(entry, "url"))?;
-    crate::bib_audit::clean_doi(raw)
+    for name in ["doi", "url"] {
+        if let Some(doi) = field_raw(entry, name).and_then(crate::bib_audit::clean_doi) {
+            return Some(doi);
+        }
+    }
+    None
 }
 
 fn server_doi(entry: &Value) -> Option<String> {
@@ -1268,6 +1273,59 @@ mod tests {
         assert_eq!(by_key("noyear").source.field("year"), Some("2014"));
         assert_eq!(by_key("blank").source.field("year"), Some("2013"));
         assert_eq!(by_key("blankid").source.field("eprint"), Some("arxiv:"));
+    }
+
+    #[test]
+    fn a_malformed_doi_uses_the_doi_in_the_url() {
+        let bib = "\
+@article{fromurl,
+  title = {From the url},
+  year = {2020},
+  doi = {not-a-doi},
+  url = {https://doi.org/10.1000/from-url}
+}
+@article{fromfield,
+  title = {From the field},
+  year = {2021},
+  doi = {10.1000/From-Field},
+  url = {https://doi.org/10.1000/other}
+}
+";
+        let server = vec![
+            json!({"id": "s-field", "metadata": {"doi": "10.1000/from-field", "title": "Elsewhere", "year": 1991}}),
+            json!({"id": "s-url", "metadata": {"doi": "10.1000/from-url", "title": "Elsewhere", "year": 1990}}),
+        ];
+        let paired = pair_with_server(bib, &server).unwrap();
+        assert_eq!(paired.len(), 2, "{paired:?}");
+        let by_key = |key: &str| paired.iter().find(|item| item.source.key == key).unwrap();
+        assert_eq!(by_key("fromurl").entry_id.as_deref(), Some("s-url"));
+        assert_eq!(by_key("fromurl").doi.as_deref(), Some("10.1000/from-url"));
+        assert_eq!(by_key("fromfield").entry_id.as_deref(), Some("s-field"));
+        assert_eq!(
+            by_key("fromfield").doi.as_deref(),
+            Some("10.1000/from-field")
+        );
+    }
+
+    #[test]
+    fn an_invalid_doi_and_url_leave_no_doi() {
+        let bib = "\
+@misc{bad,
+  title = {No identifier},
+  year = {2017},
+  doi = {not-a-doi},
+  url = {https://example.org/page}
+}
+";
+        let paired = pair_with_server(bib, &[]).unwrap();
+        assert_eq!(paired.len(), 1, "{paired:?}");
+        assert_eq!(paired[0].entry_id, None);
+        assert_eq!(paired[0].doi, None);
+        assert_eq!(paired[0].source.field("doi"), Some("not-a-doi"));
+        assert_eq!(
+            paired[0].source.field("url"),
+            Some("https://example.org/page")
+        );
     }
 
     #[test]
