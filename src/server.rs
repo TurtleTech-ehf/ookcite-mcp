@@ -9369,6 +9369,7 @@ mod tests {
                         "title": format!("Server title {index}"),
                         "entry_type": entry_type,
                         "authors": [{"family": "Wrong", "given": "Name"}],
+                        "citation_key": entry.key,
                         "doi": doi,
                         "issn": "1234-5678",
                         "url": "https://zenodo.org/records/9",

@@ -101,10 +101,11 @@ pub fn source_from_meta(meta: &Value) -> Option<BibSource> {
 
 /// Parse a bibliography and attach each entry to the server record it became.
 ///
-/// A DOI matches first. Entries left over match in order when the two sides
-/// have the same number of leftovers, which is how a server that dropped the
-/// DOI of a web page is still tied to the source entry. An entry that matches
-/// nothing is still returned, with no entry id, so its source snapshot stays.
+/// A normalized DOI matches first. What is left matches one record by arXiv or
+/// eprint id, then by ISBN, then by the original citation key. A title and year
+/// match only when both are present and that pair hits one record on each side.
+/// An entry that matches nothing is still returned, with no entry id, so its
+/// source snapshot stays.
 pub fn pair_with_server(
     content: &str,
     server: &[Value],
@@ -133,9 +134,23 @@ pub fn pair_with_server(
         .enumerate()
         .filter_map(|(index, taken)| (!taken).then_some(index))
         .collect();
-    // A different number of leftovers used to drop every remaining entry.
-    // Match the ones that share a citation key, then a title and year, and
-    // only then fall back to order when the two sides are the same length.
+    // Identifiers before a title. A match has to be unique on both sides.
+    take_unique_matches(
+        &entries,
+        server,
+        &mut source_left,
+        &mut server_left,
+        &mut paired,
+        |entry, record| same_id(source_eprint(entry), server_eprint(record)),
+    );
+    take_unique_matches(
+        &entries,
+        server,
+        &mut source_left,
+        &mut server_left,
+        &mut paired,
+        |entry, record| same_id(source_isbn(entry), server_isbn(record)),
+    );
     take_unique_matches(
         &entries,
         server,
@@ -161,15 +176,10 @@ pub fn pair_with_server(
             }
             match (entry_year(entry), server_year(record)) {
                 (Some(source_year), Some(record_year)) => source_year == record_year,
-                _ => true,
+                _ => false,
             }
         },
     );
-    if source_left.len() == server_left.len() {
-        for (source_index, server_index) in source_left.into_iter().zip(server_left) {
-            paired[source_index] = Some(server_index);
-        }
-    }
     let mut seen_keys = HashSet::new();
     let mut out = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
@@ -206,20 +216,109 @@ fn take_unique_matches(
     matches: impl Fn(&RawBibEntry, &Value) -> bool,
 ) {
     let sources: Vec<usize> = source_left.clone();
-    for source_index in sources {
-        let hits: Vec<usize> = server_left
+    let servers: Vec<usize> = server_left.clone();
+    let hit_of: Vec<(usize, Option<usize>)> = sources
+        .iter()
+        .copied()
+        .map(|source_index| {
+            (
+                source_index,
+                single_hit(&entries[source_index], server, &servers, &matches),
+            )
+        })
+        .collect();
+    for (source_index, hit) in &hit_of {
+        let Some(server_index) = *hit else {
+            continue;
+        };
+        let claims = hit_of
             .iter()
-            .copied()
-            .filter(|pos| matches(&entries[source_index], &server[*pos]))
-            .collect();
-        if hits.len() != 1 {
+            .filter(|(_, other)| *other == Some(server_index))
+            .count();
+        if claims != 1 {
             continue;
         }
-        let server_index = hits[0];
-        paired[source_index] = Some(server_index);
-        source_left.retain(|index| *index != source_index);
+        paired[*source_index] = Some(server_index);
+        source_left.retain(|index| *index != *source_index);
         server_left.retain(|index| *index != server_index);
     }
+}
+
+/// The one server record `entry` matches, or nothing when it matches several.
+fn single_hit(
+    entry: &RawBibEntry,
+    server: &[Value],
+    servers: &[usize],
+    matches: &impl Fn(&RawBibEntry, &Value) -> bool,
+) -> Option<usize> {
+    let mut found = None;
+    for pos in servers {
+        if !matches(entry, &server[*pos]) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(*pos);
+    }
+    found
+}
+
+fn same_id(left: Option<String>, right: Option<String>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn source_eprint(entry: &RawBibEntry) -> Option<String> {
+    field_raw(entry, "eprint")
+        .or_else(|| field_raw(entry, "arxiv"))
+        .and_then(normalize_eprint)
+}
+
+fn server_eprint(record: &Value) -> Option<String> {
+    meta_str(record, "eprint")
+        .or_else(|| meta_str(record, "arxiv"))
+        .and_then(normalize_eprint)
+}
+
+fn normalize_eprint(raw: &str) -> Option<String> {
+    let lower = raw.to_ascii_lowercase();
+    let id = lower.strip_prefix("arxiv:").unwrap_or(lower.as_str());
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+fn source_isbn(entry: &RawBibEntry) -> Option<String> {
+    field_raw(entry, "isbn").and_then(normalize_isbn)
+}
+
+fn server_isbn(record: &Value) -> Option<String> {
+    meta_str(record, "isbn").and_then(normalize_isbn)
+}
+
+fn normalize_isbn(raw: &str) -> Option<String> {
+    let folded: String = raw
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_uppercase())
+        .collect();
+    if folded.is_empty() {
+        None
+    } else {
+        Some(folded)
+    }
+}
+
+fn meta_str<'a>(record: &'a Value, name: &str) -> Option<&'a str> {
+    let meta = record.get("metadata").unwrap_or(record);
+    meta.get(name)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
 }
 
 fn server_citation_key(record: &Value) -> Option<String> {
@@ -1018,7 +1117,7 @@ mod tests {
     }
 
     #[test]
-    fn pairing_uses_the_doi_then_the_leftover_order() {
+    fn pairing_uses_the_doi_and_keeps_an_unmatched_page() {
         let bib = "\
 @article{kept,
   title = {Real title},
@@ -1038,8 +1137,137 @@ mod tests {
         let by_key = |key: &str| paired.iter().find(|item| item.source.key == key).unwrap();
         assert_eq!(by_key("kept").entry_id.as_deref(), Some("e1"));
         assert_eq!(by_key("kept").source.field("title"), Some("Real title"));
-        assert_eq!(by_key("web").entry_id.as_deref(), Some("e2"));
-        assert_eq!(by_key("web").source.entry_type, "manual");
+        let web = by_key("web");
+        assert_eq!(web.entry_id, None);
+        assert_eq!(web.doi, None);
+        assert_eq!(web.source.entry_type, "manual");
+        assert_eq!(web.source.field("title"), Some("A page"));
+        assert_eq!(web.source.field("url"), Some("https://example.org/page"));
+    }
+
+    #[test]
+    fn pairing_follows_identifiers_when_the_server_order_differs() {
+        let bib = "\
+@article{doiPaper,
+  title = {Doi title},
+  year = {2020},
+  doi = {10.1000/ABC},
+  eprint = {1111.11111}
+}
+@misc{preprint,
+  title = {Preprint title},
+  year = {2019},
+  eprint = {arXiv:cond-mat/9801005},
+  arxiv = {1901.99999}
+}
+@book{book,
+  title = {Book title},
+  year = {2018},
+  isbn = {0-8044-2957-X}
+}
+@misc{note2021,
+  title = {Local note},
+  year = {2017}
+}
+@manual{web,
+  title = {A page},
+  year = {2016},
+  url = {https://example.org/page}
+}
+";
+        let server = vec![
+            json!({"id": "s-note", "metadata": {"citation_key": "note2021", "title": "Server note", "year": 1990}}),
+            json!({"id": "s-other", "metadata": {"title": "Resolver page", "year": 2001, "eprint": "1111.11111"}}),
+            json!({"id": "s-book", "isbn": "080442957x", "title": "Other book", "year": 1991}),
+            json!({
+                "id": "s-pre",
+                "metadata": {
+                    "eprint": "cond-mat/9801005",
+                    "arxiv": "1901.99999",
+                    "title": "Other preprint",
+                    "year": 1992
+                }
+            }),
+            json!({"id": "s-doi", "metadata": {"doi": "10.1000/abc", "eprint": "9999.99999", "title": "Other article", "year": 1993}}),
+        ];
+        let paired = pair_with_server(bib, &server).unwrap();
+        assert_eq!(paired.len(), 5, "{paired:?}");
+        let by_key = |key: &str| paired.iter().find(|item| item.source.key == key).unwrap();
+        assert_eq!(by_key("doiPaper").entry_id.as_deref(), Some("s-doi"));
+        assert_eq!(by_key("preprint").entry_id.as_deref(), Some("s-pre"));
+        assert_eq!(by_key("book").entry_id.as_deref(), Some("s-book"));
+        assert_eq!(by_key("note2021").entry_id.as_deref(), Some("s-note"));
+        let web = by_key("web");
+        assert_eq!(web.entry_id, None);
+        assert_eq!(web.source.field("title"), Some("A page"));
+        assert_eq!(web.source.field("url"), Some("https://example.org/page"));
+    }
+
+    #[test]
+    fn duplicate_or_ambiguous_matches_stay_unpaired() {
+        let bib = "\
+@article{unique,
+  title = {Unique preprint},
+  year = {2018},
+  arxiv = {1801.00001}
+}
+@book{copya,
+  title = {Copy A},
+  year = {2016},
+  isbn = {9780262033848}
+}
+@book{copyb,
+  title = {Copy B},
+  year = {2016},
+  isbn = {978-026-203-3848}
+}
+@article{ambiguous,
+  title = {Same title},
+  year = {2015}
+}
+@article{noyear,
+  title = {Missing year},
+  year = {2014}
+}
+@misc{blank,
+  year = {2013}
+}
+@misc{blankid,
+  title = {Blank id},
+  year = {2011},
+  eprint = {arxiv:},
+  isbn = {---}
+}
+";
+        let server = vec![
+            json!({"id": "s-unique", "metadata": {"arxiv": "1801.00001", "title": "Elsewhere", "year": 2000}}),
+            json!({"id": "s-isbn", "metadata": {"isbn": "9780262033848", "title": "Elsewhere", "year": 2000}}),
+            json!({"id": "s-amb1", "metadata": {"title": "Same title", "year": 2015}}),
+            json!({"id": "s-amb2", "metadata": {"title": "Same title", "year": 2015}}),
+            json!({"id": "s-noyear", "metadata": {"title": "Missing year"}}),
+            json!({"id": "s-blank", "metadata": {"year": 2013}}),
+            json!({"id": "s-blankid", "metadata": {"eprint": "arxiv:", "isbn": "---", "title": "Not blank", "year": 2001}}),
+        ];
+        let paired = pair_with_server(bib, &server).unwrap();
+        assert_eq!(paired.len(), 7, "{paired:?}");
+        let by_key = |key: &str| paired.iter().find(|item| item.source.key == key).unwrap();
+        assert_eq!(by_key("unique").entry_id.as_deref(), Some("s-unique"));
+        for key in ["copya", "copyb", "ambiguous", "noyear", "blank", "blankid"] {
+            let item = by_key(key);
+            assert_eq!(item.entry_id, None, "{key}: {item:?}");
+        }
+        assert_eq!(by_key("copya").source.field("title"), Some("Copy A"));
+        assert_eq!(
+            by_key("copyb").source.field("isbn"),
+            Some("978-026-203-3848")
+        );
+        assert_eq!(
+            by_key("ambiguous").source.field("title"),
+            Some("Same title")
+        );
+        assert_eq!(by_key("noyear").source.field("year"), Some("2014"));
+        assert_eq!(by_key("blank").source.field("year"), Some("2013"));
+        assert_eq!(by_key("blankid").source.field("eprint"), Some("arxiv:"));
     }
 
     #[test]

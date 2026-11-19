@@ -10,7 +10,7 @@ All notable changes to this project will be documented in this file. See [conven
 - (**bibtex**) copy a stored eprint verbatim on the metadata export path
 - (**bibtex**) stop citation-key suffixes at zz and report when none remain
 - (**bibtex**) keep a source snapshot when an imported entry does not pair
-- (**bibtex**) pair leftover entries by citation key, title, and year
+- (**bibtex**) pair imported entries by doi, eprint, isbn, citation key, or a unique title and year
 - (**bibtex**) keep both sources when two entries share a DOI
 - (**bibtex**) do not refill a cleared field when enrich is set
 - (**bibtex**) keep a von particle on a First von Last name
