@@ -27,3 +27,14 @@
 12. Store the full Crossref author list. The Frontiers record `10.3389/fchem.2026.1807063` has three authors (Goswami, Gunde, Jónsson), not one.
 
 13. Protect acronyms and internal capitals in titles with braces. Omit `url` when it is only the DOI URL (`doi.org`, `dx.doi.org`, `doi.org/doi/`, or `zenodo.org/doi/` of the same DOI). Keep a different landing-page URL.
+
+14. Persist an imported bibliography entry as it was supplied, and return those fields on `GET /api/v1/collections/{id}`. A replacement `PUT` must accept every field below and must not answer 400 because one of them is present. A missing key on a replacement deletes that key. Do not add a field the import did not carry (`issn`, `url`, `publisher`, `abstract`, `affiliation`), and do not replace a URL the import did carry.
+
+    - `citation_key`, exactly as imported. Do not generate a new key when one was supplied. Generate one only when the source entry has no key.
+    - `entry_type` as supplied: `article`, `book`, `booklet`, `conference`, `inbook`, `incollection`, `inproceedings`, `manual`, `mastersthesis`, `misc`, `phdthesis`, `proceedings`, `techreport`, `unpublished`, `software`, `patent`, `online`, `dataset`. Do not map `manual` or `techreport` to `misc`, `incollection` to `inbook`, or `misc` to `software`.
+    - `title`, raw: brace groups, `--`, and LaTeX commands stay as written.
+    - `authors` and `editors`, each person as `family`, `given`, `prefix` (von), `suffix` (jr), and `literal`. A name in braces is one literal organisation. Do not move `De` or `Le` after the given name. Do not shorten a given name to initials. Do not replace a literal with resolver person names. Do not turn `{\o}`, `\'{e}`, or `{\v{z}}` into a Unicode letter or drop the accent.
+    - `journal`, `booktitle`, `chapter`, `series`, `volume`, `number` (the issue or the report number; keep `--`), `pages` (keep a source page range, including an article number and a single hyphen), `publisher` (keep `\&`), `address`, `edition`, `organization`, `institution`, `type` (the BibTeX `type` field, distinct from `entry_type`), `howpublished`, `note`, `version`, `school`, `month`, `isbn`, `doi`, `url`, `year`.
+    - `user_fields`, the keys the caller set.
+
+    A resolver value may fill a field only when that field is empty in the source and the client asked for enrichment. It must not replace `volume`, `number`, `pages`, or any other non-empty source value, and it must not change the key or the entry type.

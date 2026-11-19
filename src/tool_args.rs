@@ -192,6 +192,10 @@ pub struct ExportCollectionArgs {
     /// Lay the local override file of this collection over the server record (default true)
     #[serde(default = "default_true")]
     pub local_overrides: bool,
+    /// Fill empty fields of an imported source entry from the resolver. Default off.
+    /// A field the source already has is never replaced.
+    #[serde(default)]
+    pub enrich: bool,
 }
 pub fn default_eid_as() -> String {
     "eid".into()

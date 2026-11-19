@@ -717,7 +717,8 @@ impl Server {
                 .map(str::trim)
                 .filter(|doi| !doi.is_empty())
                 .map(str::to_string);
-            if self.providers.is_none() {
+            let has_source = crate::bib_source::source_from_meta(&stored).is_some();
+            if self.providers.is_none() || (has_source && !options.enrich) {
                 pairs.push((stored, None));
                 continue;
             }
@@ -1914,7 +1915,7 @@ impl Server {
 
     #[tool(
         name = "export_collection",
-        description = "Export a collection as BibTeX (format=bib, default) or CSL bibliography text (format=csl, or pass a CSL style id such as apa/ieee). BibTeX is rendered here from Crossref or DataCite fields: proceedings get a booktitle, types and numbers follow the provider, a stored citation_key is kept, and a DOI is not repeated as a URL. Local overrides recorded by update_entry_metadata are applied first when this server keeps them (stdio, or HTTP with auth=none); local_overrides=false skips them, and an unreadable override file is skipped with a warning comment. software_entry=misc writes @misc with howpublished instead of @software. eid_as=pages or eid_as=note places an article number where styles that ignore eid, such as elsarticle-num, print it. Call this when the user wants the collection as a file or as formatted copy-out.",
+        description = "Export a collection as BibTeX (format=bib, default) or CSL bibliography text (format=csl, or pass a CSL style id such as apa/ieee). An imported bibliography is exported from the source entry kept on this machine: the citation key, entry type, braces, name particles, LaTeX accents, and every source field are kept, and a resolver value does not replace them. enrich=true fills only a field the source left empty. Without a source entry, BibTeX is rendered here from Crossref or DataCite fields: proceedings get a booktitle, types and numbers follow the provider, a stored citation_key is kept, and a DOI is not repeated as a URL. Local overrides recorded by update_entry_metadata are applied first when this server keeps them (stdio, or HTTP with auth=none); local_overrides=false skips them, and an unreadable override file is skipped with a warning comment. software_entry=misc writes @misc with howpublished instead of @software for a provider software record. eid_as=pages or eid_as=note places an article number where styles that ignore eid, such as elsarticle-num, print it. Call this when the user wants the collection as a file or as formatted copy-out.",
         annotations(
             title = "Export collection bibliography",
             read_only_hint = true,
@@ -1956,7 +1957,8 @@ impl Server {
                         overrides::Loaded::Skipped(note) => warning = note,
                     }
                 }
-                let options = BibOptions::from_args(&args.software_entry, &args.eid_as);
+                let mut options = BibOptions::from_args(&args.software_entry, &args.eid_as);
+                options.enrich = args.enrich;
                 let bib = self.render_collection_bib(&entries, options).await;
                 match warning {
                     // A leading % line is a comment to BibTeX.
@@ -2529,7 +2531,7 @@ impl Server {
 
     #[tool(
         name = "import_bibliography",
-        description = "Import bibliography content. Accepts BibTeX, RIS, or a pasted plaintext citation list (format=plaintext or auto). A small plaintext paste (within the anonymous batch cap) returns .bib with no API key and no collection. Passing collection still saves resolved entries when a key is set. BibTeX/RIS file import into a collection requires a key. Prefer this over adding entries one at a time.",
+        description = "Import bibliography content. Accepts BibTeX, RIS, or a pasted plaintext citation list (format=plaintext or auto). A small plaintext paste (within the anonymous batch cap) returns .bib with no API key and no collection. Passing collection still saves resolved entries when a key is set. BibTeX/RIS file import into a collection requires a key. A BibTeX import on a single-user server (stdio, or HTTP with auth=none) keeps each source entry locally so export_collection can print it unchanged. A shared bearer or OAuth server does not keep that copy. Prefer this over adding entries one at a time.",
         annotations(
             title = "Import bibliography",
             read_only_hint = false,
@@ -2564,6 +2566,7 @@ impl Server {
         } else {
             "import.bib"
         };
+        let source_text = (kind == BibliographyKind::Bibtex).then(|| args.content.clone());
         let part = match reqwest::multipart::Part::text(args.content)
             .file_name(filename.to_string())
             .mime_str("text/plain")
@@ -2583,11 +2586,81 @@ impl Server {
                 let data: serde_json::Value = r.json().await.unwrap_or_default();
                 let added = data["added"].as_u64().unwrap_or(0);
                 let dupes = data["duplicates_skipped"].as_u64().unwrap_or(0);
-                format!("Imported into '{collection}': {added} added, {dupes} duplicates skipped")
+                let message = format!(
+                    "Imported into '{collection}': {added} added, {dupes} duplicates skipped"
+                );
+                if let Some(text) = source_text {
+                    self.keep_import_source(collection, &col_id, &text, message)
+                        .await
+                } else {
+                    message
+                }
             }
             Ok(r) if r.status().as_u16() == 401 => inbound_auth::auth_required_text().into(),
             Ok(r) => failure_text(r, "Import failed").await,
             Err(e) => format!("Import failed: {e}"),
+        }
+    }
+
+    /// Keep the imported BibTeX on a single-user server so export can print it.
+    async fn keep_import_source(
+        &self,
+        collection: &str,
+        col_id: &str,
+        content: &str,
+        mut message: String,
+    ) -> String {
+        match &self.overrides {
+            overrides::OverrideStore::Disabled => {
+                message.push(' ');
+                message.push_str(overrides::SHARED_EXPORT_LOSS);
+                message
+            }
+            overrides::OverrideStore::Unavailable => {
+                message.push(' ');
+                message.push_str(overrides::UNAVAILABLE_MESSAGE);
+                message.push_str(" Source entries were not kept.");
+                message
+            }
+            overrides::OverrideStore::Enabled(_) => {
+                let parsed = match crate::bib_audit::parse_bibtex_raw(content) {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        message.push_str(&format!(" Source entries were not kept: {error}."));
+                        return message;
+                    }
+                };
+                if parsed.is_empty() {
+                    return message;
+                }
+                let server = match self.fetch_collection_entries(col_id).await {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        message.push_str(&format!(" Source entries were not kept: {error}."));
+                        return message;
+                    }
+                };
+                let paired = match crate::bib_source::pair_with_server(content, &server) {
+                    Ok(pairs) => pairs,
+                    Err(error) => {
+                        message.push_str(&format!(" Source entries were not kept: {error}."));
+                        return message;
+                    }
+                };
+                match self.overrides.record_sources(collection, &paired) {
+                    Ok(()) => {
+                        message.push_str(&format!(
+                            " Kept {} source entries for export.",
+                            paired.len()
+                        ));
+                        message
+                    }
+                    Err(error) => {
+                        message.push_str(&format!(" Source entries were not kept: {error}."));
+                        message
+                    }
+                }
+            }
         }
     }
 
@@ -4880,6 +4953,7 @@ mod tests {
         assert_eq!(args.format, "bib");
         assert_eq!(args.style, "apa");
         assert_eq!(args.software_entry, "software");
+        assert!(!args.enrich);
     }
 
     #[test]
@@ -5501,6 +5575,7 @@ mod tests {
                 software_entry: "software".into(),
                 eid_as: "eid".into(),
                 local_overrides: true,
+                enrich: false,
             }))
             .await;
         assert!(
@@ -5580,6 +5655,7 @@ mod tests {
                 software_entry: "software".into(),
                 eid_as: "eid".into(),
                 local_overrides: true,
+                enrich: false,
             }))
             .await;
         assert!(result.contains("@inproceedings{"), "{result}");
@@ -5640,6 +5716,7 @@ mod tests {
                 software_entry: "software".into(),
                 eid_as: "eid".into(),
                 local_overrides: true,
+                enrich: false,
             }))
             .await;
         assert!(result.contains("UNREGISTERED 10.2307/4615733"), "{result}");
@@ -8617,6 +8694,7 @@ mod tests {
             software_entry: "software".into(),
             eid_as: "eid".into(),
             local_overrides: true,
+            enrich: false,
         }
     }
 
@@ -9246,5 +9324,286 @@ mod tests {
             .await;
         assert!(result.contains("Status: ok"), "{result}");
         assert!(!result.contains("Collections:"), "{result}");
+    }
+
+    fn lossy_server_entries(bib: &str) -> Vec<serde_json::Value> {
+        let entries = crate::bib_audit::parse_bibtex_raw(bib).expect("fixture parses");
+        entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let doi = entry
+                    .fields
+                    .iter()
+                    .find(|(name, _)| name == "doi")
+                    .map(|(_, value)| value.clone());
+                let entry_type = match entry.entry_type.as_str() {
+                    "manual" | "techreport" | "phdthesis" => "misc",
+                    "incollection" => "inbook",
+                    "misc" | "online" => "software",
+                    "software" => "article",
+                    other => other,
+                };
+                serde_json::json!({
+                    "id": format!("e{index}"),
+                    "render": {"citation_key": format!("gen{index}ServerKey")},
+                    "metadata": {
+                        "title": format!("Server title {index}"),
+                        "entry_type": entry_type,
+                        "authors": [{"family": "Wrong", "given": "Name"}],
+                        "doi": doi,
+                        "issn": "1234-5678",
+                        "url": "https://zenodo.org/records/9",
+                        "publisher": "Resolver Press",
+                        "abstract": "from the resolver",
+                        "affiliation": "Resolver Lab",
+                        "journal": "Resolver Journal"
+                    }
+                })
+            })
+            .collect()
+    }
+
+    async fn import_and_export(collection: &str, bib: &str) -> String {
+        let mock = MockServer::start().await;
+        let col_id = "col-rt";
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": col_id, "name": collection}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/collections/{col_id}/import")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "added": 1,
+                "duplicates_skipped": 0
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/collections/{col_id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": col_id,
+                "name": collection,
+                "entries": lossy_server_entries(bib)
+            })))
+            .mount(&mock)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let server = test_server(&mock.uri())
+            .with_overrides(overrides::OverrideStore::Enabled(dir.path().to_path_buf()));
+        let imported = server
+            .import_bibliography(Parameters(ImportBibliographyArgs {
+                collection: Some(collection.into()),
+                content: bib.into(),
+                format: "bibtex".into(),
+                style: None,
+            }))
+            .await;
+        let parsed = crate::bib_audit::parse_bibtex_raw(bib).unwrap();
+        assert!(
+            imported.contains(&format!("Kept {} source entries for export.", parsed.len())),
+            "{imported}"
+        );
+        server
+            .export_collection(Parameters(ExportCollectionArgs {
+                collection: collection.into(),
+                format: "bib".into(),
+                style: "apa".into(),
+                software_entry: "misc".into(),
+                eid_as: "pages".into(),
+                local_overrides: true,
+                enrich: false,
+            }))
+            .await
+    }
+
+    fn assert_round_trip(source: &str, exported: &str) {
+        let diff = crate::bib_source::diff_bibliographies(source, exported).unwrap();
+        assert_eq!(diff.key_changes, 0, "{diff:?}\n{exported}");
+        assert_eq!(diff.type_changes, 0, "{diff:?}");
+        assert_eq!(diff.dropped_fields, 0, "{diff:?}");
+        assert_eq!(diff.added_fields, 0, "{diff:?}");
+        assert_eq!(diff.value_changes, 0, "{diff:?}");
+        assert_eq!(diff.entries_differing, 0, "{diff:?}");
+        assert_eq!(diff.export_entries, diff.source_entries, "{diff:?}");
+    }
+
+    fn bibtex_counts(bib: &str, style: &str) -> Option<(usize, usize)> {
+        if std::process::Command::new("bibtex")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return None;
+        }
+        let dir = tempfile::tempdir().ok()?;
+        std::fs::write(dir.path().join("refs.bib"), bib).ok()?;
+        let aux = format!("\\citation{{*}}\n\\bibstyle{{{style}}}\n\\bibdata{{refs}}\n");
+        std::fs::write(dir.path().join("paper.aux"), aux).ok()?;
+        let output = std::process::Command::new("bibtex")
+            .arg("paper")
+            .current_dir(dir.path())
+            .output()
+            .ok()?;
+        let blg = std::fs::read_to_string(dir.path().join("paper.blg")).unwrap_or_default();
+        let log = format!(
+            "{}\n{}\n{blg}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Some((
+            bibtex_summary(&log, "error"),
+            bibtex_summary(&log, "warning"),
+        ))
+    }
+
+    fn bibtex_summary(log: &str, kind: &str) -> usize {
+        for line in log.lines() {
+            let lower = line.to_ascii_lowercase();
+            if !(lower.contains("there was") || lower.contains("there were"))
+                || !lower.contains(kind)
+            {
+                continue;
+            }
+            if let Some(count) = lower
+                .split_whitespace()
+                .find_map(|word| word.parse::<usize>().ok())
+            {
+                return count;
+            }
+        }
+        0
+    }
+
+    #[tokio::test]
+    async fn import_then_export_keeps_the_source_bibliography() {
+        let bib = include_str!("../tests/fixtures/roundtrip-shapes.bib");
+        let exported = import_and_export("shapes", bib).await;
+        assert_eq!(exported, bib, "{exported}");
+        assert_round_trip(bib, &exported);
+        assert!(exported.contains("@incollection{voter2007,"), "{exported}");
+        assert!(exported.contains("@manual{h5md110,"), "{exported}");
+        assert!(exported.contains("@misc{ieee754,"), "{exported}");
+        assert!(exported.contains("@software{chemfiles2023,"), "{exported}");
+        assert!(exported.contains("De Souza, Roger A."), "{exported}");
+        assert!(exported.contains("Le Bris, Claude"), "{exported}");
+        assert!(exported.contains("S{\\o}rensen, M. R."), "{exported}");
+        assert!(exported.contains("pages = {23-32}"), "{exported}");
+        assert!(exported.contains("pages = {134106}"), "{exported}");
+        assert!(
+            exported.contains("https://github.com/aldanads/Kinetix"),
+            "{exported}"
+        );
+        assert!(!exported.contains("@inbook"), "{exported}");
+        assert!(!exported.contains("issn"), "{exported}");
+        assert!(!exported.contains("zenodo.org"), "{exported}");
+        assert!(!exported.contains("Resolver"), "{exported}");
+        assert!(!exported.contains("Server title"), "{exported}");
+        for style in ["elsarticle-num", "aipnum4-2"] {
+            let Some((source_errors, source_warnings)) = bibtex_counts(bib, style) else {
+                continue;
+            };
+            let (errors, warnings) = bibtex_counts(&exported, style).unwrap();
+            assert_eq!(
+                errors, 0,
+                "{style} export errors, source had {source_errors}"
+            );
+            assert!(
+                warnings <= source_warnings,
+                "{style} export warnings {warnings} exceed the source {source_warnings}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_server_import_does_not_keep_the_source() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-rt", "name": "shapes"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/col-rt/import"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "added": 1,
+                "duplicates_skipped": 0
+            })))
+            .mount(&mock)
+            .await;
+        let bib = include_str!("../tests/fixtures/roundtrip-shapes.bib");
+        let imported = test_server(&mock.uri())
+            .import_bibliography(Parameters(ImportBibliographyArgs {
+                collection: Some("shapes".into()),
+                content: bib.into(),
+                format: "bibtex".into(),
+                style: None,
+            }))
+            .await;
+        assert!(
+            imported.contains("does not keep a local copy"),
+            "{imported}"
+        );
+        assert!(!imported.contains("Kept "), "{imported}");
+    }
+
+    #[tokio::test]
+    async fn private_bibliographies_round_trip_when_present() {
+        let cases = [
+            (
+                "readcon",
+                "/cursor/stores/bot/ttkit/readcon-ookcite-repro/rg_main.bib",
+                "/cursor/stores/bot/ttkit/readcon-ookcite-repro/readcon-cpc.bib",
+                99,
+                3,
+                178,
+            ),
+            (
+                "amsel",
+                "/cursor/stores/bot/ttkit/amsel-ookcite-repro/amsel-refs.bib",
+                "/cursor/stores/bot/ttkit/amsel-ookcite-repro/export-diagnostic.bib",
+                76,
+                5,
+                76,
+            ),
+        ];
+        for (name, source_path, before_path, keys, types, differing) in cases {
+            if !std::path::Path::new(source_path).exists() {
+                continue;
+            }
+            let source = std::fs::read_to_string(source_path).unwrap();
+            if std::path::Path::new(before_path).exists() {
+                let before = std::fs::read_to_string(before_path).unwrap();
+                let diff = crate::bib_source::diff_report(&source, &before).unwrap();
+                assert_eq!(diff.key_changes, keys, "{name} before keys {diff:?}");
+                assert_eq!(diff.type_changes, types, "{name} before types {diff:?}");
+                assert_eq!(
+                    diff.entries_differing, differing,
+                    "{name} before entries {diff:?}"
+                );
+            }
+            let exported = import_and_export(name, &source).await;
+            assert_round_trip(&source, &exported);
+            for style in ["elsarticle-num", "aipnum4-2"] {
+                let Some((source_errors, source_warnings)) = bibtex_counts(&source, style) else {
+                    continue;
+                };
+                let (errors, warnings) = bibtex_counts(&exported, style).unwrap();
+                assert_eq!(
+                    errors, 0,
+                    "{name} {style} errors, source had {source_errors}"
+                );
+                assert!(
+                    warnings <= source_warnings,
+                    "{name} {style} warnings {warnings} exceed the source {source_warnings}"
+                );
+            }
+        }
     }
 }

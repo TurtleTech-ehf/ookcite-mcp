@@ -14,6 +14,8 @@
 mod batch_limits;
 mod bib_audit;
 mod bib_export;
+mod bib_names;
+mod bib_source;
 mod bibliographic;
 mod cli;
 mod collection_entries;

@@ -2,6 +2,11 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## Unreleased
+#### Bugfixes
+- (**bibtex**) keep an imported bibliography's keys, types, and fields on export
+
+- - -
 ## v0.6.5 - 2026-10-04
 #### Features
 - (**mcp**) speak protocol revision 2026-07-28 - (c4a0cc0) - Rohit Goswami

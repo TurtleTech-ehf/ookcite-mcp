@@ -14,6 +14,9 @@ pub struct BibOptions {
     pub software_as_misc: bool,
     /// Where an article number goes.
     pub eid_as: EidPlacement,
+    /// Fill empty fields of an imported source entry from the provider.
+    /// A field the source already has is left as written. Default off.
+    pub enrich: bool,
 }
 
 /// elsarticle-num and other classic styles never print `eid`, so an article
@@ -47,7 +50,7 @@ impl BibOptions {
         );
         Self {
             software_as_misc: misc,
-            eid_as: EidPlacement::Eid,
+            ..Self::default()
         }
     }
 
@@ -68,10 +71,12 @@ enum ZenodoRecord {
     Version,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct Person {
     family: String,
     given: String,
+    prefix: String,
+    suffix: String,
     literal: bool,
 }
 
@@ -103,6 +108,10 @@ struct Work {
     zenodo: Option<ZenodoRecord>,
     note_locked: bool,
     howpublished_locked: bool,
+    /// Caller-set field names. Their values are written as stored.
+    caller_fields: HashSet<String>,
+    /// Locked string fields this renderer does not have a column for.
+    extra: Vec<(String, String)>,
 }
 
 impl Work {
@@ -134,24 +143,61 @@ impl Work {
             zenodo: None,
             note_locked: false,
             howpublished_locked: false,
+            caller_fields: HashSet::new(),
+            extra: Vec::new(),
         }
     }
 }
 
 pub fn render_stored_entries(entries: &[Value]) -> String {
-    let works = entries
-        .iter()
-        .map(|entry| assemble(entry, None))
-        .collect::<Vec<_>>();
-    render_works(&works, &BibOptions::default())
+    let pairs: Vec<(Value, Option<Value>)> =
+        entries.iter().cloned().map(|entry| (entry, None)).collect();
+    render_pairs(&pairs, &BibOptions::default())
 }
 
 pub fn render_pairs(pairs: &[(Value, Option<Value>)], options: &BibOptions) -> String {
-    let works = pairs
-        .iter()
-        .map(|(stored, provider)| assemble(stored, provider.as_ref()))
-        .collect::<Vec<_>>();
-    render_works(&works, options)
+    let mut used = HashSet::new();
+    let mut out = String::new();
+    let mut works = Vec::new();
+    for (stored, provider) in pairs {
+        if let Some(mut source) = crate::bib_source::source_from_meta(stored) {
+            flush_works(&mut works, options, &mut used, &mut out);
+            separate_entries(&mut out);
+            if options.enrich {
+                if let Some(provider) = provider {
+                    let additions = additions_from_provider(provider);
+                    crate::bib_source::fill_empty(&mut source, &additions);
+                }
+            }
+            out.push_str(&crate::bib_source::render_entry(&source, &mut used));
+            continue;
+        }
+        works.push(assemble(stored, provider.as_ref()));
+    }
+    flush_works(&mut works, options, &mut used, &mut out);
+    out
+}
+
+fn separate_entries(out: &mut String) {
+    if !out.is_empty() && !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+}
+
+fn flush_works(
+    works: &mut Vec<Work>,
+    options: &BibOptions,
+    used: &mut HashSet<String>,
+    out: &mut String,
+) {
+    if works.is_empty() {
+        return;
+    }
+    separate_entries(out);
+    for work in works.drain(..) {
+        out.push_str(&render_work_entry(&work, options, used));
+        out.push('\n');
+    }
 }
 
 /// Stored metadata with provider fields filled in. Caller locks win.
@@ -254,6 +300,8 @@ fn assemble(stored: &Value, provider: Option<&Value>) -> Work {
         work.citation_key = stored_work.citation_key.clone();
     }
     copy_locked(&mut work, &stored_work, &locked);
+    work.caller_fields.clone_from(&locked);
+    work.extra.clone_from(&stored_work.extra);
     if locked.contains("editor") {
         work.editors = stored_work.editors.clone();
     }
@@ -321,6 +369,8 @@ fn copy_locked(work: &mut Work, stored: &Work, locked: &HashSet<String>) {
     );
     work.note_locked = locked.contains("note");
     work.howpublished_locked = locked.contains("howpublished");
+    work.caller_fields.clone_from(locked);
+    work.extra.clone_from(&stored.extra);
     take(
         locked.contains("number"),
         &mut work.report_number,
@@ -340,6 +390,112 @@ fn authors_cover(stored: &[Person], provider: &[Person]) -> bool {
 
 fn family_key(person: &Person) -> String {
     fold_ascii(&person.family).to_ascii_lowercase()
+}
+
+fn extra_locked(meta: &Value, locked: &HashSet<String>) -> Vec<(String, String)> {
+    const RENDERED: &[&str] = &[
+        "title",
+        "authors",
+        "author",
+        "editor",
+        "editors",
+        "journal",
+        "booktitle",
+        "chapter",
+        "volume",
+        "issue",
+        "pages",
+        "eid",
+        "publisher",
+        "institution",
+        "doi",
+        "url",
+        "version",
+        "note",
+        "howpublished",
+        "number",
+        "citation_key",
+        "cite_key",
+        "entry_type",
+        "year",
+        "date",
+        "user_fields",
+        "bib_source",
+    ];
+    let Some(obj) = meta.as_object() else {
+        return Vec::new();
+    };
+    let mut names: Vec<&String> = obj
+        .keys()
+        .filter(|name| locked.contains(name.as_str()))
+        .collect();
+    names.sort();
+    let mut extra = Vec::new();
+    for name in names {
+        if RENDERED
+            .iter()
+            .any(|owned| name.eq_ignore_ascii_case(owned))
+        {
+            continue;
+        }
+        if let Some(value) = obj.get(name).and_then(Value::as_str) {
+            let value = value.trim();
+            if !value.is_empty() {
+                extra.push((name.to_ascii_lowercase(), value.to_string()));
+            }
+        }
+    }
+    extra
+}
+
+/// Provider values that may fill a field the imported source left empty.
+fn additions_from_provider(record: &Value) -> Vec<(String, String)> {
+    let Some(work) = work_from_provider_record(record) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut push = |name: &str, value: &str| {
+        let value = value.trim();
+        if !value.is_empty() {
+            out.push((name.to_string(), value.to_string()));
+        }
+    };
+    push("title", &work.title);
+    if let Some(author) = format_people(&work.authors) {
+        push("author", &author);
+    }
+    if let Some(year) = work.year {
+        push("year", &year.to_string());
+    }
+    if let Some(journal) = &work.journal {
+        push("journal", journal);
+    }
+    if let Some(booktitle) = &work.booktitle {
+        push("booktitle", booktitle);
+    }
+    if let Some(volume) = &work.volume {
+        push("volume", volume);
+    }
+    if let Some(issue) = &work.issue {
+        push("number", issue);
+    }
+    if let Some(pages) = &work.pages {
+        push("pages", pages);
+    }
+    if let Some(publisher) = &work.publisher {
+        push("publisher", publisher);
+    }
+    if !work.doi.is_empty() {
+        push("doi", &work.doi);
+    }
+    if let Some(url) = work
+        .url
+        .as_deref()
+        .filter(|url| !url_repeats_doi(url, &work.doi))
+    {
+        push("url", url);
+    }
+    out
 }
 
 fn user_fields(meta: &Value) -> HashSet<String> {
@@ -437,6 +593,7 @@ fn work_from_crossref(message: &Value) -> Work {
                     family: org,
                     given: String::new(),
                     literal: true,
+                    ..Default::default()
                 }];
             }
         }
@@ -598,6 +755,8 @@ fn work_from_stored(meta: &Value) -> Work {
     let locked = user_fields(meta);
     work.note_locked = locked.contains("note");
     work.howpublished_locked = locked.contains("howpublished");
+    work.caller_fields = locked.clone();
+    work.extra = extra_locked(meta, &locked);
     let kind = map_type(&work.source_type, false);
     if work.booktitle.is_none() && matches!(kind, "inproceedings" | "incollection" | "inbook") {
         work.booktitle = work.journal.take();
@@ -629,33 +788,38 @@ fn is_series(title: &str) -> bool {
     lower.contains("series") || lower.contains("lecture notes")
 }
 
+#[cfg(test)]
 fn render_works(works: &[Work], options: &BibOptions) -> String {
     let mut used = HashSet::new();
     let mut out = String::new();
     for work in works {
-        let custom = work
-            .citation_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-            .map(str::to_string);
-        let mut key = custom.clone().unwrap_or_else(|| generated_key(work));
-        if key.is_empty() {
-            key = "ref".into();
-        }
-        if used.contains(&key) {
-            let base = key.clone();
-            let mut suffix = b'a';
-            while used.contains(&key) {
-                key = format!("{base}{}", suffix as char);
-                suffix = suffix.saturating_add(1);
-            }
-        }
-        used.insert(key.clone());
-        out.push_str(&render_entry(work, &key, options));
+        out.push_str(&render_work_entry(work, options, &mut used));
         out.push('\n');
     }
     out
+}
+
+fn render_work_entry(work: &Work, options: &BibOptions, used: &mut HashSet<String>) -> String {
+    let custom = work
+        .citation_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string);
+    let mut key = custom.unwrap_or_else(|| generated_key(work));
+    if key.is_empty() {
+        key = "ref".into();
+    }
+    if used.contains(&key) {
+        let base = key.clone();
+        let mut suffix = b'a';
+        while used.contains(&key) {
+            key = format!("{base}{}", suffix as char);
+            suffix = suffix.saturating_add(1);
+        }
+    }
+    used.insert(key.clone());
+    render_entry(work, &key, options)
 }
 
 fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
@@ -669,7 +833,12 @@ fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
         && map_type(&work.source_type, false) == "software";
     let mut fields = Vec::new();
     if !work.title.is_empty() {
-        push_raw(&mut fields, "title", &display_title(&work.title));
+        let title = if work.caller_fields.contains("title") {
+            crate::bib_source::prepare_field_value(&work.title)
+        } else {
+            display_title(&work.title)
+        };
+        push_raw(&mut fields, "title", &title);
     }
     if let Some(author) = format_people(&work.authors) {
         fields.push(format!("  author = {{{author}}}"));
@@ -677,16 +846,20 @@ fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
     if let Some(year) = work.year {
         fields.push(format!("  year = {{{year}}}"));
     }
-    match bib_type {
-        "inproceedings" | "incollection" | "inbook" => {
-            if let Some(booktitle) = &work.booktitle {
-                push_raw(&mut fields, "booktitle", &display_title(booktitle));
-            }
+    let proceedings = matches!(bib_type, "inproceedings" | "incollection" | "inbook");
+    if proceedings || work.caller_fields.contains("booktitle") {
+        if let Some(booktitle) = &work.booktitle {
+            let text = if work.caller_fields.contains("booktitle") {
+                crate::bib_source::prepare_field_value(booktitle)
+            } else {
+                display_title(booktitle)
+            };
+            push_raw(&mut fields, "booktitle", &text);
         }
-        _ => {
-            if let Some(journal) = &work.journal {
-                push_text(&mut fields, "journal", journal);
-            }
+    }
+    if !proceedings || work.caller_fields.contains("journal") {
+        if let Some(journal) = &work.journal {
+            push_caller_or_text(&mut fields, "journal", journal, &work.caller_fields);
         }
     }
     if bib_type == "incollection" || bib_type == "inbook" {
@@ -703,7 +876,11 @@ fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
         work.issue.clone().or_else(|| work.report_number.clone())
     };
     if let Some(number) = number {
-        push_plain(&mut fields, "number", &number);
+        push_plain(
+            &mut fields,
+            "number",
+            &crate::bib_source::unicode_dashes_to_tex(&number),
+        );
     }
     let mut pages = work.pages.clone();
     let mut eid = work.eid.clone();
@@ -720,7 +897,12 @@ fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
         eid = None;
     }
     if let Some(pages) = &pages {
-        push_plain(&mut fields, "pages", &normalize_pages(pages));
+        let rendered = if work.caller_fields.contains("pages") {
+            crate::bib_source::unicode_dashes_to_tex(pages.trim())
+        } else {
+            normalize_pages(pages)
+        };
+        push_plain(&mut fields, "pages", &rendered);
     }
     if let Some(eid) = &eid {
         push_plain(&mut fields, "eid", eid);
@@ -737,19 +919,24 @@ fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
         }
     }
     if let Some(publisher) = &publisher {
-        push_text(&mut fields, "publisher", publisher);
+        push_caller_or_text(&mut fields, "publisher", publisher, &work.caller_fields);
     }
-    if bib_type == "techreport" {
+    if bib_type == "techreport" || work.caller_fields.contains("institution") {
         if let Some(institution) = &work.institution {
-            push_text(&mut fields, "institution", institution);
+            push_caller_or_text(&mut fields, "institution", institution, &work.caller_fields);
         }
     }
     if let Some(version) = &work.version {
         push_plain(&mut fields, "version", version);
     }
-    if bib_type == "misc" {
+    if bib_type == "misc" || work.caller_fields.contains("howpublished") {
         if let Some(howpublished) = howpublished {
-            push_text(&mut fields, "howpublished", &howpublished);
+            push_caller_or_text(
+                &mut fields,
+                "howpublished",
+                &howpublished,
+                &work.caller_fields,
+            );
         }
     }
     let note = match (note, eid_note) {
@@ -757,7 +944,14 @@ fn render_entry(work: &Work, key: &str, options: &BibOptions) -> String {
         (note, extra) => note.or(extra),
     };
     if let Some(note) = &note {
-        push_text(&mut fields, "note", note);
+        push_caller_or_text(&mut fields, "note", note, &work.caller_fields);
+    }
+    for (name, value) in &work.extra {
+        push_raw(
+            &mut fields,
+            name,
+            &crate::bib_source::prepare_field_value(value),
+        );
     }
     if !work.editors.is_empty() && (work.editors != work.authors || bib_type == "techreport") {
         if let Some(editor) = format_people(&work.editors) {
@@ -807,10 +1001,17 @@ fn push_raw(fields: &mut Vec<String>, name: &str, value: &str) {
     fields.push(format!("  {name} = {{{value}}}"));
 }
 
-/// A free-text field: entities decoded, markup and stray spacing removed,
-/// dashes normalised, and BibTeX specials escaped.
-fn push_text(fields: &mut Vec<String>, name: &str, value: &str) {
-    let value = escape_bib_text(&clean_text(value));
+fn push_caller_or_text(
+    fields: &mut Vec<String>,
+    name: &str,
+    value: &str,
+    locked: &HashSet<String>,
+) {
+    let value = if locked.contains(name) {
+        crate::bib_source::prepare_field_value(value)
+    } else {
+        escape_bib_text(&clean_text(value))
+    };
     push_raw(fields, name, &value);
 }
 
@@ -833,6 +1034,18 @@ fn format_people(people: &[Person]) -> Option<String> {
             let given = clean_name(&person.given);
             if person.literal {
                 Some(format!("{{{family}}}"))
+            } else if !person.prefix.trim().is_empty() || !person.suffix.trim().is_empty() {
+                let given = if given.is_empty() {
+                    String::new()
+                } else {
+                    tex_initial_letters(&format_initials(&given))
+                };
+                Some(crate::bib_names::format_parts(
+                    &clean_name(&person.prefix),
+                    &family,
+                    &clean_name(&person.suffix),
+                    &given,
+                ))
             } else if given.is_empty() {
                 Some(family)
             } else {
@@ -976,6 +1189,10 @@ fn map_type(raw: &str, software_as_misc: bool) -> &'static str {
             }
         }
         "phdthesis" | "thesis" => "phdthesis",
+        "mastersthesis" => "mastersthesis",
+        "manual" => "manual",
+        "booklet" => "booklet",
+        "unpublished" => "unpublished",
         "patent" => "patent",
         "" => "article",
         "standard" | "misc" | "online" | "webpage" | "dataset" | "text" => "misc",
@@ -1487,6 +1704,7 @@ fn person_from_json(value: &Value) -> Option<Person> {
             family: name,
             given: String::new(),
             literal: true,
+            ..Default::default()
         });
     }
     if let Some(family) = text(value, "family") {
@@ -1495,11 +1713,19 @@ fn person_from_json(value: &Value) -> Option<Person> {
                 family: inner,
                 given: String::new(),
                 literal: true,
+                ..Default::default()
             });
         }
         return Some(Person {
             family,
             given: text(value, "given").unwrap_or_default(),
+            prefix: text(value, "prefix")
+                .or_else(|| text(value, "particle"))
+                .or_else(|| text(value, "von"))
+                .unwrap_or_default(),
+            suffix: text(value, "suffix")
+                .or_else(|| text(value, "jr"))
+                .unwrap_or_default(),
             literal: false,
         });
     }
@@ -1510,6 +1736,7 @@ fn person_from_json(value: &Value) -> Option<Person> {
             family: name,
             given: String::new(),
             literal: true,
+            ..Default::default()
         });
     }
     None
@@ -1528,6 +1755,7 @@ fn datacite_people(value: Option<&Value>) -> Vec<Person> {
                     family: name,
                     given: String::new(),
                     literal: true,
+                    ..Default::default()
                 });
             }
             let given = text(creator, "givenName").unwrap_or_default();
@@ -1549,6 +1777,7 @@ fn datacite_people(value: Option<&Value>) -> Vec<Person> {
                 family,
                 given,
                 literal: false,
+                ..Default::default()
             })
         })
         .collect()
@@ -1564,6 +1793,7 @@ fn person_from_display(name: &str) -> Option<Person> {
             family: inner,
             given: String::new(),
             literal: true,
+            ..Default::default()
         });
     }
     if let Some((family, given)) = name.split_once(',') {
@@ -1576,6 +1806,7 @@ fn person_from_display(name: &str) -> Option<Person> {
             family: family.to_string(),
             given: given.to_string(),
             literal: false,
+            ..Default::default()
         });
     }
     if let Some((given, family)) = name.rsplit_once(char::is_whitespace) {
@@ -1583,12 +1814,14 @@ fn person_from_display(name: &str) -> Option<Person> {
             family: family.trim().to_string(),
             given: given.trim().to_string(),
             literal: false,
+            ..Default::default()
         });
     }
     Some(Person {
         family: name.to_string(),
         given: String::new(),
         literal: false,
+        ..Default::default()
     })
 }
 
@@ -2510,6 +2743,7 @@ mod tests {
         let options = BibOptions {
             software_as_misc: true,
             eid_as: EidPlacement::Pages,
+            ..BibOptions::default()
         };
         let exported = render_works(&works, &options);
         for entry in split_entries(&exported) {
@@ -2665,6 +2899,39 @@ mod tests {
             &BibOptions::default(),
         );
         assert_eq!(exported, again, "keys and fields stay stable");
+    }
+
+    #[test]
+    fn a_locked_manual_keeps_its_type_braces_pages_and_particles() {
+        let stored = json!({
+            "entry_type": "manual",
+            "title": "{H5MD} 1.1.0",
+            "citation_key": "h5md110",
+            "pages": "23-32",
+            "number": "5--6",
+            "edition": "Second",
+            "series": "NATO Science Series",
+            "organization": "H5MD",
+            "address": "Dordrecht",
+            "authors": [{
+                "family": "Souza",
+                "given": "Roger A.",
+                "prefix": "De"
+            }],
+            "user_fields": ["entry_type", "title", "pages", "number", "edition", "series", "organization", "address", "authors"]
+        });
+        let bib = render_stored_entries(std::slice::from_ref(&stored));
+        assert!(bib.starts_with("@manual{h5md110,"), "{bib}");
+        assert!(bib.contains("title = {{H5MD} 1.1.0}"), "{bib}");
+        assert!(bib.contains("pages = {23-32}"), "{bib}");
+        assert!(!bib.contains("23--32"), "{bib}");
+        assert!(bib.contains("number = {5--6}"), "{bib}");
+        assert!(bib.contains("author = {De Souza, Roger A.}"), "{bib}");
+        assert!(!bib.contains("Souza, Roger A. De"), "{bib}");
+        assert!(bib.contains("edition = {Second}"), "{bib}");
+        assert!(bib.contains("series = {NATO Science Series}"), "{bib}");
+        assert!(bib.contains("organization = {H5MD}"), "{bib}");
+        assert!(bib.contains("address = {Dordrecht}"), "{bib}");
     }
 
     fn split_entries(bib: &str) -> Vec<String> {

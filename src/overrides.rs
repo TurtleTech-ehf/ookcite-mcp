@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::bib_names;
+use crate::bib_source::{BibSource, PairedSource};
 use crate::collection_entries::person_from_name;
 use crate::inbound_auth::HttpAuthMode;
 use crate::tool_args::UpdateEntryMetadataArgs;
@@ -55,6 +57,9 @@ pub enum OverrideStore {
 pub const DISABLED_MESSAGE: &str = "Local overrides are not kept by this shared server, because one user's edits would reach other users' exports. Run ookcite-mcp on your own machine (stdio) to keep local overrides.";
 pub const UNAVAILABLE_MESSAGE: &str =
     "No local override directory is available. Set OOKCITE_OVERRIDES_DIR, XDG_DATA_HOME or HOME.";
+
+/// Shown when a shared server imports a bibliography and cannot keep the source.
+pub const SHARED_EXPORT_LOSS: &str = "This shared server does not keep a local copy of the imported bibliography. Export uses the server record only, so a citation key, brace group, name particle, LaTeX accent, and any field the server does not store can be lost. See docs/ookcite-api-export.md.";
 
 /// Result of reading a collection's overrides for export.
 #[derive(Debug)]
@@ -116,6 +121,15 @@ impl OverrideStore {
             Self::Disabled => Err(DISABLED_MESSAGE.into()),
         }
     }
+
+    /// Store the source of every imported entry, under its id and its DOI.
+    pub fn record_sources(&self, collection: &str, pairs: &[PairedSource]) -> Result<(), String> {
+        match self {
+            Self::Enabled(dir) => update_in(dir, collection, |store| store.record_sources(pairs)),
+            Self::Unavailable => Err(UNAVAILABLE_MESSAGE.into()),
+            Self::Disabled => Err(DISABLED_MESSAGE.into()),
+        }
+    }
 }
 
 /// One entry's overrides. `None` in `fields` removes that field.
@@ -139,6 +153,9 @@ pub struct EntryOverride {
         skip_serializing_if = "Option::is_none"
     )]
     pub year: Option<Option<i32>>,
+    /// The imported bibliography entry. Export prints this, then lays `fields` over it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<BibSource>,
 }
 
 /// A field that is present in the file, even as `null`, is `Some`.
@@ -152,7 +169,8 @@ where
 
 impl EntryOverride {
     pub fn is_empty(&self) -> bool {
-        self.fields.is_empty()
+        self.source.is_none()
+            && self.fields.is_empty()
             && self.authors.is_none()
             && self.editor.is_none()
             && self.year.is_none()
@@ -221,6 +239,91 @@ fn names_to_people(names: &[String]) -> Vec<Value> {
         .collect()
 }
 
+/// A later metadata edit wins over the imported source, field by field.
+fn overlay_source(source: &mut BibSource, ov: &EntryOverride) {
+    for (key, value) in &ov.fields {
+        match key.as_str() {
+            "citation_key" => {
+                if let Some(value) = value {
+                    source.key = value.clone();
+                }
+            }
+            "entry_type" => {
+                if let Some(value) = value {
+                    source.entry_type = value.to_ascii_lowercase();
+                }
+            }
+            "issue" => match value {
+                Some(value) => source.set_field("number", value.clone()),
+                None => source.remove_field("number"),
+            },
+            _ => match value {
+                Some(value) => source.set_field(key, value.clone()),
+                None => source.remove_field(key),
+            },
+        }
+    }
+    if let Some(people) = &ov.authors {
+        if people.is_empty() {
+            source.remove_field("author");
+        } else {
+            source.set_field("author", people_to_bib(people));
+        }
+    }
+    if let Some(people) = &ov.editor {
+        if people.is_empty() {
+            source.remove_field("editor");
+        } else {
+            source.set_field("editor", people_to_bib(people));
+        }
+    }
+    if let Some(year) = ov.year {
+        match year {
+            Some(year) => source.set_field("year", year.to_string()),
+            None => source.remove_field("year"),
+        }
+    }
+}
+
+fn people_to_bib(people: &[Value]) -> String {
+    people
+        .iter()
+        .filter_map(|person| {
+            let family = person
+                .get("family")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if family.is_empty() {
+                return None;
+            }
+            let literal = person.get("literal").and_then(Value::as_bool) == Some(true)
+                || family.starts_with('{');
+            if literal {
+                let family = family.trim_matches(|ch| ch == '{' || ch == '}');
+                return Some(format!("{{{family}}}"));
+            }
+            let given = person
+                .get("given")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let prefix = person
+                .get("prefix")
+                .or_else(|| person.get("particle"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let suffix = person
+                .get("suffix")
+                .or_else(|| person.get("jr"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            Some(bib_names::format_parts(prefix, family, suffix, given))
+        })
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
 /// Overrides of one collection, keyed by `doi:<lowercase doi>` or `id:<entry id>`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CollectionOverrides {
@@ -267,6 +370,31 @@ impl CollectionOverrides {
         }
     }
 
+    pub fn record_sources(&mut self, pairs: &[PairedSource]) {
+        for pair in pairs {
+            if let Some(id) = pair
+                .entry_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                self.put_source(id_key(id), pair.source.clone());
+            }
+            if let Some(doi) = pair
+                .doi
+                .as_deref()
+                .map(str::trim)
+                .filter(|doi| !doi.is_empty())
+            {
+                self.put_source(doi_key(doi), pair.source.clone());
+            }
+        }
+    }
+
+    fn put_source(&mut self, key: String, source: BibSource) {
+        self.entries.entry(key).or_default().source = Some(source);
+    }
+
     /// Lay every override over a collection body's entries, in place.
     pub fn apply_to_entries(&self, entries: &mut [Value]) {
         for entry in entries.iter_mut() {
@@ -308,6 +436,27 @@ fn id_key(id: &str) -> String {
 pub fn apply(meta: &Value, ov: &EntryOverride) -> Value {
     let mut out = meta.as_object().cloned().unwrap_or_default();
     let mut locked: Vec<String> = Vec::new();
+    if let Some(source) = &ov.source {
+        let mut source = source.clone();
+        overlay_source(&mut source, ov);
+        for (name, _) in &source.fields {
+            locked.push(name.clone());
+        }
+        locked.push("citation_key".into());
+        locked.push("entry_type".into());
+        if let Ok(value) = serde_json::to_value(&source) {
+            out.insert("bib_source".into(), value);
+        }
+        if !source.key.is_empty() {
+            out.insert("citation_key".into(), Value::String(source.key));
+        }
+        if !source.entry_type.is_empty() {
+            out.insert(
+                "entry_type".into(),
+                Value::String(source.entry_type.clone()),
+            );
+        }
+    }
     for (key, value) in &ov.fields {
         match value {
             Some(value) => {

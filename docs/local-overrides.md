@@ -15,6 +15,8 @@ The process decides once at startup whether it keeps the store:
 
 On a server without the store, `update_entry_metadata` updates the server record only, `local_only=true` returns an error and changes nothing, and `export_collection` exports the server record alone.
 
+A BibTeX import on a server that keeps the store writes one `source` record per entry into this file. Export prints that record. A shared bearer or OAuth server does not write it, and the import reply says so: export then uses the server record only, so a citation key, a brace group, a name particle, a LaTeX accent, and any field the server does not store can be lost. The fields the server has to persist are listed in [`ookcite-api-export.md`](ookcite-api-export.md).
+
 ## Where the file lives
 
 One JSON file per collection:
@@ -80,8 +82,10 @@ Setting the field again later replaces the marker.
 
 ## Export
 
-`export_collection` loads the file, lays each override over the server record, and marks every overridden field as caller-set, so the provider value does not replace it.
+`export_collection` loads the file and, for an entry with a `source` record, prints that entry. A field set later with `update_entry_metadata` replaces the same field in the printed entry. `enrich=true` fills only a field the source left empty, from the resolver. The default is off, so a resolver title, URL, page range, or author list does not replace or extend the source.
 `local_overrides=false` exports the server record alone.
+
+An imported entry is printed with these normalisations and no others: the entry type and field names are lower case; fields stay in source order and are written as `name = {value}`; a numeric or quoted value is written in braces; `#` concatenation is joined and an `@string` macro is not expanded; a Unicode en dash or em dash is written `--` or `---`; a bare `&`, `%`, `#`, or `_` is escaped and an escaped one is not escaped again. Braces, `--`, name particles, and LaTeX accents are copied as written. A source file that already has this shape is unchanged.
 
 A file that cannot be read or parsed does not stop the export.
 The full path and the error go to stderr, and the BibTeX starts with a `%` comment that names the collection and says the overrides were not applied.
@@ -94,7 +98,7 @@ The full path and the error go to stderr, and the BibTeX starts with a `%` comme
 
 ## Text cleanup on export
 
-The renderer applies these to every export, with or without overrides:
+A source entry follows the normalisation list above. For a record that has no source entry, the renderer applies these:
 
 - HTML entities are decoded (`&amp;` becomes `\&`).
 - JATS, HTML and MathML tags are removed. A name set in `<tt>`, `<monospace>`, `<code>` or `<scp>` is braced, and a small-caps run after a capital is joined to it (`P<scp>ACKMOL</scp>` becomes `{PACKMOL}`).

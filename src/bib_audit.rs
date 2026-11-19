@@ -29,6 +29,15 @@ pub struct BibEntry {
     pub malformed_doi: Option<String>,
 }
 
+/// One bibliography entry with field values as written, outer delimiters removed.
+/// Brace groups, `--`, and LaTeX commands inside a value are kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawBibEntry {
+    pub key: String,
+    pub entry_type: String,
+    pub fields: Vec<(String, String)>,
+}
+
 impl BibEntry {
     fn claim(&self) -> BibliographicClaim {
         BibliographicClaim {
@@ -259,6 +268,63 @@ pub fn parse_bibtex(content: &str) -> Result<Vec<BibEntry>, String> {
         let key = scan.read_key(closer)?;
         let fields = scan.read_fields(closer)?;
         entries.push(entry_from(entry_type, key, fields));
+        if entries.len() > crate::constants::AUDIT_BIB_MAX_ENTRIES {
+            return Err(format!(
+                "bibliography has more than {} entries",
+                crate::constants::AUDIT_BIB_MAX_ENTRIES
+            ));
+        }
+    }
+    Ok(entries)
+}
+
+/// Entries in file order. Field order is the source order. Values keep braces.
+pub fn parse_bibtex_raw(content: &str) -> Result<Vec<RawBibEntry>, String> {
+    if content.len() > crate::constants::AUDIT_BIB_MAX_BYTES {
+        return Err(format!(
+            "bibliography is {} bytes; the limit is {}",
+            content.len(),
+            crate::constants::AUDIT_BIB_MAX_BYTES
+        ));
+    }
+    let mut scan = Scan { src: content, i: 0 };
+    let mut entries = Vec::new();
+    while scan.i < scan.src.len() {
+        scan.skip_trivia();
+        if scan.i >= scan.src.len() {
+            break;
+        }
+        if scan.peek() != Some('@') {
+            scan.bump();
+            continue;
+        }
+        let start = scan.i;
+        scan.bump();
+        let entry_type = scan.read_ident();
+        if entry_type.is_empty() {
+            continue;
+        }
+        if is_directive(&entry_type) {
+            scan.skip_directive()?;
+            continue;
+        }
+        scan.skip_trivia();
+        let closer = match scan.bump() {
+            Some('{') => '}',
+            Some('(') => ')',
+            _ => {
+                return Err(format!(
+                    "entry @{entry_type} at byte {start} is missing its opening brace"
+                ));
+            }
+        };
+        let key = scan.read_key(closer)?;
+        let fields = scan.read_fields_ordered(closer)?;
+        entries.push(RawBibEntry {
+            key,
+            entry_type: entry_type.to_ascii_lowercase(),
+            fields,
+        });
         if entries.len() > crate::constants::AUDIT_BIB_MAX_ENTRIES {
             return Err(format!(
                 "bibliography has more than {} entries",
@@ -963,11 +1029,20 @@ impl<'a> Scan<'a> {
     }
 
     fn read_fields(&mut self, closer: char) -> Result<HashMap<String, String>, String> {
+        let ordered = self.read_fields_ordered(closer)?;
+        let mut fields = HashMap::new();
+        for (name, value) in ordered {
+            fields.insert(name, value);
+        }
+        Ok(fields)
+    }
+
+    fn read_fields_ordered(&mut self, closer: char) -> Result<Vec<(String, String)>, String> {
         self.skip_trivia();
         if self.peek() == Some(',') {
             self.bump();
         }
-        let mut fields = HashMap::new();
+        let mut fields = Vec::new();
         loop {
             self.skip_trivia();
             let Some(ch) = self.peek() else {
@@ -999,7 +1074,12 @@ impl<'a> Scan<'a> {
                     crate::constants::AUDIT_BIB_MAX_FIELD_BYTES
                 ));
             }
-            fields.insert(name.to_ascii_lowercase(), value);
+            let name = name.to_ascii_lowercase();
+            if let Some(existing) = fields.iter_mut().find(|(field, _)| field == &name) {
+                existing.1 = value;
+            } else {
+                fields.push((name, value));
+            }
             self.skip_trivia();
             if self.peek() == Some(',') {
                 self.bump();
