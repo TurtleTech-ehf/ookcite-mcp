@@ -770,10 +770,15 @@ impl Server {
         if let Some(msg) = pf.refuse_message {
             return Err(msg);
         }
-        let mut entries: Vec<serde_json::Value> = pf
+        let member_entries: HashMap<String, serde_json::Value> = pf
             .members
             .iter()
-            .map(|(doi, title)| Self::synthetic_member_metadata(doi, title.as_deref()))
+            .map(|(doi, title)| {
+                (
+                    doi.clone(),
+                    Self::synthetic_member_metadata(doi, title.as_deref()),
+                )
+            })
             .collect();
         let conc = read_only_concurrency();
         let futs: Vec<_> = pf
@@ -789,11 +794,24 @@ impl Server {
         // entries by position and `generate_citation_keys` returns one key
         // per position, so completion order is the user's numbering.
         let looked: Vec<_> = stream::iter(futs).buffered(conc).collect::<Vec<_>>().await;
+        let mut looked_by_position: HashMap<usize, Result<serde_json::Value, String>> = pf
+            .need_lookup
+            .iter()
+            .map(|item| item.index)
+            .zip(looked)
+            .collect();
+        let mut entries = Vec::new();
         let mut failures = Vec::new();
-        for result in looked {
-            match result {
-                Ok(meta) => entries.push(meta),
-                Err(error) => failures.push(error),
+        for (index, doi) in dois.iter().enumerate() {
+            let normalized = normalize_doi_token(doi);
+            if let Some(member) = member_entries.get(&normalized) {
+                entries.push(member.clone());
+                continue;
+            }
+            match looked_by_position.remove(&index) {
+                Some(Ok(meta)) => entries.push(meta),
+                Some(Err(error)) => failures.push(error),
+                None => {}
             }
         }
         // A throttle or a restart has to stay visible. Dropping it here
@@ -1424,7 +1442,17 @@ impl Server {
             out.extend(format_member_valid_lines(&pf.members));
             return out.join("\n");
         }
-        let mut results = format_member_valid_lines(&pf.members);
+        let member_lines: HashMap<String, String> = pf
+            .members
+            .iter()
+            .map(|(doi, title)| {
+                let line = format_member_valid_lines(&[(doi.clone(), title.clone())])
+                    .into_iter()
+                    .next()
+                    .expect("one member produces one line");
+                (doi.clone(), line)
+            })
+            .collect();
         let conc = read_only_concurrency();
         let futs: Vec<_> = pf
             .need_lookup
@@ -1446,7 +1474,20 @@ impl Server {
             })
             .collect();
         let looked_up = stream::iter(futs).buffered(conc).collect::<Vec<_>>().await;
-        results.extend(looked_up);
+        let mut looked_by_position: HashMap<usize, String> = pf
+            .need_lookup
+            .iter()
+            .map(|item| item.index)
+            .zip(looked_up)
+            .collect();
+        let mut results = Vec::new();
+        for (index, doi) in args.dois.iter().enumerate() {
+            if let Some(line) = member_lines.get(&normalize_doi_token(doi)) {
+                results.push(line.clone());
+            } else if let Some(line) = looked_by_position.remove(&index) {
+                results.push(line);
+            }
+        }
         results.join("\n")
     }
 
@@ -4407,6 +4448,102 @@ mod tests {
         assert!(
             out.contains("collection") || out.contains("187493a0"),
             "member should appear in output: {out}"
+        );
+    }
+
+    async fn mount_mixed_member_batch(mock: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan": "free",
+                "lookups_remaining": 2,
+                "lookups_limit": 30
+            })))
+            .expect(1)
+            .mount(mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-1", "name": "lab"}
+            ])))
+            .expect(1)
+            .mount(mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": "doi:10.5555/member",
+                    "metadata": {
+                        "doi": "10.5555/member",
+                        "title": "Collection Member"
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(mock)
+            .await;
+        for (doi, title) in [
+            ("10.5555/first", "First Lookup"),
+            ("10.5555/last", "Last Lookup"),
+        ] {
+            Mock::given(method("POST"))
+                .and(path("/api/v1/lookup/doi"))
+                .and(body_string_contains(doi))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "doi": doi,
+                    "title": title
+                })))
+                .expect(1)
+                .mount(mock)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_member_metadata_stays_in_the_callers_doi_order() {
+        let mock = MockServer::start().await;
+        mount_mixed_member_batch(&mock).await;
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_testkey_mixed_order");
+        let entries = test_server(&mock.uri())
+            .resolve_dois_with_preflight(&[
+                "10.5555/first".into(),
+                "10.5555/member".into(),
+                "10.5555/last".into(),
+            ])
+            .await
+            .expect("mixed batch should resolve");
+        let dois: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| entry["doi"].as_str())
+            .collect();
+        assert_eq!(dois, ["10.5555/first", "10.5555/member", "10.5555/last"]);
+    }
+
+    #[tokio::test]
+    async fn verify_references_keeps_mixed_member_lines_in_input_order() {
+        let mock = MockServer::start().await;
+        mount_mixed_member_batch(&mock).await;
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_testkey_verify_order");
+        let output = test_server(&mock.uri())
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec![
+                    "10.5555/first".into(),
+                    "10.5555/member".into(),
+                    "10.5555/last".into(),
+                ],
+                ..Default::default()
+            }))
+            .await;
+        let dois: Vec<_> = output
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .collect();
+        assert_eq!(
+            dois,
+            ["10.5555/first", "10.5555/member", "10.5555/last"],
+            "{output}"
         );
     }
 
