@@ -177,9 +177,10 @@ pub fn render_pairs(
             if options.enrich {
                 if let Some(provider) = provider {
                     // Every known DOI has to name the provider record: the
-                    // source `doi`, a DOI written in the source `url`, and the
-                    // DOI stored on the current metadata. One disagreement
-                    // keeps the import unchanged.
+                    // source `doi`, a DOI written in the source `url`, the DOI
+                    // stored on the current metadata, and a DOI resolver URL
+                    // in `metadata.url`. One disagreement keeps the import
+                    // unchanged.
                     if !item_has_a_different_doi(&source, stored, provider) {
                         let locked = user_fields(stored);
                         let additions = additions_from_provider(provider)
@@ -785,8 +786,9 @@ fn apply_zenodo_payload(work: &mut Work, zenodo: &Value) {
     }
 }
 
-/// True when the source `doi`, a DOI in the source `url`, or the stored
-/// metadata DOI names a different work from the provider record.
+/// True when the source `doi`, a DOI in the source `url`, the stored
+/// metadata DOI, or a resolver URL in `metadata.url` names a different work
+/// from the provider record.
 fn item_has_a_different_doi(
     source: &crate::bib_source::BibSource,
     stored: &Value,
@@ -811,16 +813,33 @@ fn known_item_dois(source: &crate::bib_source::BibSource, stored: &Value) -> Vec
     if let Some(doi) = crate::collection_entries::entry_doi(stored) {
         dois.push(doi);
     }
+    if let Some(url) = metadata_url(stored) {
+        dois.push(url);
+    }
     dois
+}
+
+fn metadata_url(stored: &Value) -> Option<String> {
+    stored
+        .pointer("/metadata/url")
+        .and_then(Value::as_str)
+        .or_else(|| stored.get("url").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
 }
 
 /// Both sides name a DOI and they are not the same work.
 ///
 /// Comparison goes through [`canonical_doi`], so `doi:`, `https://doi.org/`,
 /// `http://dx.doi.org/`, and a scheme-less `doi.org/` host are the same DOI.
+/// A resolver URL whose path does not decode to a DOI is a conflict: an
+/// invalid `%` escape, or a slash that is still encoded after one decode,
+/// must not count as the provider record.
 fn distinct_dois(stored: &str, provider: &str) -> bool {
     match (canonical_doi(stored), canonical_doi(provider)) {
         (Some(stored), Some(provider)) => stored != provider,
+        (None, Some(_)) if resolver_path_start(stored.trim()).is_some() => true,
         _ => false,
     }
 }
@@ -828,10 +847,69 @@ fn distinct_dois(stored: &str, provider: &str) -> bool {
 /// Bare DOI, lower-cased, with a resolver prefix removed.
 ///
 /// `clean_doi` already accepts `doi:` and `http(s)://(dx.)doi.org/`. A value
-/// whose text starts at `doi.org/` or `dx.doi.org/` is the same DOI.
+/// whose text starts at `doi.org/` or `dx.doi.org/` is the same DOI. The path
+/// of a resolver URL is percent-decoded once before that comparison.
 fn canonical_doi(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    crate::bib_audit::clean_doi(trimmed).or_else(|| scheme_free_doi(trimmed))
+    let prepared = decode_resolver_path(raw.trim())?;
+    crate::bib_audit::clean_doi(&prepared).or_else(|| scheme_free_doi(&prepared))
+}
+
+/// Copy of `raw` with a resolver URL's path percent-decoded exactly once.
+///
+/// A value that is not a `doi.org` or `dx.doi.org` URL is returned unchanged.
+/// `%252F` stays `%2F`. An invalid or truncated `%` escape returns [`None`].
+fn decode_resolver_path(raw: &str) -> Option<String> {
+    let Some(path_at) = resolver_path_start(raw) else {
+        return Some(raw.to_string());
+    };
+    let path_and_more = &raw[path_at..];
+    let path_len = path_and_more
+        .find(['?', '#'])
+        .unwrap_or(path_and_more.len());
+    let decoded = strict_percent_decode(&path_and_more[..path_len])?;
+    Some(format!("{}{decoded}", &raw[..path_at]))
+}
+
+fn resolver_path_start(raw: &str) -> Option<usize> {
+    let lower = raw.to_ascii_lowercase();
+    const PREFIXES: [&str; 6] = [
+        "https://dx.doi.org/",
+        "http://dx.doi.org/",
+        "https://doi.org/",
+        "http://doi.org/",
+        "dx.doi.org/",
+        "doi.org/",
+    ];
+    PREFIXES
+        .iter()
+        .find_map(|prefix| lower.starts_with(prefix).then_some(prefix.len()))
+}
+
+fn strict_percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            out.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let hi = hex_value(*bytes.get(index + 1)?)?;
+        let lo = hex_value(*bytes.get(index + 2)?)?;
+        out.push(hi * 16 + lo);
+        index += 3;
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn scheme_free_doi(raw: &str) -> Option<String> {
@@ -3619,6 +3697,104 @@ mod tests {
         let bib = enrich_bib(dx, "10.5555/synth.provider");
         refuses_provider_additions(&bib);
         assert!(!bib.contains("doi = "), "{bib}");
+    }
+
+    fn metadata_with_url(url: &str) -> Value {
+        let mut stored = source_record(
+            None,
+            vec![("title", "Synthetic quartz note"), ("year", "2024")],
+        );
+        stored["url"] = json!(url);
+        stored
+    }
+
+    #[test]
+    fn an_encoded_slash_is_the_same_doi_in_either_case() {
+        for url in [
+            "https://doi.org/10.5555%2Fwork-a",
+            "http://doi.org/10.5555%2fwork-a",
+            "https://dx.doi.org/10.5555%2Fwork-a",
+            "http://dx.doi.org/10.5555%2fwork-a",
+            "doi.org/10.5555%2Fwork-a",
+            "dx.doi.org/10.5555%2fwork-a",
+            "  https://doi.org/10.5555%2Fwork-a  ",
+            "https://doi.org/10.5555%2Fwork-a?noredirect=1",
+            "https://dx.doi.org/10.5555%2fwork-a#ref",
+        ] {
+            assert_eq!(
+                canonical_doi(url).as_deref(),
+                Some("10.5555/work-a"),
+                "{url}"
+            );
+            assert!(!distinct_dois(url, "10.5555/work-a"), "{url}");
+            assert!(
+                distinct_dois(url, "10.5555/work-b"),
+                "{url} compared equal to a different DOI"
+            );
+        }
+    }
+
+    #[test]
+    fn an_encoded_metadata_url_that_matches_does_not_block_enrichment() {
+        let url = "https://dx.doi.org/10.5555%2fwork-a";
+        assert_eq!(canonical_doi(url).as_deref(), Some("10.5555/work-a"));
+        let bib = enrich_bib(metadata_with_url(url), "10.5555/work-a");
+        assert!(bib.contains("journal = {Synthetic Journal}"), "{bib}");
+        assert!(bib.contains("volume = {707}"), "{bib}");
+        assert!(bib.contains("doi = {10.5555/work-a}"), "{bib}");
+        assert!(!bib.contains("Provider title"), "{bib}");
+    }
+
+    #[test]
+    fn an_encoded_metadata_url_for_another_doi_blocks_enrichment() {
+        for url in [
+            "https://doi.org/10.5555%2Fwork-a",
+            "https://dx.doi.org/10.5555%2fwork-a",
+        ] {
+            let bib = enrich_bib(metadata_with_url(url), "10.5555/work-b");
+            refuses_provider_additions(&bib);
+            assert!(!bib.contains("10.5555/work-b"), "{url}: {bib}");
+        }
+        let mut wrapped = source_record(
+            None,
+            vec![("title", "Synthetic quartz note"), ("year", "2024")],
+        );
+        wrapped["metadata"] = json!({"url": "https://doi.org/10.5555%2Fwork-a"});
+        let bib = enrich_bib(wrapped, "10.5555/work-b");
+        refuses_provider_additions(&bib);
+    }
+
+    #[test]
+    fn a_double_encoded_slash_is_not_the_doi() {
+        let url = "https://doi.org/10.5555%252Fwork-a";
+        assert_ne!(canonical_doi(url).as_deref(), Some("10.5555/work-a"));
+        assert!(
+            distinct_dois(url, "10.5555/work-a"),
+            "a double-encoded slash matched the DOI"
+        );
+        let bib = enrich_bib(metadata_with_url(url), "10.5555/work-a");
+        refuses_provider_additions(&bib);
+        assert!(!distinct_dois(
+            "https://example.org/10.5555%2Fwork-a",
+            "10.5555/work-a"
+        ));
+    }
+
+    #[test]
+    fn an_invalid_percent_escape_is_not_a_doi_match() {
+        for url in [
+            "https://doi.org/10.5555%2Gwork-a",
+            "https://dx.doi.org/10.5555%2",
+            "http://doi.org/10.5555%ZZwork-a",
+        ] {
+            assert_eq!(canonical_doi(url), None, "{url}");
+            assert!(distinct_dois(url, "10.5555/work-a"), "{url} matched a DOI");
+        }
+        let bib = enrich_bib(
+            metadata_with_url("https://doi.org/10.5555%2Gwork-a"),
+            "10.5555/work-a",
+        );
+        refuses_provider_additions(&bib);
     }
 
     #[test]
