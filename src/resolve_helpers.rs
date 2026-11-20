@@ -445,14 +445,17 @@ pub fn is_reverse_pressure_status(status: reqwest::StatusCode) -> bool {
 }
 
 const DEFAULT_REVERSE_RETRY_SECS: u64 = 2;
+const REVERSE_RETRY_CAP: Duration = Duration::from_secs(5);
 
-/// Wait `Retry-After` seconds when that header is a delay, otherwise 2s.
+/// Wait `Retry-After` seconds when that header is a delay, otherwise 2s,
+/// without letting an upstream hold the tool call longer than five seconds.
 pub fn reverse_retry_delay(retry_after: Option<&reqwest::header::HeaderValue>) -> Duration {
     retry_after
         .and_then(|value| value.to_str().ok())
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(DEFAULT_REVERSE_RETRY_SECS))
+        .min(REVERSE_RETRY_CAP)
 }
 
 /// POST `/reverse` once, then at most one more time after 503/504.
@@ -597,6 +600,15 @@ mod tests {
         assert_eq!(
             super::idempotent_retry_delay(None),
             std::time::Duration::from_secs(2)
+        );
+    }
+
+    #[test]
+    fn reverse_retry_delay_is_capped() {
+        let long = reqwest::header::HeaderValue::from_static("120");
+        assert_eq!(
+            super::reverse_retry_delay(Some(&long)),
+            std::time::Duration::from_secs(5)
         );
     }
 
