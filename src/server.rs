@@ -254,6 +254,15 @@ async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>, Pr
     }
 }
 
+pub(crate) async fn read_capped_api_body(
+    response: reqwest::Response,
+    source: &str,
+) -> Result<Vec<u8>, String> {
+    read_capped_body(response)
+        .await
+        .map_err(|error| provider_failure(source, error))
+}
+
 struct DoiLookup {
     metadata: serde_json::Value,
     retrieved_at: Instant,

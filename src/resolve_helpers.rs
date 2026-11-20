@@ -179,7 +179,9 @@ pub async fn classify_reverse_lookup_response(
 ) -> Result<Option<ReverseLookupMatch>, String> {
     match response {
         Ok(resp) if resp.status().is_success() => {
-            let payload: serde_json::Value = resp.json().await.unwrap_or_default();
+            let bytes = crate::server::read_capped_api_body(resp, "reverse lookup").await?;
+            let payload: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|_| "ERROR reverse lookup : response was not valid JSON".to_string())?;
             Ok(format_reverse_lookup_payload(&payload))
         }
         Ok(r) if r.status().as_u16() == 429 => Err(format!(
@@ -558,6 +560,30 @@ mod tests {
         assert!(
             invalid_request.contains("invalid filter"),
             "{invalid_request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reverse_lookup_rejects_a_malformed_success_body() {
+        let error = classify_reverse_lookup_response(Ok(response(200, "not json")))
+            .await
+            .expect_err("a malformed success body is an upstream failure");
+        assert!(error.contains("not valid JSON"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn reverse_lookup_rejects_an_oversized_success_body() {
+        let body = serde_json::json!({
+            "candidates": [],
+            "padding": "x".repeat(crate::constants::PROVIDER_BODY_LIMIT)
+        })
+        .to_string();
+        let error = classify_reverse_lookup_response(Ok(response(200, &body)))
+            .await
+            .expect_err("an oversized success body is an upstream failure");
+        assert!(
+            error.contains(&crate::constants::PROVIDER_BODY_LIMIT.to_string()),
+            "{error}"
         );
     }
 
