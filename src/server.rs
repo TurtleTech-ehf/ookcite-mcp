@@ -9674,7 +9674,7 @@ mod tests {
             &overrides::RecordedSources {
                 kept: 4,
                 conflicts: vec![
-                    "Citation key h5md110 kept the first source; a later entry with that key was not stored."
+                    "Citation key nimbus110 kept the first source; a later entry with that key was not stored."
                         .into(),
                 ],
             },
@@ -9685,7 +9685,7 @@ mod tests {
             missed.contains("1 imported entries were not stored."),
             "{missed}"
         );
-        assert!(missed.contains("Citation key h5md110"), "{missed}");
+        assert!(missed.contains("Citation key nimbus110"), "{missed}");
 
         let mut extra = String::new();
         super::Server::append_kept_sources(
@@ -9717,32 +9717,32 @@ mod tests {
     #[tokio::test]
     async fn import_keeps_every_source_and_the_count_matches_the_store() {
         let bib = "\
-@article{Bradley2017MMTF,
-  title = {MMTF\u{2014}An efficient file format},
+@article{quartzFmt2017,
+  title = {Quartz\u{2014}An efficient synthetic format},
   year = {2017},
-  doi = {10.1371/journal.pcbi.1005575}
+  doi = {10.5555/synth.quartz-fmt}
 }
-@article{Sehnal2020BinaryCIF,
-  title = {BinaryCIF and CIFTools\u{2014}Lightweight},
+@article{pebbleSet2020,
+  title = {PebbleSet and Toolset\u{2014}Lightweight},
   year = {2020},
-  doi = {10.1371/journal.pcbi.1008247}
+  doi = {10.5555/synth.pebble-set}
 }
-@misc{Westendorp2026Molly,
-  title = {Molly\u{2014}a fast reader},
+@misc{nimbusRead2026,
+  title = {Nimbus\u{2014}a fast reader},
   year = {2026},
-  doi = {10.5281/zenodo.18902574}
+  doi = {10.5555/synth.nimbus-read}
 }
-@misc{lammpsHowtoTriclinic2026,
-  title = {{LAMMPS} Documentation},
-  author = {{LAMMPS developers}},
+@misc{nimbusHowtoLattice2026,
+  title = {{Nimbus} Documentation},
+  author = {{Nimbus developers}},
   year = {2026},
-  howpublished = {\\url{https://docs.lammps.org/Howto_triclinic.html}}
+  howpublished = {\\url{https://example.org/Howto_lattice.html}}
 }
-@manual{h5md110,
-  author = {{H5MD developers}},
-  title = {H5MD format specification version 1.1.0},
+@manual{nimbus110,
+  author = {{Nimbus developers}},
+  title = {Nimbus format specification version 1.1.0},
   version = {1.1.0},
-  url = {https://h5md.nongnu.org/releases/h5md-1.1.0.html}
+  url = {https://example.org/releases/nimbus-1.1.0.html}
 }
 ";
         let mock = MockServer::start().await;
@@ -9769,49 +9769,49 @@ mod tests {
                 "name": "manuals",
                 "entries": [
                     {
-                        "id": "e-bradley",
+                        "id": "e-quartz",
                         "metadata": {
-                            "doi": "10.1371/journal.pcbi.1005575",
-                            "title": "MMTF---An efficient file format",
+                            "doi": "10.5555/synth.quartz-fmt",
+                            "title": "Quartz---An efficient synthetic format",
                             "entry_type": "article",
                             "year": 2017
                         }
                     },
                     {
-                        "id": "e-sehnal",
+                        "id": "e-pebble",
                         "metadata": {
-                            "doi": "10.1371/journal.pcbi.1008247",
-                            "title": "BinaryCIF and CIFTools---Lightweight",
+                            "doi": "10.5555/synth.pebble-set",
+                            "title": "PebbleSet and Toolset---Lightweight",
                             "entry_type": "article",
                             "year": 2020
                         }
                     },
                     {
-                        "id": "e-molly",
+                        "id": "e-nimbus-read",
                         "metadata": {
-                            "doi": "10.5281/zenodo.18902574",
-                            "title": "Molly---a fast reader",
+                            "doi": "10.5555/synth.nimbus-read",
+                            "title": "Nimbus---a fast reader",
                             "entry_type": "misc",
                             "year": 2026
                         }
                     },
                     {
-                        "id": "e-lammps",
+                        "id": "e-nimbus-doc",
                         "metadata": {
-                            "citation_key": "lammpsHowtoTriclinic2026",
-                            "title": "LAMMPS Documentation",
+                            "citation_key": "nimbusHowtoLattice2026",
+                            "title": "Nimbus Documentation",
                             "entry_type": "misc",
                             "year": 2026
                         }
                     },
                     {
-                        "id": "hmddevelopersH5mdFormatSpecification",
-                        "render": {"citation_key": "hmddevelopersH5mdFormatSpecification"},
+                        "id": "nimbusdevelopersNimbusFormatSpecification",
+                        "render": {"citation_key": "nimbusdevelopersNimbusFormatSpecification"},
                         "metadata": {
-                            "title": "H5MD format specification version 1.1.0",
+                            "title": "Nimbus format specification version 1.1.0",
                             "entry_type": "article",
-                            "authors": [{"family": "H5MD developers"}],
-                            "url": "https://h5md.nongnu.org/releases/h5md-1.1.0.html"
+                            "authors": [{"family": "Nimbus developers"}],
+                            "url": "https://example.org/releases/nimbus-1.1.0.html"
                         }
                     }
                 ]
@@ -9857,30 +9857,30 @@ mod tests {
                 "kept count {kept} != stored keys {stored_keys:?} in {imported}"
             ));
         }
-        if !stored_keys.iter().any(|key| key == "h5md110") {
-            problems.push(format!("h5md110 was not stored: {stored_keys:?}"));
+        if !stored_keys.iter().any(|key| key == "nimbus110") {
+            problems.push(format!("nimbus110 was not stored: {stored_keys:?}"));
         }
         for needle in [
-            "@manual{h5md110,",
-            "author = {{H5MD developers}}",
+            "@manual{nimbus110,",
+            "author = {{Nimbus developers}}",
             "version = {1.1.0}",
-            "url = {https://h5md.nongnu.org/releases/h5md-1.1.0.html}",
-            "MMTF\u{2014}An efficient",
-            "CIFTools\u{2014}Lightweight",
-            "Molly\u{2014}a fast reader",
-            r"\url{https://docs.lammps.org/Howto_triclinic.html}",
+            "url = {https://example.org/releases/nimbus-1.1.0.html}",
+            "Quartz\u{2014}An efficient",
+            "Toolset\u{2014}Lightweight",
+            "Nimbus\u{2014}a fast reader",
+            r"\url{https://example.org/Howto_lattice.html}",
         ] {
             if !exported.contains(needle) {
                 problems.push(format!("export missing {needle}"));
             }
         }
-        if exported.contains("hmddevelopersH5mdFormatSpecification") {
-            problems.push("export rekeyed h5md110".into());
+        if exported.contains("nimbusdevelopersNimbusFormatSpecification") {
+            problems.push("export rekeyed nimbus110".into());
         }
         if exported.contains("---") {
             problems.push("export rewrote an em dash to ---".into());
         }
-        if exported.contains(r"Howto\_triclinic") {
+        if exported.contains(r"Howto\_lattice") {
             problems.push("export escaped an underscore inside \\url".into());
         }
         assert!(problems.is_empty(), "{problems:#?}\n{exported}");

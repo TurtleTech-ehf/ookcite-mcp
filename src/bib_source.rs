@@ -1342,33 +1342,34 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_bradley_title_keeps_its_em_dash() {
-        let bib = "@article{Bradley2017MMTF,\n  title = {MMTF\u{2014}An efficient file format},\n  year = {2017}\n}\n";
+    fn a_kept_title_keeps_its_em_dash() {
+        let bib = "@article{quartzFmt2017,\n  title = {Quartz\u{2014}An efficient synthetic format},\n  year = {2017}\n}\n";
         let out = round_trip(bib);
         assert!(
-            out.contains("MMTF\u{2014}An efficient file format"),
+            out.contains("Quartz\u{2014}An efficient synthetic format"),
             "{out}"
         );
-        assert!(!out.contains("MMTF---"), "{out}");
+        assert!(!out.contains("Quartz---"), "{out}");
     }
 
     #[test]
-    fn a_kept_sehnal_title_keeps_its_em_dash() {
-        let bib = "@article{Sehnal2020BinaryCIF,\n  title = {BinaryCIF and CIFTools\u{2014}Lightweight},\n  year = {2020}\n}\n";
+    fn a_kept_compound_title_keeps_its_em_dash() {
+        let bib = "@article{pebbleSet2020,\n  title = {PebbleSet and Toolset\u{2014}Lightweight},\n  year = {2020}\n}\n";
         let out = round_trip(bib);
         assert!(
-            out.contains("BinaryCIF and CIFTools\u{2014}Lightweight"),
+            out.contains("PebbleSet and Toolset\u{2014}Lightweight"),
             "{out}"
         );
-        assert!(!out.contains("CIFTools---"), "{out}");
+        assert!(!out.contains("Toolset---"), "{out}");
     }
 
     #[test]
-    fn a_kept_westendorp_title_keeps_its_em_dash() {
-        let bib = "@misc{Westendorp2026Molly,\n  title = {Molly\u{2014}a fast reader},\n  year = {2026}\n}\n";
+    fn a_kept_misc_title_keeps_its_em_dash() {
+        let bib =
+            "@misc{nimbusRead2026,\n  title = {Nimbus\u{2014}a fast reader},\n  year = {2026}\n}\n";
         let out = round_trip(bib);
-        assert!(out.contains("Molly\u{2014}a fast reader"), "{out}");
-        assert!(!out.contains("Molly---"), "{out}");
+        assert!(out.contains("Nimbus\u{2014}a fast reader"), "{out}");
+        assert!(!out.contains("Nimbus---"), "{out}");
     }
 
     #[test]
@@ -1423,19 +1424,19 @@ mod tests {
 
     #[test]
     fn an_underscore_inside_url_or_href_is_not_escaped() {
-        let bib = r#"@misc{lammpsHowtoTriclinic2026,
-  howpublished = {\url{https://docs.lammps.org/Howto_triclinic.html}},
+        let bib = r#"@misc{nimbusHowtoLattice2026,
+  howpublished = {\url{https://example.org/Howto_lattice.html}},
   note = {\href{https://ex.org/a_b}{see_c} and d_e},
   url = {https://example.org/a_b%20c#frag},
-  doi = {10.1000/a_b}
+  doi = {10.5555/synth.a_b}
 }
 "#;
         let out = round_trip(bib);
         assert!(
-            out.contains(r"howpublished = {\url{https://docs.lammps.org/Howto_triclinic.html}}"),
+            out.contains(r"howpublished = {\url{https://example.org/Howto_lattice.html}}"),
             "{out}"
         );
-        assert!(!out.contains(r"Howto\_triclinic"), "{out}");
+        assert!(!out.contains(r"Howto\_lattice"), "{out}");
         assert!(
             out.contains(r"note = {\href{https://ex.org/a_b}{see_c} and d\_e}"),
             "{out}"
@@ -1446,7 +1447,7 @@ mod tests {
             out.contains("url = {https://example.org/a_b%20c#frag}"),
             "{out}"
         );
-        assert!(out.contains("doi = {10.1000/a_b}"), "{out}");
+        assert!(out.contains("doi = {10.5555/synth.a_b}"), "{out}");
         assert!(!out.contains(r"\%"), "{out}");
         assert!(!out.contains(r"\#"), "{out}");
     }
@@ -1529,28 +1530,28 @@ mod tests {
     #[test]
     fn a_manual_without_a_year_pairs_by_its_url() {
         let bib = "\
-@manual{h5md110,
-  author = {{H5MD developers}},
-  title = {H5MD format specification version 1.1.0},
+@manual{nimbus110,
+  author = {{Nimbus developers}},
+  title = {Nimbus format specification version 1.1.0},
   version = {1.1.0},
-  url = {https://h5md.nongnu.org/releases/h5md-1.1.0.html}
+  url = {https://example.org/releases/nimbus-1.1.0.html}
 }
 ";
         let server = vec![json!({
-            "id": "hmddevelopersH5mdFormatSpecification",
-            "render": {"citation_key": "hmddevelopersH5mdFormatSpecification"},
+            "id": "nimbusdevelopersNimbusFormatSpecification",
+            "render": {"citation_key": "nimbusdevelopersNimbusFormatSpecification"},
             "metadata": {
                 "title": "Resolved manual page",
                 "entry_type": "article",
-                "authors": [{"family": "H5MD developers"}],
-                "url": "https://h5md.nongnu.org/releases/h5md-1.1.0.html/ "
+                "authors": [{"family": "Nimbus developers"}],
+                "url": "https://example.org/releases/nimbus-1.1.0.html/ "
             }
         })];
         let paired = pair_with_server(bib, &server).unwrap();
         assert_eq!(paired.len(), 1, "{paired:?}");
         assert_eq!(
             paired[0].entry_id.as_deref(),
-            Some("hmddevelopersH5mdFormatSpecification"),
+            Some("nimbusdevelopersNimbusFormatSpecification"),
             "{paired:?}"
         );
         assert_eq!(paired[0].source.entry_type, "manual");
@@ -1585,14 +1586,14 @@ mod tests {
     fn a_yearless_title_pairs_when_the_server_title_is_unique() {
         let bib = "\
 @manual{spec,
-  title = {{H5MD} format specification},
+  title = {{Nimbus} format specification},
   version = {1.1.0}
 }
 ";
         let server = vec![json!({
             "id": "s-spec",
             "metadata": {
-                "title": "H5MD format specification",
+                "title": "Nimbus format specification",
                 "entry_type": "article"
             }
         })];

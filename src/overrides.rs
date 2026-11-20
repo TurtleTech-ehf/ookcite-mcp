@@ -1227,17 +1227,17 @@ mod tests {
         use crate::bib_source::{BibSource, PairedSource};
         let mut store = CollectionOverrides::new("paper");
         let source = BibSource {
-            key: "h5md110".into(),
+            key: "nimbus110".into(),
             entry_type: "manual".into(),
             fields: vec![
-                ("author".into(), "{H5MD developers}".into()),
+                ("author".into(), "{Nimbus developers}".into()),
                 (
                     "title".into(),
-                    "H5MD format specification version 1.1.0".into(),
+                    "Nimbus format specification version 1.1.0".into(),
                 ),
                 (
                     "url".into(),
-                    "https://h5md.nongnu.org/releases/h5md-1.1.0.html".into(),
+                    "https://example.org/releases/nimbus-1.1.0.html".into(),
                 ),
                 ("version".into(), "1.1.0".into()),
             ],
@@ -1262,7 +1262,7 @@ mod tests {
     fn a_citation_key_collision_keeps_the_first_source_only() {
         use crate::bib_source::{BibSource, PairedSource};
         let source = |title: &str| BibSource {
-            key: "h5md110".into(),
+            key: "nimbus110".into(),
             entry_type: "manual".into(),
             fields: vec![("title".into(), title.into())],
 
@@ -1273,7 +1273,7 @@ mod tests {
             PairedSource {
                 entry_id: None,
                 doi: None,
-                source: source("H5MD format specification"),
+                source: source("Nimbus format specification"),
             },
             PairedSource {
                 entry_id: None,
@@ -1288,7 +1288,7 @@ mod tests {
             .values()
             .filter_map(|entry| entry.source.as_ref().and_then(|item| item.field("title")))
             .collect();
-        assert_eq!(stored, vec!["H5MD format specification"]);
+        assert_eq!(stored, vec!["Nimbus format specification"]);
     }
 
     #[test]
@@ -1296,21 +1296,21 @@ mod tests {
         use crate::bib_source::BibSource;
         let mut store = CollectionOverrides::new("paper");
         store.entries.insert(
-            "key:h5md110".into(),
+            "key:nimbus110".into(),
             EntryOverride {
                 source: Some(BibSource {
-                    key: "h5md110".into(),
+                    key: "nimbus110".into(),
                     entry_type: "manual".into(),
                     fields: vec![
-                        ("author".into(), "{H5MD developers}".into()),
+                        ("author".into(), "{Nimbus developers}".into()),
                         (
                             "title".into(),
-                            "H5MD format specification version 1.1.0".into(),
+                            "Nimbus format specification version 1.1.0".into(),
                         ),
                         ("version".into(), "1.1.0".into()),
                         (
                             "url".into(),
-                            "https://h5md.nongnu.org/releases/h5md-1.1.0.html".into(),
+                            "https://example.org/releases/nimbus-1.1.0.html".into(),
                         ),
                     ],
 
@@ -1320,17 +1320,17 @@ mod tests {
             },
         );
         let mut entries = vec![json!({
-            "id": "hmddevelopersH5mdFormatSpecification",
-            "render": {"citation_key": "hmddevelopersH5mdFormatSpecification"},
+            "id": "nimbusdevelopersNimbusFormatSpecification",
+            "render": {"citation_key": "nimbusdevelopersNimbusFormatSpecification"},
             "metadata": {
                 "title": "Resolved manual page",
                 "entry_type": "article",
-                "url": "https://h5md.nongnu.org/releases/h5md-1.1.0.html/",
-                "authors": [{"family": "H5MD developers"}]
+                "url": "https://example.org/releases/nimbus-1.1.0.html/",
+                "authors": [{"family": "Nimbus developers"}]
             }
         })];
         store.apply_to_entries(&mut entries);
-        assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "h5md110");
+        assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "nimbus110");
         assert_eq!(entries[0]["metadata"]["entry_type"], "manual");
         assert_eq!(
             entries[0]["metadata"]["bib_source"]["fields"][2][1],
@@ -1783,7 +1783,7 @@ mod tests {
                     key: "spec".into(),
                     entry_type: "manual".into(),
                     fields: vec![
-                        ("title".into(), "{H5MD} format specification".into()),
+                        ("title".into(), "{Nimbus} format specification".into()),
                         ("version".into(), "1.1.0".into()),
                     ],
 
@@ -1794,7 +1794,7 @@ mod tests {
         );
         let mut entries = vec![json!({
             "id": "s-spec",
-            "metadata": {"title": "H5MD format specification", "entry_type": "article"}
+            "metadata": {"title": "Nimbus format specification", "entry_type": "article"}
         })];
         store.apply_to_entries(&mut entries);
         assert_eq!(entries[0]["metadata"]["bib_source"]["key"], "spec");

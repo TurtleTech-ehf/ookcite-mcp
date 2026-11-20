@@ -2309,31 +2309,31 @@ mod tests {
     }
 
     #[test]
-    fn frontiers_article_takes_every_crossref_author_and_the_article_number() {
+    fn an_article_number_keeps_every_provider_author() {
         let stored = json!({
-            "doi": "10.3389/fchem.2026.1807063",
+            "doi": "10.5555/synth.article-number",
             "entry_type": "techreport",
-            "title": "Enhanced climbing image nudged elastic band method with Hessian eigenmode alignment",
-            "authors": [{"family": "Goswami", "given": "Rohit"}],
-            "journal": "Frontiers in Chemistry",
-            "pages": "1807063"
+            "title": "Synthetic quartz note with Hessian mode labels",
+            "authors": [{"family": "Pell", "given": "Ada"}],
+            "journal": "Synthetic Journal",
+            "pages": "qz707"
         });
         let provider = json!({
             "crossref": {
                 "type": "journal-article",
-                "title": ["Enhanced climbing image nudged elastic band method with Hessian eigenmode alignment"],
-                "container-title": ["Frontiers in Chemistry"],
-                "volume": "14",
-                "article-number": "1807063",
-                "DOI": "10.3389/fchem.2026.1807063",
-                "URL": "https://doi.org/10.3389/fchem.2026.1807063",
+                "title": ["Synthetic quartz note with Hessian mode labels"],
+                "container-title": ["Synthetic Journal"],
+                "volume": "707",
+                "article-number": "qz707",
+                "DOI": "10.5555/synth.article-number",
+                "URL": "https://doi.org/10.5555/synth.article-number",
                 "author": [
-                    {"given": "Rohit", "family": "Goswami"},
-                    {"given": "Miha", "family": "Gunde"},
-                    {"given": "Hannes", "family": "Jónsson"}
+                    {"given": "Ada", "family": "Pell"},
+                    {"given": "Mira", "family": "Quinn"},
+                    {"given": "Nóra", "family": "Løvstad"}
                 ],
                 "issued": {"date-parts": [[2026]]},
-                "resource": {"primary": {"URL": "https://www.frontiersin.org/articles/10.3389/fchem.2026.1807063/full"}}
+                "resource": {"primary": {"URL": "https://example.org/articles/10.5555/synth.article-number/full"}}
             }
         });
         let bib = render_works(
@@ -2341,15 +2341,18 @@ mod tests {
             &BibOptions::default(),
         );
         assert!(bib.starts_with("@article{"), "{bib}");
-        assert!(bib.contains("Gunde"), "{bib}");
-        assert!(bib.contains("Jónsson") || bib.contains("Jonsson"), "{bib}");
-        assert!(bib.contains("eid = {1807063}"), "{bib}");
-        assert!(!bib.contains("1807063--1807063"), "{bib}");
-        assert!(!bib.contains("number = {1807063}"), "{bib}");
+        assert!(bib.contains("Quinn"), "{bib}");
+        assert!(bib.contains("Løvstad") || bib.contains("Lovstad"), "{bib}");
+        assert!(bib.contains("eid = {qz707}"), "{bib}");
+        assert!(!bib.contains("qz707--qz707"), "{bib}");
+        assert!(!bib.contains("number = {qz707}"), "{bib}");
         assert!(bib.contains("{Hessian}"), "{bib}");
-        assert!(bib.contains("url = {https://www.frontiersin.org/"), "{bib}");
+        assert!(
+            bib.contains("url = {https://example.org/articles/10.5555/synth.article-number/full}"),
+            "{bib}"
+        );
         assert!(!bib.contains("url = {https://doi.org/"), "{bib}");
-        assert!(bib.contains("goswamiEnhancedClimbingImage2026"), "{bib}");
+        assert!(bib.contains("pellSyntheticQuartzNote2026"), "{bib}");
     }
 
     #[test]
@@ -2579,19 +2582,19 @@ mod tests {
     #[test]
     fn caller_authors_win_when_they_were_edited() {
         let stored = json!({
-            "doi": "10.3389/fchem.2026.1807063",
-            "authors": [{"family": "Goswami", "given": "Rohit"}],
+            "doi": "10.5555/synth.caller-authors",
+            "authors": [{"family": "Pell", "given": "Ada"}],
             "user_fields": ["authors"]
         });
         let provider = json!({
             "crossref": {
                 "type": "journal-article",
-                "title": ["Enhanced climbing image"],
-                "container-title": ["Frontiers in Chemistry"],
-                "DOI": "10.3389/fchem.2026.1807063",
+                "title": ["Synthetic quartz note"],
+                "container-title": ["Synthetic Journal"],
+                "DOI": "10.5555/synth.caller-authors",
                 "author": [
-                    {"given": "Rohit", "family": "Goswami"},
-                    {"given": "Miha", "family": "Gunde"}
+                    {"given": "Ada", "family": "Pell"},
+                    {"given": "Mira", "family": "Quinn"}
                 ],
                 "issued": {"date-parts": [[2026]]}
             }
@@ -2600,8 +2603,8 @@ mod tests {
             &[assemble(&stored, Some(&provider))],
             &BibOptions::default(),
         );
-        assert!(!bib.contains("Gunde"), "{bib}");
-        assert!(bib.contains("Goswami, Rohit"), "{bib}");
+        assert!(!bib.contains("Quinn"), "{bib}");
+        assert!(bib.contains("Pell, Ada"), "{bib}");
     }
 
     #[test]
@@ -3030,11 +3033,11 @@ mod tests {
     fn a_server_rendered_title_turns_an_em_dash_into_tex() {
         let bib = render_stored_entries(&[json!({
             "entry_type": "article",
-            "title": "MMTF\u{2014}An efficient file format",
-            "citation_key": "Bradley2017MMTF"
+            "title": "Quartz\u{2014}An efficient synthetic format",
+            "citation_key": "quartzFmt2017"
         })])
         .expect("citation keys");
-        assert!(bib.contains("MMTF---"), "{bib}");
+        assert!(bib.contains("Quartz---"), "{bib}");
         assert!(!bib.contains('\u{2014}'), "{bib}");
     }
 
@@ -3042,14 +3045,14 @@ mod tests {
     fn a_locked_howpublished_url_keeps_its_underscore() {
         let bib = render_stored_entries(&[json!({
             "entry_type": "misc",
-            "title": "LAMMPS Documentation",
-            "citation_key": "lammpsHowtoTriclinic2026",
-            "howpublished": "\\url{https://docs.lammps.org/Howto_triclinic.html}",
+            "title": "Nimbus Documentation",
+            "citation_key": "nimbusHowtoLattice2026",
+            "howpublished": "\\url{https://example.org/Howto_lattice.html}",
             "user_fields": ["howpublished"]
         })])
         .expect("citation keys");
         assert!(
-            bib.contains(r"howpublished = {\url{https://docs.lammps.org/Howto_triclinic.html}}"),
+            bib.contains(r"howpublished = {\url{https://example.org/Howto_lattice.html}}"),
             "{bib}"
         );
         assert!(!bib.contains(r"Howto\_"), "{bib}");
@@ -3317,60 +3320,60 @@ mod tests {
     #[test]
     fn distinct_dois_are_not_merged() {
         let stored = json!({
-            "doi": "10.1000/ice",
+            "doi": "10.5555/synth.kept",
             "title": "Structural note",
-            "authors": [{"family": "Moore", "given": "Emily"}],
-            "journal": "Nature",
-            "volume": "479",
-            "pages": "506-508",
-            "date": {"year": 2011}
+            "authors": [{"family": "Pell", "given": "Ada"}],
+            "journal": "Synthetic Journal",
+            "volume": "707",
+            "pages": "11-19",
+            "date": {"year": 2024}
         });
         let provider = json!({
             "crossref": {
                 "type": "journal-article",
-                "DOI": "10.1000/melanoma",
+                "DOI": "10.5555/synth.other-work",
                 "title": ["A different paper"],
-                "author": [{"given": "Corine", "family": "Bertolotto"}],
-                "container-title": ["Nature"],
-                "volume": "480",
-                "issue": "7375",
-                "page": "94-98",
+                "author": [{"given": "Mira", "family": "Quinn"}],
+                "container-title": ["Synthetic Journal"],
+                "volume": "708",
+                "issue": "7",
+                "page": "21-29",
                 "publisher": "Other Press",
-                "issued": {"date-parts": [[2011]]}
+                "issued": {"date-parts": [[2024]]}
             }
         });
         let merged = merge_provider_metadata(&stored, &provider);
-        assert_eq!(merged["doi"], "10.1000/ice");
+        assert_eq!(merged["doi"], "10.5555/synth.kept");
         assert_eq!(merged["title"], "Structural note");
-        assert_eq!(merged["volume"], "479");
+        assert_eq!(merged["volume"], "707");
         assert!(merged.get("issue").is_none(), "{merged}");
-        assert_eq!(merged["authors"][0]["family"], "Moore");
+        assert_eq!(merged["authors"][0]["family"], "Pell");
         assert!(merged.get("publisher").is_none(), "{merged}");
     }
 
     #[test]
     fn enrich_does_not_fill_from_a_different_doi() {
         let stored = json!({
-            "doi": "10.1000/ice",
+            "doi": "10.5555/synth.kept",
             "bib_source": {
-                "key": "ice2011",
+                "key": "quartz2024",
                 "entry_type": "article",
                 "fields": [
                     ["title", "Structural note"],
-                    ["doi", "10.1000/ice"],
-                    ["year", "2011"]
+                    ["doi", "10.5555/synth.kept"],
+                    ["year", "2024"]
                 ]
             }
         });
         let provider = json!({
             "crossref": {
                 "type": "journal-article",
-                "DOI": "10.1000/melanoma",
+                "DOI": "10.5555/synth.other-work",
                 "title": ["A different paper"],
                 "container-title": ["Other Journal"],
-                "issue": "7375",
+                "issue": "7",
                 "publisher": "Other Press",
-                "issued": {"date-parts": [[2011]]}
+                "issued": {"date-parts": [[2024]]}
             }
         });
         let bib = render_pairs(
@@ -3382,10 +3385,10 @@ mod tests {
         )
         .expect("citation keys");
         assert!(bib.contains("title = {Structural note}"), "{bib}");
-        assert!(bib.contains("doi = {10.1000/ice}"), "{bib}");
+        assert!(bib.contains("doi = {10.5555/synth.kept}"), "{bib}");
         assert!(!bib.contains("Other Journal"), "{bib}");
-        assert!(!bib.contains("7375"), "{bib}");
-        assert!(!bib.contains("10.1000/melanoma"), "{bib}");
+        assert!(!bib.contains("number = {7}"), "{bib}");
+        assert!(!bib.contains("10.5555/synth.other-work"), "{bib}");
     }
 
     #[test]
