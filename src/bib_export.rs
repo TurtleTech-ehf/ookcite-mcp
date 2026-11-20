@@ -176,11 +176,11 @@ pub fn render_pairs(
             overlay_record_on_source(&mut source, stored);
             if options.enrich {
                 if let Some(provider) = provider {
-                    let provider_doi = work_from_provider_record(provider)
-                        .map(|work| work.doi)
-                        .unwrap_or_default();
-                    let source_doi = source.field("doi").unwrap_or("");
-                    if !distinct_dois(source_doi, &provider_doi) {
+                    // Every known DOI has to name the provider record: the
+                    // source `doi`, a DOI written in the source `url`, and the
+                    // DOI stored on the current metadata. One disagreement
+                    // keeps the import unchanged.
+                    if !item_has_a_different_doi(&source, stored, provider) {
                         let locked = user_fields(stored);
                         let additions = additions_from_provider(provider)
                             .into_iter()
@@ -785,11 +785,63 @@ fn apply_zenodo_payload(work: &mut Work, zenodo: &Value) {
     }
 }
 
+/// True when the source `doi`, a DOI in the source `url`, or the stored
+/// metadata DOI names a different work from the provider record.
+fn item_has_a_different_doi(
+    source: &crate::bib_source::BibSource,
+    stored: &Value,
+    provider: &Value,
+) -> bool {
+    let provider_doi = work_from_provider_record(provider)
+        .map(|work| work.doi)
+        .unwrap_or_default();
+    known_item_dois(source, stored)
+        .iter()
+        .any(|doi| distinct_dois(doi, &provider_doi))
+}
+
+fn known_item_dois(source: &crate::bib_source::BibSource, stored: &Value) -> Vec<String> {
+    let mut dois = Vec::new();
+    if let Some(doi) = source.field("doi") {
+        dois.push(doi.to_string());
+    }
+    if let Some(url) = source.field("url") {
+        dois.push(url.to_string());
+    }
+    if let Some(doi) = crate::collection_entries::entry_doi(stored) {
+        dois.push(doi);
+    }
+    dois
+}
+
 /// Both sides name a DOI and they are not the same work.
+///
+/// Comparison goes through [`canonical_doi`], so `doi:`, `https://doi.org/`,
+/// `http://dx.doi.org/`, and a scheme-less `doi.org/` host are the same DOI.
 fn distinct_dois(stored: &str, provider: &str) -> bool {
-    let stored = crate::collection_entries::normalize_doi_token(stored);
-    let provider = crate::collection_entries::normalize_doi_token(provider);
-    !stored.is_empty() && !provider.is_empty() && stored != provider
+    match (canonical_doi(stored), canonical_doi(provider)) {
+        (Some(stored), Some(provider)) => stored != provider,
+        _ => false,
+    }
+}
+
+/// Bare DOI, lower-cased, with a resolver prefix removed.
+///
+/// `clean_doi` already accepts `doi:` and `http(s)://(dx.)doi.org/`. A value
+/// whose text starts at `doi.org/` or `dx.doi.org/` is the same DOI.
+fn canonical_doi(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    crate::bib_audit::clean_doi(trimmed).or_else(|| scheme_free_doi(trimmed))
+}
+
+fn scheme_free_doi(raw: &str) -> Option<String> {
+    let lower = raw.to_ascii_lowercase();
+    const PREFIXES: [&str; 4] = ["dx.doi.org/doi/", "doi.org/doi/", "dx.doi.org/", "doi.org/"];
+    PREFIXES.iter().find_map(|prefix| {
+        lower
+            .strip_prefix(prefix)
+            .and_then(crate::bib_audit::clean_doi)
+    })
 }
 
 fn work_from_stored(meta: &Value) -> Work {
@@ -3334,6 +3386,354 @@ mod tests {
         assert!(!bib.contains("Other Journal"), "{bib}");
         assert!(!bib.contains("7375"), "{bib}");
         assert!(!bib.contains("10.1000/melanoma"), "{bib}");
+    }
+
+    #[test]
+    fn equivalent_doi_prefixes_are_the_same_work() {
+        let bare = "10.5555/synth.item";
+        let forms = [
+            "10.5555/synth.item",
+            "10.5555/SYNTH.ITEM",
+            "doi:10.5555/synth.item",
+            "DOI:10.5555/SYNTH.ITEM",
+            "Doi:10.5555/synth.item",
+            "https://doi.org/10.5555/synth.item",
+            "http://doi.org/10.5555/synth.item",
+            "https://dx.doi.org/10.5555/synth.item",
+            "http://dx.doi.org/10.5555/synth.item",
+            "https://doi.org/doi/10.5555/synth.item",
+            "http://doi.org/doi/10.5555/synth.item",
+            "doi.org/10.5555/synth.item",
+            "DOI.org/10.5555/SYNTH.ITEM",
+            "dx.doi.org/10.5555/synth.item",
+            "doi.org/doi/10.5555/synth.item",
+            "dx.doi.org/doi/10.5555/synth.item",
+            "  https://doi.org/10.5555/synth.item  ",
+            "https://doi.org/10.5555/synth.item.",
+        ];
+        for form in forms {
+            assert!(
+                !distinct_dois(form, bare),
+                "same work reported distinct: {form}"
+            );
+            assert!(
+                !distinct_dois(bare, form),
+                "same work reported distinct from the provider side: {form}"
+            );
+        }
+        assert!(
+            !distinct_dois(r"10.5555/synth\_item", "10.5555/synth_item"),
+            "an escaped underscore compared as a different DOI"
+        );
+        assert!(
+            distinct_dois("10.5555/synth.item", "10.5555/synth.other"),
+            "different works compared equal"
+        );
+        assert!(
+            distinct_dois(
+                "https://doi.org/10.5555/synth.item",
+                "https://dx.doi.org/10.5555/synth.other"
+            ),
+            "different URL forms compared equal"
+        );
+        assert!(
+            distinct_dois("doi.org/10.5555/synth.item", "doi.org/10.5555/synth.other"),
+            "different scheme-less URLs compared equal"
+        );
+        assert!(
+            distinct_dois(
+                "dx.doi.org/10.5555/synth.item",
+                "dx.doi.org/10.5555/synth.other"
+            ),
+            "different dx.doi.org URLs compared equal"
+        );
+        assert!(
+            distinct_dois(
+                "doi.org/doi/10.5555/synth.item",
+                "doi.org/doi/10.5555/synth.other"
+            ),
+            "different doi.org/doi URLs compared equal"
+        );
+        assert!(
+            distinct_dois(
+                "dx.doi.org/doi/10.5555/synth.item",
+                "dx.doi.org/doi/10.5555/synth.other"
+            ),
+            "different dx.doi.org/doi URLs compared equal"
+        );
+        assert!(
+            distinct_dois("doi:10.5555/synth.item", "DOI:10.5555/synth.other"),
+            "different doi: forms compared equal"
+        );
+        assert!(
+            distinct_dois(
+                "http://doi.org/10.5555/synth.item",
+                "http://dx.doi.org/10.5555/synth.other"
+            ),
+            "different http DOI URLs compared equal"
+        );
+        assert!(!distinct_dois("", "10.5555/synth.item"));
+        assert!(!distinct_dois("10.5555/synth.item", ""));
+        assert!(!distinct_dois("not-a-doi", "10.5555/synth.item"));
+        assert!(!distinct_dois(
+            "https://example.org/synth-quartz",
+            "10.5555/synth.item"
+        ));
+    }
+
+    #[test]
+    fn equivalent_doi_urls_still_merge() {
+        for stored_doi in [
+            "https://doi.org/10.5555/synth.same",
+            "http://dx.doi.org/10.5555/synth.same",
+            "Doi:10.5555/synth.same",
+            "doi.org/10.5555/synth.same",
+        ] {
+            let stored = json!({
+                "doi": stored_doi,
+                "title": "Synthetic quartz note"
+            });
+            let provider = json!({
+                "crossref": {
+                    "type": "journal-article",
+                    "DOI": "10.5555/synth.same",
+                    "title": ["Synthetic quartz note"],
+                    "container-title": ["Synthetic Journal"],
+                    "issued": {"date-parts": [[2024]]}
+                }
+            });
+            let merged = merge_provider_metadata(&stored, &provider);
+            assert_eq!(
+                merged["journal"], "Synthetic Journal",
+                "stored {stored_doi} was not merged: {merged}"
+            );
+            assert_eq!(merged["title"], "Synthetic quartz note");
+        }
+    }
+
+    fn enrich_bib(stored: Value, provider_doi: &str) -> String {
+        let provider = json!({
+            "crossref": {
+                "type": "journal-article",
+                "DOI": provider_doi,
+                "title": ["Provider title that must not replace"],
+                "container-title": ["Synthetic Journal"],
+                "volume": "707",
+                "publisher": "Synthetic Press",
+                "issued": {"date-parts": [[2024]]}
+            }
+        });
+        render_pairs(
+            &[(stored, Some(provider))],
+            &BibOptions {
+                enrich: true,
+                ..BibOptions::default()
+            },
+        )
+        .expect("citation keys")
+    }
+
+    fn source_record(doi: Option<&str>, fields: Vec<(&str, &str)>) -> Value {
+        let mut record = json!({
+            "title": "Synthetic quartz note",
+            "bib_source": {
+                "key": "synthQuartz",
+                "entry_type": "article",
+                "fields": fields
+                    .into_iter()
+                    .map(|(name, value)| json!([name, value]))
+                    .collect::<Vec<_>>()
+            }
+        });
+        if let Some(doi) = doi {
+            record["doi"] = json!(doi);
+        }
+        record
+    }
+
+    fn refuses_provider_additions(bib: &str) {
+        assert!(bib.contains("title = {Synthetic quartz note}"), "{bib}");
+        assert!(bib.contains("year = {2024}"), "{bib}");
+        assert!(!bib.contains("Synthetic Journal"), "{bib}");
+        assert!(!bib.contains("Synthetic Press"), "{bib}");
+        assert!(!bib.contains("volume = {707}"), "{bib}");
+        assert!(!bib.contains("Provider title"), "{bib}");
+    }
+
+    #[test]
+    fn enrichment_refuses_a_stored_doi_when_the_source_has_none() {
+        let stored = source_record(
+            Some("10.5555/synth.stored"),
+            vec![("title", "Synthetic quartz note"), ("year", "2024")],
+        );
+        let bib = enrich_bib(stored, "10.5555/synth.provider");
+        refuses_provider_additions(&bib);
+        assert!(!bib.contains("doi = "), "{bib}");
+    }
+
+    #[test]
+    fn enrichment_refuses_a_doi_url_in_the_source() {
+        let stored = source_record(
+            Some("10.5555/synth.provider"),
+            vec![
+                ("title", "Synthetic quartz note"),
+                ("year", "2024"),
+                ("url", "https://doi.org/10.5555/synth.from-url"),
+            ],
+        );
+        let bib = enrich_bib(stored, "10.5555/synth.provider");
+        refuses_provider_additions(&bib);
+        assert!(!bib.contains("doi = "), "{bib}");
+        assert!(
+            bib.contains("url = {https://doi.org/10.5555/synth.from-url}"),
+            "{bib}"
+        );
+
+        let scheme_less = source_record(
+            None,
+            vec![
+                ("title", "Synthetic quartz note"),
+                ("year", "2024"),
+                ("url", "doi.org/10.5555/synth.from-url"),
+            ],
+        );
+        let bib = enrich_bib(scheme_less, "10.5555/synth.provider");
+        refuses_provider_additions(&bib);
+        assert!(!bib.contains("doi = "), "{bib}");
+        assert!(
+            bib.contains("url = {doi.org/10.5555/synth.from-url}"),
+            "{bib}"
+        );
+
+        let dx = source_record(
+            Some("http://dx.doi.org/10.5555/synth.provider"),
+            vec![
+                ("title", "Synthetic quartz note"),
+                ("year", "2024"),
+                ("url", "dx.doi.org/10.5555/synth.from-url"),
+            ],
+        );
+        let bib = enrich_bib(dx, "10.5555/synth.provider");
+        refuses_provider_additions(&bib);
+        assert!(!bib.contains("doi = "), "{bib}");
+    }
+
+    #[test]
+    fn enrichment_refuses_when_any_known_doi_differs() {
+        let source_field = source_record(
+            Some("10.5555/synth.provider"),
+            vec![
+                ("title", "Synthetic quartz note"),
+                ("year", "2024"),
+                ("doi", "10.5555/synth.stored"),
+            ],
+        );
+        let source_bib = enrich_bib(source_field, "10.5555/synth.provider");
+        refuses_provider_additions(&source_bib);
+        assert!(
+            source_bib.contains("doi = {10.5555/synth.stored}"),
+            "{source_bib}"
+        );
+        assert!(
+            !source_bib.contains("doi = {10.5555/synth.provider}"),
+            "{source_bib}"
+        );
+
+        let stored_field = source_record(
+            Some("https://doi.org/10.5555/synth.stored"),
+            vec![
+                ("title", "Synthetic quartz note"),
+                ("year", "2024"),
+                ("doi", "10.5555/synth.provider"),
+                ("url", "https://doi.org/10.5555/synth.provider"),
+            ],
+        );
+        let stored_bib = enrich_bib(stored_field, "10.5555/synth.provider");
+        refuses_provider_additions(&stored_bib);
+        assert!(
+            stored_bib.contains("doi = {10.5555/synth.provider}"),
+            "{stored_bib}"
+        );
+        assert!(
+            stored_bib.contains("url = {https://doi.org/10.5555/synth.provider}"),
+            "{stored_bib}"
+        );
+    }
+
+    #[test]
+    fn equivalent_doi_forms_are_enriched_and_an_ordinary_url_is_not_a_doi() {
+        for (stored_doi, source_doi, provider_doi) in [
+            (
+                Some("10.5555/synth.same"),
+                "https://doi.org/10.5555/synth.same",
+                "10.5555/synth.same",
+            ),
+            (
+                Some("https://doi.org/10.5555/synth.same"),
+                "10.5555/synth.same",
+                "http://dx.doi.org/10.5555/synth.same",
+            ),
+            (
+                Some("doi.org/10.5555/synth.same"),
+                "Doi:10.5555/synth.same",
+                "https://dx.doi.org/10.5555/SYNTH.SAME",
+            ),
+            (
+                None,
+                "http://doi.org/10.5555/synth.same",
+                "doi:10.5555/synth.same",
+            ),
+        ] {
+            let stored = source_record(
+                stored_doi,
+                vec![
+                    ("title", "Synthetic quartz note"),
+                    ("year", "2024"),
+                    ("doi", source_doi),
+                    ("url", "https://example.org/synth-quartz"),
+                ],
+            );
+            let bib = enrich_bib(stored, provider_doi);
+            assert!(
+                bib.contains("journal = {Synthetic Journal}"),
+                "provider {provider_doi} did not fill source {source_doi}: {bib}"
+            );
+            assert!(bib.contains("volume = {707}"), "{bib}");
+            assert!(bib.contains(&format!("doi = {{{source_doi}}}")), "{bib}");
+            assert!(!bib.contains("Provider title"), "{bib}");
+            assert!(
+                bib.contains("url = {https://example.org/synth-quartz}"),
+                "{bib}"
+            );
+        }
+
+        let matching_url = source_record(
+            Some("10.5555/synth.same"),
+            vec![
+                ("title", "Synthetic quartz note"),
+                ("year", "2024"),
+                ("url", "https://doi.org/10.5555/synth.same"),
+            ],
+        );
+        let bib = enrich_bib(matching_url, "10.5555/synth.same");
+        assert!(bib.contains("journal = {Synthetic Journal}"), "{bib}");
+        assert!(bib.contains("doi = {10.5555/synth.same}"), "{bib}");
+        assert!(
+            bib.contains("url = {https://doi.org/10.5555/synth.same}"),
+            "{bib}"
+        );
+
+        let no_known_doi = source_record(
+            None,
+            vec![
+                ("title", "Synthetic quartz note"),
+                ("year", "2024"),
+                ("url", "https://example.org/synth-quartz"),
+            ],
+        );
+        let bib = enrich_bib(no_known_doi, "10.5555/synth.same");
+        assert!(bib.contains("journal = {Synthetic Journal}"), "{bib}");
+        assert!(bib.contains("doi = {10.5555/synth.same}"), "{bib}");
     }
 
     #[test]
