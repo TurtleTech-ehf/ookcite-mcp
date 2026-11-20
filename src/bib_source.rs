@@ -20,7 +20,7 @@
 //! - a kept source is copied with its characters, including a Unicode dash;
 //! - a bare `&`, `%`, `#`, or `_` outside a `\url{}` or `\href{}{}` argument
 //!   and outside `$...$` or `$$...$$` is escaped, and an escaped one is not
-//!   escaped again.
+//!   escaped again. `\$` is not a math delimiter; `\\$` is.
 //!
 //! Dash normalization belongs to a server-rendered entry that has no kept
 //! source. It is not applied on the way back out of a kept source.
@@ -543,15 +543,18 @@ fn command_name(chars: &[char], start: usize) -> Option<(String, usize)> {
 
 /// Byte after a complete `$...$` or `$$...$$` that starts at `index`.
 ///
-/// An escaped `\$` does not open math. An unclosed opener is not protected.
+/// A `$` preceded by an odd number of backslashes is escaped (`\$`, `\\\$`)
+/// and neither opens nor closes math. An even number (`\\$`) leaves a real
+/// delimiter. An unclosed opener is not protected.
 fn math_span_end(chars: &[char], index: usize) -> Option<usize> {
-    if chars.get(index) != Some(&'$') || (index > 0 && chars[index - 1] == '\\') {
+    if chars.get(index) != Some(&'$') || dollar_is_escaped(chars, index) {
         return None;
     }
     if chars.get(index + 1) == Some(&'$') {
         let mut cursor = index + 2;
         while cursor + 1 < chars.len() {
-            if chars[cursor] == '$' && chars[cursor + 1] == '$' {
+            if chars[cursor] == '$' && chars[cursor + 1] == '$' && !dollar_is_escaped(chars, cursor)
+            {
                 return Some(cursor + 2);
             }
             cursor += 1;
@@ -560,12 +563,23 @@ fn math_span_end(chars: &[char], index: usize) -> Option<usize> {
     }
     let mut cursor = index + 1;
     while cursor < chars.len() {
-        if chars[cursor] == '$' {
+        if chars[cursor] == '$' && !dollar_is_escaped(chars, cursor) {
             return Some(cursor + 1);
         }
         cursor += 1;
     }
     None
+}
+
+/// True when an odd run of `\` characters immediately before `index` escapes it.
+fn dollar_is_escaped(chars: &[char], index: usize) -> bool {
+    let mut slashes = 0usize;
+    let mut cursor = index;
+    while cursor > 0 && chars[cursor - 1] == '\\' {
+        slashes += 1;
+        cursor -= 1;
+    }
+    slashes % 2 == 1
 }
 
 fn end_of_brace_group(chars: &[char], open: usize) -> Option<usize> {
@@ -1460,6 +1474,29 @@ mod tests {
         let out = round_trip(bib);
         assert!(out.contains("{SO}$_4^{2-}$ and H\\_2O"), "{out}");
         assert!(!out.contains(r"\_4"), "{out}");
+    }
+
+    #[test]
+    fn an_escaped_dollar_does_not_close_math_and_a_doubled_backslash_does() {
+        assert_eq!(escape_latex_specials(r"$a_b\$c_d$"), r"$a_b\$c_d$");
+        assert_eq!(escape_latex_specials(r"$a_b\$"), r"$a\_b\$");
+        assert_eq!(escape_latex_specials(r"\\$a_b$"), r"\\$a_b$");
+        assert_eq!(escape_latex_specials(r"a_b\\$c_d$"), r"a\_b\\$c_d$");
+        assert_eq!(escape_latex_specials(r"$a_b\\$c_d$"), r"$a_b\\$c\_d$");
+        assert_eq!(escape_latex_specials(r"$a_b\\\$c_d$"), r"$a_b\\\$c_d$");
+        assert_eq!(escape_latex_specials(r"\$a_b$"), r"\$a\_b$");
+        assert_eq!(escape_latex_specials(r"$$a_b\$$c_d$$"), r"$$a_b\$$c_d$$");
+        assert_eq!(escape_latex_specials(r"$$a_b\\$$c_d$$"), r"$$a_b\\$$c\_d$$");
+        let bib = r"
+@article{synthMath,
+  title = {Keep $a_b\$c_d$ and \\$e_f$},
+  year = {2024}
+}
+";
+        let out = round_trip(bib);
+        assert!(out.contains(r"Keep $a_b\$c_d$ and \\$e_f$"), "{out}");
+        assert!(!out.contains(r"c\_d"), "{out}");
+        assert!(!out.contains(r"e\_f"), "{out}");
     }
 
     #[test]
