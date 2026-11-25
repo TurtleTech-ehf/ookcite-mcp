@@ -414,6 +414,23 @@ pub struct Server {
     shared_http: bool,
 }
 
+/// Only an OokCite 404 continues to the publisher. A 429, 401, or 5xx stays an error.
+fn corpus_response_is_a_miss(status: reqwest::StatusCode) -> bool {
+    status.as_u16() == 404
+}
+
+fn member_failure_is_degraded(reason: &str) -> bool {
+    reason.contains("RATE LIMITED")
+        || reason.contains("TIMEOUT")
+        || reason.contains("TEMPORARY ERROR")
+        || reason.contains("UNREACHABLE")
+        || reason.contains("PAYMENT REQUIRED")
+        || reason.contains("ACCESS DENIED")
+        || reason.starts_with("ERROR ")
+        || reason.starts_with("UNREGISTERED")
+        || reason.starts_with("CLIENT ERROR")
+}
+
 #[tool_router]
 impl Server {
     pub fn new() -> Self {
@@ -571,7 +588,7 @@ impl Server {
                 if self.providers.is_some() {
                     match self.provider_record(doi).await {
                         Ok(Some(record)) => {
-                            meta = bib_export::merge_provider_metadata(&meta, &record);
+                            meta = bib_export::merge_corpus_first(&meta, &record);
                             provider_record = Some(record);
                         }
                         Ok(None) => {}
@@ -601,7 +618,7 @@ impl Server {
                     provider_record,
                 })
             }
-            Ok(resp) if resp.status().as_u16() == 404 => {
+            Ok(resp) if corpus_response_is_a_miss(resp.status()) => {
                 // Registered DOI (require_registered passed) but the OokCite
                 // corpus has no entry. The old path reported INVALID and
                 // stopped, which is where agents learned to bypass this
@@ -634,7 +651,7 @@ impl Server {
                 }
             }
             Ok(resp) => Err(classify_lookup_doi_failure(resp, doi).await),
-            Err(e) => Err(format!("ERROR {doi} : {e}")),
+            Err(e) => Err(format!("ERROR {doi} : {}", policy::scrub_error(&e))),
         }
     }
 
@@ -677,7 +694,12 @@ impl Server {
                 }
                 serde_json::Value::Null
             }
-            Err(error) => return DoiOutcome::Upstream(format!("ERROR {doi} : {error}")),
+            Err(error) => {
+                return DoiOutcome::Upstream(format!(
+                    "ERROR {doi} : {}",
+                    policy::scrub_error(&error)
+                ))
+            }
         };
         let (provider, provider_error) = match self.provider_record(doi).await {
             Ok(record) => (record, None),
@@ -691,7 +713,7 @@ impl Server {
         }
         let metadata = match &provider {
             Some(record) if metadata.is_object() => {
-                bib_export::merge_provider_metadata(&metadata, record)
+                bib_export::merge_corpus_first(&metadata, record)
             }
             Some(record) => bib_export::merge_provider_metadata(&serde_json::json!({}), record),
             None => metadata,
@@ -945,12 +967,9 @@ impl Server {
         }
     }
 
-    /// Collection-local fallback when no publisher record can be fetched.
-    /// Never used on its own by `batch_format` or `verify_references`: both
-    /// go through `member_metadata`, which asks the publisher first so a
-    /// stored DOI is not formatted as an authorless "(in your collection)"
-    /// stub when Crossref or DataCite still hold the work. The stub stays
-    /// as the offline / provider-unavailable degradation.
+    /// Collection-local fallback when OokCite and the publisher could not
+    /// be read. `member_metadata` asks OokCite first. The stub is what is
+    /// left when that lookup is a miss and no publisher record fills it.
     fn synthetic_member_metadata(doi: &str, title: Option<&str>) -> serde_json::Value {
         serde_json::json!({
             "doi": doi,
@@ -1003,44 +1022,25 @@ impl Server {
 
     /// Metadata for a DOI the caller already keeps in a collection.
     ///
-    /// Collection membership is the free path: it skips the OokCite lookup
-    /// meter. The previous policy also skipped the publisher, which left
-    /// `batch_format` and `verify_references` formatting an authorless
-    /// "(in your collection)" stub -- a line that said VALID without
-    /// checking the record. This fetches Crossref or DataCite directly
-    /// (same path the fall-through and audit tools take), merges those
-    /// fields, and returns the full record. No metered OokCite call is
-    /// made. A provider failure degrades to the stub so an offline run
-    /// still formats something rather than erroring out.
+    /// Membership is not a substitute for the corpus. The lookup is the
+    /// same one `validate_doi` uses: OokCite first, and the publisher only
+    /// when the corpus returns 404. A 429, 401, or 5xx from OokCite does
+    /// not continue to Crossref. A corpus hit keeps the corpus title and
+    /// authors. A failure that is not a miss is marked degraded so
+    /// `verify_references` does not print VALID for an unread row.
     async fn member_metadata(&self, doi: &str, title: Option<&str>) -> serde_json::Value {
-        if self.providers.is_none() {
-            // No provider base configured (unit tests, offline run):
-            // the stub is the final answer, not a publisher failure, so
-            // the degraded marker is not attached.
-            return Self::synthetic_member_metadata(doi, title);
-        }
-        match self.provider_record(doi).await {
-            Ok(Some(record)) => {
-                let seed = serde_json::json!({ "doi": doi });
-                let mut merged = bib_export::merge_provider_metadata(&seed, &record);
-                if let Some(object) = merged.as_object_mut() {
+        match self.lookup_doi_with_freshness(doi).await {
+            Ok(lookup) => {
+                let mut meta = lookup.metadata;
+                if let Some(object) = meta.as_object_mut() {
                     object.insert(
                         Self::MEMBER_PROVIDER_FETCHED_KEY.to_string(),
                         serde_json::Value::Bool(true),
                     );
                 }
-                merged
+                meta
             }
-            // A clean 404 from both Crossref and DataCite: the collection
-            // DOI exists (the user has it) but no publisher record is
-            // reachable. The stub is honest here.
-            Ok(None) => Self::synthetic_member_metadata(doi, title),
-            // A 429, a 5xx, a timeout, or a transport failure: the
-            // record probably exists but we could not read it. Mark the
-            // stub degraded so verify_references prints DEGRADED instead
-            // of VALID, and keep the reason on the stub so an agent can
-            // retry later.
-            Err(reason) => {
+            Err(reason) if member_failure_is_degraded(&reason) => {
                 let mut stub = Self::synthetic_member_metadata(doi, title);
                 if let Some(object) = stub.as_object_mut() {
                     object.insert(
@@ -1050,6 +1050,7 @@ impl Server {
                 }
                 stub
             }
+            Err(_) => Self::synthetic_member_metadata(doi, title),
         }
     }
 
@@ -1121,7 +1122,7 @@ impl Server {
     /// Full readiness report (API health + optional /me; never prints full API key).
     pub async fn doctor_report(&self) -> String {
         let mut out = policy::policy_summary_lines();
-        out.push(format!("API base: {}", self.api_base));
+        out.push(format!("API base: {}", policy::redact_url(&self.api_base)));
 
         let health = self
             .send_read(|| self.request(endpoints::HEALTH, &[]))
@@ -1138,7 +1139,10 @@ impl Server {
                 out.push(setup_help_block());
             }
             Err(e) => {
-                out.push(format!("API health: unreachable ({e})"));
+                out.push(format!(
+                    "API health: unreachable ({})",
+                    policy::scrub_error(&e)
+                ));
                 out.push(setup_help_block());
             }
         }
@@ -1165,7 +1169,10 @@ impl Server {
                     ));
                     out.push(setup_help_block());
                 }
-                Err(e) => out.push(format!("Auth /me: request failed ({e})")),
+                Err(e) => out.push(format!(
+                    "Auth /me: request failed ({})",
+                    policy::scrub_error(&e)
+                )),
             }
         } else {
             out.push("Auth /me: skipped (no OOKCITE_API_KEY; anonymous IP limits apply)".into());
@@ -1238,13 +1245,13 @@ impl Server {
                 }
             }
             Ok(resp) => failure_text(resp, "Style search failed").await,
-            Err(error) => format!("Style search failed: {error}"),
+            Err(error) => format!("Style search failed: {}", policy::scrub_error(&error)),
         }
     }
 
     #[tool(
         name = "validate_doi",
-        description = "First call for any DOI. Checks the DOI is registered at doi.org, reads the full record (title, authors with ORCID when the provider carries it, year, container/journal, volume, issue, pages, publisher, URL, abstract, references, license, type, retraction/update-to, open-access PDF URL when known), and compares it with whichever claim fields you pass. Call this before you ask Crossref, OpenAlex, DataCite or Semantic Scholar directly: when the OokCite corpus holds the DOI you get the corpus record overlaid with the provider's; when the corpus does not, OokCite falls through to Crossref (then DataCite, then Zenodo) and returns the publisher record itself. The content block is a human-readable VALID/NOT-IN-CORPUS/MISMATCH/INCOMPLETE/INVALID summary; structured_content is the full ookcite.work_record/v1 (schema advertised on the tool listing). Every field in it is a {value, provenance} pair — provenance is ookcite_corpus, ookcite_corpus+<provider> when both sides agree, crossref, datacite, zenodo, or unknown — plus a coarse confidence (high/medium/low) and the metadata age in seconds. OokCite-first on a corpus hit: a corpus title or author list wins over a disagreeing provider's; the record carries both sources in the provenance so you can see they disagreed. VALID means every claim field you passed agrees with the record. MISMATCH is a disagreement. INCOMPLETE is a claim field the record does not carry. NOT-IN-CORPUS is a corpus miss answered by the publisher. INVALID is a DOI the registrar does not know. Omitting the claim only checks the DOI exists, which does not prove it is the paper you named. Prefer verify_references for several DOIs.",
+        description = "First call for any DOI. Checks the DOI is registered at doi.org, reads the full record (title, authors with ORCID when the provider carries it, year, container/journal, volume, issue, pages, publisher, URL, abstract, references, license, type, retraction/update-to, open-access PDF URL when known), and compares it with whichever claim fields you pass. Call this before you ask Crossref, OpenAlex, DataCite or Semantic Scholar directly. On a corpus hit the summary, the claim check, and BibTeX/RIS use the corpus title and author list; a provider fills only a field the corpus left empty. A registered DOI the corpus does not have falls through to Crossref, then DataCite. Zenodo is read only for a 10.5281/zenodo DOI that already has a Crossref or DataCite body. An OokCite 429, 401, or 5xx does not fall through. The content block is a human-readable VALID/NOT-IN-CORPUS/MISMATCH/INCOMPLETE/INVALID summary; structured_content is ookcite.work_record/v1 on success and on failure (schema advertised on the tool listing). Every field is a {value, provenance} pair. Provenance is ookcite_corpus, ookcite_corpus+<provider> only when that field agrees, crossref, datacite, zenodo, or unknown. A disagreement stays ookcite_corpus and is listed in warnings. Confidence is high, medium, or low. VALID means every claim field you passed agrees with the corpus record. MISMATCH is a disagreement. INCOMPLETE is a claim field the record does not carry. NOT-IN-CORPUS is a corpus miss answered by the publisher. INVALID is a DOI the registrar does not know. A failure still returns the work-record envelope with source error. Omitting the claim only checks the DOI exists, which does not prove it is the paper you named. Prefer verify_references for several DOIs.",
         annotations(title = "Validate DOI", read_only_hint = true, idempotent_hint = true),
         output_schema = crate::work_record::output_schema()
     )]
@@ -1344,7 +1351,7 @@ impl Server {
                 format!("TEMPORARY ERROR: {}", error_detail(r).await)
             }
             Ok(_) => format!("ISBN {} not found", args.isbn),
-            Err(e) => format!("ERROR: {e}"),
+            Err(e) => format!("ERROR: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -1558,7 +1565,7 @@ impl Server {
                 format!("TEMPORARY ERROR: {}", error_detail(r).await)
             }
             Ok(_) => "Failed to parse citations".into(),
-            Err(e) => format!("Parse citations failed: {e}"),
+            Err(e) => format!("Parse citations failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -1686,7 +1693,7 @@ impl Server {
                 format!("TEMPORARY ERROR: {}", error_detail(r).await)
             }
             Ok(_) => "Debug resolve failed".into(),
-            Err(e) => format!("Debug resolve failed: {e}"),
+            Err(e) => format!("Debug resolve failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -1747,7 +1754,7 @@ impl Server {
                 }
             }
             Ok(r) => failure_text(r, "Format failed").await,
-            Err(error) => format!("Format failed: {error}"),
+            Err(error) => format!("Format failed: {}", policy::scrub_error(&error)),
         }
     }
 
@@ -1789,13 +1796,13 @@ impl Server {
                 format!("Grouped Citation: {plain}")
             }
             Ok(resp) => failure_text(resp, "Group citation failed").await,
-            Err(error) => format!("Group citation failed: {error}"),
+            Err(error) => format!("Group citation failed: {}", policy::scrub_error(&error)),
         }
     }
 
     #[tool(
         name = "verify_references",
-        description = "First call for a bibliography with several DOIs. For a DOI that is not in the current collection the resolver takes the validate_doi path (OokCite first, falling through to Crossref/DataCite on a corpus miss). For a DOI that IS in the collection and carries NO claim the resolver skips the metered corpus lookup and reads the publisher record directly (Crossref, then DataCite): membership is proof of enrolment, not of the record's shape, and no metered call is spent on a line the agent did not put a claim on. A publisher 404 keeps the authorless stub, a publisher throttle or timeout returns DEGRADED instead of VALID so the agent knows the line was not checked, and the publisher-backed record is used to compare any claim the caller passed. Pass title, authors, year, journal, volume, issue, and pages when the citation states them. VALID means every supplied field agrees. A disagreement is MISMATCH, not VALID. A supplied field the record does not carry is INCOMPLETE, not VALID. DEGRADED means the publisher could not be read, not that the DOI is invalid. Omitting claims only checks that each DOI exists; existence is not the paper named in a citation. Checks quota up front. Prefer this over a loop of validate_doi calls and over asking Crossref directly.",
+        description = "First call for a bibliography with several DOIs. Every DOI, including one already in the collection and one with no claim, is read from OokCite first. A corpus hit uses the corpus title and authors; a provider fills only fields the corpus left empty. A registered DOI the corpus does not have falls through to Crossref, then DataCite. An OokCite 429, 401, or 5xx does not fall through to the publisher. Pass title, authors, year, journal, volume, issue, and pages when the citation states them; the claim is compared with that record. VALID means every supplied field agrees. A disagreement is MISMATCH, not VALID. A supplied field the record does not carry is INCOMPLETE, not VALID. DEGRADED means OokCite or the publisher could not be read, not that the DOI is invalid. Omitting a claim only checks that the DOI exists; existence is not the paper named in a citation. Quota is checked up front for DOIs that are not already in a collection. Prefer this over a loop of validate_doi calls and over asking Crossref directly.",
         annotations(
             title = "Verify DOIs (batch)",
             read_only_hint = true,
@@ -1833,11 +1840,9 @@ impl Server {
             out.extend(format_member_valid_lines(&pf.members));
             return out.join("\n");
         }
-        // Verify a member against its full publisher record, not the
-        // "(in your collection)" stub. A stored DOI without a claim still
-        // answers VALID -- membership proves existence -- but the title
-        // and authors on that line are the publisher's, so a bibliography
-        // that pastes the line has real metadata to show.
+        // A member with no claim is still an OokCite lookup. The line
+        // uses that record (corpus title and authors on a hit, publisher
+        // fields only after a corpus 404).
         let member_entries = self.member_entries_for(&pf.members).await;
         let member_lines: HashMap<String, String> = pf
             .members
@@ -1856,7 +1861,7 @@ impl Server {
                             .unwrap_or(false) =>
                     {
                         let base = format_verify_line_with_authors(doi, meta, None);
-                        format!("{base} [collection — not metered]")
+                        format!("{base} [collection]")
                     }
                     // A 429, a 5xx, a timeout or a transport failure
                     // from the publisher: the DOI is in the collection
@@ -2180,7 +2185,7 @@ impl Server {
                 out.join("\n")
             }
             Ok(r) => failure_text(r, "Batch format failed").await,
-            Err(e) => format!("Batch format failed: {e}"),
+            Err(e) => format!("Batch format failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -2237,7 +2242,7 @@ impl Server {
                 error_detail(r).await
             ),
             Ok(r) => prefixed_failure(r, "Failed to list collections").await,
-            Err(e) => format!("Failed to list collections: {e}"),
+            Err(e) => format!("Failed to list collections: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -2318,7 +2323,7 @@ impl Server {
                 format!("Added to {}: {title}", args.collection)
             }
             Ok(r) => prefixed_failure(r, "Failed to add entry").await,
-            Err(e) => format!("Failed to add entry: {e}"),
+            Err(e) => format!("Failed to add entry: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -2382,7 +2387,10 @@ impl Server {
                 }
             }
             Ok(response) => prefixed_failure(response, "Failed to queue the Ridley save").await,
-            Err(error) => format!("Failed to queue the Ridley save: {error}"),
+            Err(error) => format!(
+                "Failed to queue the Ridley save: {}",
+                policy::scrub_error(&error)
+            ),
         }
     }
 
@@ -2624,7 +2632,12 @@ impl Server {
                 Ok(r) => {
                     return Err(prefixed_failure(r, "Failed to list collections").await);
                 }
-                Err(e) => return Err(format!("Failed to list collections: {e}")),
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to list collections: {}",
+                        policy::scrub_error(&e)
+                    ))
+                }
             };
         Ok(cols
             .iter()
@@ -2681,7 +2694,7 @@ impl Server {
                 )),
                 Ok(r) if r.status().as_u16() == 404 => Ok(None),
                 Ok(r) => Err(classify_lookup_doi_failure(r, q).await),
-                Err(error) => Err(format!("ERROR {q} : {error}")),
+                Err(error) => Err(format!("ERROR {q} : {}", policy::scrub_error(&error))),
             };
         }
 
@@ -2998,7 +3011,11 @@ impl Server {
                 resp.status(),
                 setup_help_block()
             ),
-            Err(e) => format!("API unreachable: {e}\n\n{}", setup_help_block()),
+            Err(e) => format!(
+                "API unreachable: {}\n\n{}",
+                policy::scrub_error(&e),
+                setup_help_block()
+            ),
         }
     }
 
@@ -3630,7 +3647,9 @@ impl Server {
             {
                 Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
                 Ok(r) => return prefixed_failure(r, "Failed to list collections").await,
-                Err(e) => return format!("Failed to list collections: {e}"),
+                Err(e) => {
+                    return format!("Failed to list collections: {}", policy::scrub_error(&e))
+                }
             };
 
         let mut resolved = Vec::new();
@@ -3955,7 +3974,7 @@ impl Server {
                 format_batch_resolve_results(&args.citations, &payload).join("\n")
             }
             Ok(r) => failure_text(r, "Batch resolve failed").await,
-            Err(e) => format!("Batch resolve failed: {e}"),
+            Err(e) => format!("Batch resolve failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -4081,7 +4100,7 @@ impl Server {
                 format_enhanced_search(&data)
             }
             Ok(r) => failure_text(r, "Enhanced search failed").await,
-            Err(e) => format!("Enhanced search failed: {e}"),
+            Err(e) => format!("Enhanced search failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -4728,12 +4747,10 @@ pub(crate) fn promote_structured_marker(result: &mut CallToolResult) {
         stripped.push_str(tail);
     }
     result.content = vec![ContentBlock::text(stripped)];
-    // `promote_upstream_failure` might already have written a structured
-    // payload (for a throttle or restart). The work record is a success
-    // artifact, so an already-set structured payload wins.
-    if result.structured_content.is_none() {
-        result.structured_content = Some(parsed);
-    }
+    // The work record is the advertised output, including the error
+    // envelope. A later upstream promotion may set `is_error` but must
+    // not replace this object.
+    result.structured_content = Some(parsed);
 }
 
 /// A throttle, a timeout, or a restart is a tool error. The text stays,
@@ -4754,12 +4771,32 @@ fn promote_upstream_failure(result: &mut CallToolResult) {
         return;
     };
     result.is_error = Some(true);
+    if result
+        .structured_content
+        .as_ref()
+        .is_some_and(structured_is_work_record)
+    {
+        return;
+    }
     result.structured_content = Some(serde_json::json!({
         "kind": report.kind,
         "http_status": report.http_status,
         "message": text,
         "retry_after": report.retry_after,
     }));
+}
+
+fn structured_is_work_record(value: &serde_json::Value) -> bool {
+    value.get("kind").and_then(serde_json::Value::as_str)
+        == Some(crate::work_record::WORK_RECORD_KIND)
+}
+
+/// Strip the in-band record first, then mark an upstream failure. The
+/// work-record envelope stays in `structured_content` so a `validate_doi`
+/// error still matches the advertised schema.
+pub(crate) fn finish_tool_result(result: &mut CallToolResult) {
+    promote_structured_marker(result);
+    promote_upstream_failure(result);
 }
 
 impl ServerHandler for Server {
@@ -4778,8 +4815,7 @@ impl ServerHandler for Server {
             .await;
         called.map(|response| match response {
             CallToolResponse::Complete(mut result) => {
-                promote_upstream_failure(&mut result);
-                promote_structured_marker(&mut result);
+                finish_tool_result(&mut result);
                 CallToolResponse::Complete(result)
             }
             other => other,
@@ -4909,9 +4945,9 @@ mod tests {
     use crate::constants::version_output;
     use crate::policy::{mutate_block_message, redact_api_key_hint};
     use crate::tool_args::{
-        default_style, AuditBibliographyArgs, BatchMoveArgs, BatchResolveArgs, DoiArgs, FormatArgs,
-        MergeEntriesArgs, OrcidProfileArgs, OrcidSearchArgs, ReverseArgs, SaveToRidleyArgs,
-        UpdateEntryMetadataArgs, UsageArgs, VerifyArgs,
+        default_style, AuditBibliographyArgs, BatchMoveArgs, BatchResolveArgs, BibliographicClaim,
+        DoiArgs, FormatArgs, MergeEntriesArgs, OrcidProfileArgs, OrcidSearchArgs, ReverseArgs,
+        SaveToRidleyArgs, UpdateEntryMetadataArgs, UsageArgs, VerifyArgs,
     };
 
     /// Serializes OOKCITE_API_KEY mutations across parallel tokio tests.
@@ -5412,9 +5448,9 @@ mod tests {
         );
     }
 
-    /// All DOIs are collection members + remaining=0: batch_format must not POST LOOKUP_DOI.
+    /// Collection members are still read from OokCite before they are formatted.
     #[tokio::test]
-    async fn batch_format_collection_members_never_post_lookup_doi() {
+    async fn batch_format_collection_members_read_ookcite_first() {
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/me"))
@@ -5456,8 +5492,12 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/api/v1/lookup/doi"))
-            .respond_with(ResponseTemplate::new(500))
-            .expect(0)
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": "10.1038/187493a0",
+                "title": "Stimulated Optical Radiation in Ruby",
+                "authors": [{"family": "Maiman"}]
+            })))
+            .expect(2)
             .mount(&mock)
             .await;
         Mock::given(method("POST"))
@@ -5522,14 +5562,21 @@ mod tests {
             })))
             .mount(&mock)
             .await;
-        // The DOI is a member: /api/v1/lookup/doi must not be called for it.
-        Mock::given(method("POST"))
-            .and(path("/api/v1/lookup/doi"))
-            .respond_with(ResponseTemplate::new(500))
-            .expect(0)
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", member_doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
             .mount(&mock)
             .await;
-        // Member formatting goes directly to the publisher.
+        // Corpus miss: the publisher record is the fall-through, not the first read.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        // Member formatting falls through to the publisher after the corpus miss.
         Mock::given(method("GET"))
             .and(path(doi_http_path("/works", member_doi)))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -5573,8 +5620,8 @@ mod tests {
             "authorless stub must not reach the output: {out}"
         );
         assert!(
-            out.contains("[collection — not metered]"),
-            "member line still names the collection and the free semantic: {out}"
+            out.contains("[collection]"),
+            "member line names the collection: {out}"
         );
         assert!(
             out.contains("Example, A."),
@@ -5612,15 +5659,21 @@ mod tests {
             })))
             .mount(&mock)
             .await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/lookup/doi"))
-            .respond_with(ResponseTemplate::new(500))
-            .expect(0)
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", member_doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
             .mount(&mock)
             .await;
-        // Crossref throttles the publisher read for this DOI: 429 with
-        // a Retry-After. DataCite is not tried after a 429, since 429
-        // is not a 404.
+        // Corpus miss, then the publisher throttles. DataCite is not tried
+        // after a 429, since 429 is not a 404.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&mock)
+            .await;
         Mock::given(method("GET"))
             .and(path(doi_http_path("/works", member_doi)))
             .respond_with(
@@ -5649,6 +5702,318 @@ mod tests {
             out.contains("publisher read failed"),
             "DEGRADED line must name the cause so an agent can retry: {out}"
         );
+    }
+
+    #[tokio::test]
+    async fn verify_references_reads_ookcite_before_the_publisher_for_a_member() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/member.corpus.1";
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan": "free",
+                "lookups_remaining": 60,
+                "lookups_limit": 60
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-corpus", "name": "lab"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-corpus"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": format!("doi:{doi}"),
+                    "metadata": {"doi": doi, "title": "Short collection title"}
+                }]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": doi,
+                "title": "Curated OokCite Member Title Alpha",
+                "authors": [{"family": "Keeper", "given": "K."}]
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": {
+                    "DOI": doi,
+                    "title": ["Completely Different Crossref Member Title"],
+                    "author": [
+                        {"family": "Keeper", "given": "K."},
+                        {"family": "Extra", "given": "E."}
+                    ],
+                    "type": "journal-article",
+                    "issued": {"date-parts": [[2026]]}
+                }
+            })))
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_member_corpus");
+        let out = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec![doi.into()],
+                claims: Vec::new(),
+            }))
+            .await;
+        assert!(
+            out.contains("Curated OokCite Member Title Alpha"),
+            "an unclaimed member uses the corpus title: {out}"
+        );
+        assert!(
+            !out.contains("Completely Different Crossref Member Title"),
+            "the publisher title must not replace the corpus title: {out}"
+        );
+        assert!(out.contains("Keeper"), "{out}");
+        assert!(!out.contains("Extra"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_corpus_hit_keeps_the_ookcite_title_in_the_summary_and_the_claim() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/corpus.first.1";
+        let corpus_title = "Curated OokCite Manuscript Title Alpha Beta";
+        let crossref_title = "Completely Different Crossref Paper Gamma Delta";
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": doi,
+                "title": corpus_title,
+                "authors": [{"family": "Keeper", "given": "K."}],
+                "date": {"year": 2024}
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": {
+                    "DOI": doi,
+                    "title": [crossref_title],
+                    "author": [
+                        {"family": "Keeper", "given": "K."},
+                        {"family": "Extra", "given": "E."}
+                    ],
+                    "type": "journal-article",
+                    "container-title": ["Fixtures Weekly"],
+                    "issued": {"date-parts": [[2024]]}
+                }
+            })))
+            .mount(&mock)
+            .await;
+
+        let server = test_server(&mock.uri()).with_providers(mock.uri());
+        let claimed = server
+            .validate_doi(Parameters(DoiArgs {
+                doi: doi.into(),
+                claim: BibliographicClaim {
+                    title: Some(corpus_title.into()),
+                    authors: Some(vec!["Keeper".into()]),
+                    ..Default::default()
+                },
+            }))
+            .await;
+        assert!(
+            claimed.starts_with("VALID\n"),
+            "the corpus title is not a mismatch: {claimed}"
+        );
+        assert!(
+            claimed.contains(&format!("Title: {corpus_title}\n")),
+            "{claimed}"
+        );
+        assert!(
+            !claimed.contains(&format!("Title: {crossref_title}")),
+            "{claimed}"
+        );
+        assert!(claimed.contains("Authors: Keeper"), "{claimed}");
+        assert!(
+            !claimed
+                .lines()
+                .any(|line| line.starts_with("Authors:") && line.contains("Extra")),
+            "{claimed}"
+        );
+        let record = extract_structured(&claimed).expect("record");
+        assert_eq!(record["claim_status"], "match");
+        assert_ne!(record["confidence"], "low");
+        assert_eq!(record["fields"]["title"]["value"], corpus_title);
+        assert_eq!(record["fields"]["title"]["provenance"], "ookcite_corpus");
+        assert!(record["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["code"] == "corpus_title_disagrees_with_provider"));
+
+        let bib = server
+            .format_citation(Parameters(FormatArgs {
+                doi: doi.into(),
+                style: "apa".into(),
+                locale: "en-US".into(),
+                format: "bibtex".into(),
+            }))
+            .await;
+        // BibTeX braces an internal capital (`{OokCite}`), so the prose
+        // title is not a raw substring. The distinctive words are.
+        assert!(bib.contains("Manuscript"), "{bib}");
+        assert!(bib.contains("Alpha"), "{bib}");
+        assert!(!bib.contains("Gamma"), "{bib}");
+        assert!(!bib.contains("Completely"), "{bib}");
+        assert!(bib.contains("Keeper"), "{bib}");
+        assert!(!bib.contains("Extra"), "{bib}");
+    }
+
+    async fn ookcite_status_does_not_fall_through(status: u16, prefix: &str, kind: &str) {
+        let mock = MockServer::start().await;
+        let doi = format!("10.5555/nofall.{status}");
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", &doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(status).set_body_string("upstream"))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", &doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": {
+                    "DOI": doi,
+                    "title": ["Publisher Title That Must Stay Unread"]
+                }
+            })))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let text = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .validate_doi(Parameters(DoiArgs {
+                doi: doi.clone(),
+                ..Default::default()
+            }))
+            .await;
+        assert!(text.starts_with(prefix), "{text}");
+        assert!(
+            !text.contains("Publisher Title That Must Stay Unread"),
+            "{text}"
+        );
+        let record = extract_structured(&text).expect("error envelope");
+        assert_eq!(record["kind"], crate::work_record::WORK_RECORD_KIND);
+        assert_eq!(record["source"], "error");
+        assert_eq!(record["error"]["kind"], kind);
+        let message = record["error"]["message"].as_str().unwrap();
+        assert!(!message.contains("OOKCITE_STRUCTURED_JSON"), "{message}");
+
+        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+        finish_tool_result(&mut result);
+        assert_eq!(result.is_error, Some(true));
+        let shown = tool_result_text(&result);
+        assert!(!shown.contains("OOKCITE_STRUCTURED_JSON"), "{shown}");
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["kind"], crate::work_record::WORK_RECORD_KIND);
+        assert_eq!(structured["source"], "error");
+        assert_eq!(structured["error"]["kind"], kind);
+    }
+
+    #[tokio::test]
+    async fn ookcite_429_503_and_401_do_not_fall_through_to_crossref() {
+        ookcite_status_does_not_fall_through(429, "RATE LIMITED", "rate_limited").await;
+        ookcite_status_does_not_fall_through(503, "TEMPORARY ERROR", "temporary_error").await;
+        ookcite_status_does_not_fall_through(401, "ACCESS DENIED", "unauthorized").await;
+        ookcite_status_does_not_fall_through(402, "PAYMENT REQUIRED", "plan_required").await;
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_doi_does_not_fall_through_to_crossref() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/unregistered.1";
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 100
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {"title": ["Unread Publisher Title"]}
+            })))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        let text = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .validate_doi(Parameters(DoiArgs {
+                doi: doi.into(),
+                ..Default::default()
+            }))
+            .await;
+        assert!(text.starts_with("UNREGISTERED"), "{text}");
+        assert!(!text.contains("Unread Publisher Title"), "{text}");
+        let record = extract_structured(&text).unwrap();
+        assert_eq!(record["error"]["kind"], "unregistered");
+        assert_eq!(record["source"], "error");
+    }
+
+    #[tokio::test]
+    async fn doctor_report_redacts_userinfo_and_query_from_the_api_override() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "version": "test"
+            })))
+            .mount(&mock)
+            .await;
+        let _api = EnvGuard::set(
+            "OOKCITE_API",
+            "http://alice:hunter2@127.0.0.1:9/api?api_key=secret_query",
+        );
+        let report = test_server(&mock.uri()).doctor_report().await;
+        assert!(
+            report.contains("OOKCITE_API override: http://127.0.0.1:9/api"),
+            "{report}"
+        );
+        assert!(!report.contains("hunter2"), "{report}");
+        assert!(!report.contains("alice:"), "{report}");
+        assert!(!report.contains("secret_query"), "{report}");
+        assert!(!report.contains("api_key"), "{report}");
     }
 
     #[tokio::test]
@@ -11034,6 +11399,27 @@ mod tests {
         let structured = result.structured_content.as_ref().unwrap();
         assert_eq!(structured["kind"], crate::work_record::WORK_RECORD_KIND);
         assert_eq!(structured["doi"], "10.5555/record");
+    }
+
+    #[test]
+    fn finish_tool_result_keeps_the_work_record_on_a_rate_limit() {
+        let message = "RATE LIMITED 10.5555/env.1 : slow down (Retry-After: 45)";
+        let record = crate::work_record::build_error_record("10.5555/env.1", message);
+        let text = crate::work_record::append_structured_marker(message, &record);
+        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+        finish_tool_result(&mut result);
+        assert_eq!(result.is_error, Some(true));
+        let shown = tool_result_text(&result);
+        assert!(!shown.contains("OOKCITE_STRUCTURED_JSON"), "{shown}");
+        assert!(shown.starts_with("RATE LIMITED"), "{shown}");
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["kind"], crate::work_record::WORK_RECORD_KIND);
+        assert_eq!(structured["source"], "error");
+        assert_eq!(structured["error"]["kind"], "rate_limited");
+        assert!(!structured["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("OOKCITE_STRUCTURED_JSON"));
     }
 
     #[test]

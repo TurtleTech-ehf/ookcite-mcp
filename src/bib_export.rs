@@ -346,8 +346,20 @@ fn flush_works(
 }
 
 /// Stored metadata with provider fields filled in. Caller locks win.
+/// A Crossref byline that covers the stored families may replace a
+/// shorter stored list. Corpus lookups use [`merge_corpus_first`].
 pub fn merge_provider_metadata(stored: &Value, provider: &Value) -> Value {
-    let work = assemble(stored, Some(provider));
+    project_assembled(stored, assemble(stored, Some(provider)))
+}
+
+/// Corpus fields win. A provider value is copied only into a field the
+/// corpus left empty, so a disagreeing title or author list cannot
+/// replace the OokCite row on a hit.
+pub fn merge_corpus_first(stored: &Value, provider: &Value) -> Value {
+    project_assembled(stored, assemble_with(stored, Some(provider), true))
+}
+
+fn project_assembled(stored: &Value, work: Work) -> Value {
     let mut meta = stored.as_object().cloned().unwrap_or_default();
     let put = |meta: &mut serde_json::Map<String, Value>, key: &str, value: Option<String>| {
         if let Some(value) = value.filter(|text| !text.is_empty()) {
@@ -417,6 +429,10 @@ fn json_person_literal(name: &str) -> Value {
 /// One collection entry plus an optional provider payload
 /// (`{"crossref": ..., "datacite": ..., "zenodo": ...}`).
 fn assemble(stored: &Value, provider: Option<&Value>) -> Work {
+    assemble_with(stored, provider, false)
+}
+
+fn assemble_with(stored: &Value, provider: Option<&Value>, corpus_first: bool) -> Work {
     let stored_work = work_from_stored(stored);
     let Some(record) = provider else {
         return stored_work;
@@ -430,10 +446,15 @@ fn assemble(stored: &Value, provider: Option<&Value>) -> Work {
         return stored_work;
     }
     let locked = user_fields(stored);
-    if locked.contains("title") {
+    // A corpus hit keeps the title it already stored. Bibliography
+    // export still lets an unlocked empty title take the provider's.
+    if locked.contains("title") || (corpus_first && !stored_work.title.is_empty()) {
         work.title = stored_work.title.clone();
     }
-    let provider_has_more_authors = work.from_crossref
+    // A longer Crossref byline may complete a partial bibliography
+    // entry. It must not replace the author list on a corpus hit.
+    let provider_has_more_authors = !corpus_first
+        && work.from_crossref
         && work.authors.len() > stored_work.authors.len()
         && authors_cover(&stored_work.authors, &work.authors);
     if locked.contains("authors") || (!stored_work.authors.is_empty() && !provider_has_more_authors)
@@ -2553,6 +2574,45 @@ mod tests {
         );
         assert!(!bib.contains("url = {https://doi.org/"), "{bib}");
         assert!(bib.contains("pellSyntheticQuartzNote2026"), "{bib}");
+    }
+
+    #[test]
+    fn a_corpus_hit_keeps_its_title_and_authors_when_crossref_disagrees() {
+        let stored = json!({
+            "doi": "10.5555/corpus.merge.1",
+            "title": "Curated OokCite Manuscript Title Alpha",
+            "authors": [{"family": "Keeper", "given": "K."}],
+            "date": {"year": 2024}
+        });
+        let provider = json!({
+            "crossref": {
+                "DOI": "10.5555/corpus.merge.1",
+                "type": "journal-article",
+                "title": ["Completely Different Crossref Paper Gamma"],
+                "author": [
+                    {"family": "Keeper", "given": "K."},
+                    {"family": "Extra", "given": "E."}
+                ],
+                "container-title": ["Fixtures Weekly"],
+                "issued": {"date-parts": [[2024]]}
+            }
+        });
+        let corpus = merge_corpus_first(&stored, &provider);
+        assert_eq!(corpus["title"], "Curated OokCite Manuscript Title Alpha");
+        assert_eq!(corpus["authors"].as_array().unwrap().len(), 1);
+        assert_eq!(corpus["authors"][0]["family"], "Keeper");
+        // A bibliography export still takes the longer covering byline.
+        let exported = merge_provider_metadata(&stored, &provider);
+        assert_eq!(
+            exported["title"],
+            "Completely Different Crossref Paper Gamma"
+        );
+        assert_eq!(exported["authors"].as_array().unwrap().len(), 2);
+
+        let empty = json!({"doi": "10.5555/corpus.merge.1", "title": "", "authors": []});
+        let filled = merge_corpus_first(&empty, &provider);
+        assert_eq!(filled["title"], "Completely Different Crossref Paper Gamma");
+        assert_eq!(filled["authors"].as_array().unwrap().len(), 2);
     }
 
     #[test]
