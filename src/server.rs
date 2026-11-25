@@ -1281,7 +1281,16 @@ impl Server {
                 );
                 crate::work_record::append_structured_marker(&summary, &record)
             }
-            Err(msg) => msg,
+            Err(msg) => {
+                // Even on failure the result keeps a stable structured
+                // envelope: an agent that reads `structured_content`
+                // first should not need a special-case branch for the
+                // error path (the old path returned raw prose with no
+                // structured object, so a reader saw a field-shaped
+                // body on success and nothing on failure).
+                let record = crate::work_record::build_error_record(&args.doi, &msg);
+                crate::work_record::append_structured_marker(&msg, &record)
+            }
         }
     }
 
@@ -3997,6 +4006,20 @@ impl Server {
         if args.q.trim().is_empty() {
             return "No query supplied.".into();
         }
+        // The filters are forwarded unchanged to the corpus service. A
+        // malformed date or a DOI prefix that is not a prefix would be
+        // rejected upstream, but the error message would come back as
+        // a 400 with no context. Check them here so the caller sees
+        // why the call was refused before any metered search is made.
+        if let Some(message) = validate_enhanced_date("created_after", &args.created_after) {
+            return message;
+        }
+        if let Some(message) = validate_enhanced_date("published_after", &args.published_after) {
+            return message;
+        }
+        if let Some(message) = validate_doi_prefix(&args.doi_prefix) {
+            return message;
+        }
         let limit = args.limit.to_string();
         let offset = args.offset.to_string();
         let mut query: Vec<(&str, String)> =
@@ -4573,6 +4596,107 @@ fn tool_result_text(result: &CallToolResult) -> String {
         .filter_map(|item| item.as_text().map(|text| text.text.as_str()))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Accept only `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or an ISO-8601 instant
+/// ending in `Z` (what the enhanced search service recognises). An
+/// empty or missing value is accepted. A non-empty value that does not
+/// fit is refused with a prose error, so a caller does not spend a
+/// metered call on a 400.
+pub(crate) fn validate_enhanced_date(name: &str, value: &Option<String>) -> Option<String> {
+    let text = value.as_deref()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if is_valid_enhanced_date(text) {
+        return None;
+    }
+    Some(format!(
+        "CLIENT ERROR: {name} must be YYYY, YYYY-MM, YYYY-MM-DD, or an ISO-8601 instant ending in Z, not {text:?}."
+    ))
+}
+
+fn is_valid_enhanced_date(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let all_digits = |slice: &[u8]| slice.iter().all(u8::is_ascii_digit);
+    let year_in_range = |slice: &[u8]| {
+        let Ok(year) = std::str::from_utf8(slice) else {
+            return false;
+        };
+        year.parse::<u32>()
+            .map(|y| (1500..=2100).contains(&y))
+            .unwrap_or(false)
+    };
+    let month_in_range = |slice: &[u8]| {
+        let Ok(month) = std::str::from_utf8(slice) else {
+            return false;
+        };
+        month
+            .parse::<u32>()
+            .map(|m| (1..=12).contains(&m))
+            .unwrap_or(false)
+    };
+    let day_in_range = |slice: &[u8]| {
+        let Ok(day) = std::str::from_utf8(slice) else {
+            return false;
+        };
+        day.parse::<u32>()
+            .map(|d| (1..=31).contains(&d))
+            .unwrap_or(false)
+    };
+    match bytes.len() {
+        4 => all_digits(bytes) && year_in_range(bytes),
+        7 => {
+            all_digits(&bytes[..4])
+                && year_in_range(&bytes[..4])
+                && bytes[4] == b'-'
+                && all_digits(&bytes[5..])
+                && month_in_range(&bytes[5..])
+        }
+        10 => {
+            all_digits(&bytes[..4])
+                && year_in_range(&bytes[..4])
+                && bytes[4] == b'-'
+                && all_digits(&bytes[5..7])
+                && month_in_range(&bytes[5..7])
+                && bytes[7] == b'-'
+                && all_digits(&bytes[8..])
+                && day_in_range(&bytes[8..])
+        }
+        20 => {
+            // Loose ISO-8601 instant: YYYY-MM-DDTHH:MM:SSZ. The
+            // service does not accept other offsets, so Z is
+            // required.
+            is_valid_enhanced_date(&text[..10])
+                && bytes[10] == b'T'
+                && all_digits(&bytes[11..13])
+                && bytes[13] == b':'
+                && all_digits(&bytes[14..16])
+                && bytes[16] == b':'
+                && all_digits(&bytes[17..19])
+                && bytes[19] == b'Z'
+        }
+        _ => false,
+    }
+}
+
+/// DOI prefixes always begin with `10.` and a registrant number. A
+/// prefix such as `nature` would silently return nothing, so the call
+/// is refused here with a hint.
+pub(crate) fn validate_doi_prefix(prefix: &Option<String>) -> Option<String> {
+    let text = prefix.as_deref()?.trim().trim_end_matches('/');
+    if text.is_empty() {
+        return None;
+    }
+    let looks_right = text
+        .strip_prefix("10.")
+        .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit() || c == '.'));
+    if looks_right {
+        return None;
+    }
+    Some(format!(
+        "CLIENT ERROR: doi_prefix must start with \"10.\" and name a registrant (e.g. \"10.1038\" for Nature), not {text:?}."
+    ))
 }
 
 /// Pull a structured work record out of the text a tool returned and hoist
@@ -6615,6 +6739,38 @@ mod tests {
         assert!(!result.contains("INVALID"));
     }
 
+    #[test]
+    fn enhanced_search_refuses_a_malformed_date_before_any_metered_call() {
+        assert!(validate_enhanced_date("created_after", &None).is_none());
+        assert!(validate_enhanced_date("created_after", &Some("".into())).is_none());
+        assert!(validate_enhanced_date("created_after", &Some("2026".into())).is_none());
+        assert!(validate_enhanced_date("created_after", &Some("2026-10".into())).is_none());
+        assert!(validate_enhanced_date("created_after", &Some("2026-10-05".into())).is_none());
+        assert!(
+            validate_enhanced_date("created_after", &Some("2026-10-05T12:00:00Z".into())).is_none()
+        );
+        // Wrong shape.
+        assert!(validate_enhanced_date("created_after", &Some("yesterday".into())).is_some());
+        assert!(validate_enhanced_date("created_after", &Some("2026/10/05".into())).is_some());
+        // Out of range.
+        assert!(validate_enhanced_date("created_after", &Some("2026-13-01".into())).is_some());
+        assert!(validate_enhanced_date("created_after", &Some("2026-02-32".into())).is_some());
+        // Prefix-only year outside the allowed band.
+        assert!(validate_enhanced_date("created_after", &Some("0001".into())).is_some());
+    }
+
+    #[test]
+    fn enhanced_search_refuses_a_doi_prefix_that_is_not_a_prefix() {
+        assert!(validate_doi_prefix(&None).is_none());
+        assert!(validate_doi_prefix(&Some("".into())).is_none());
+        assert!(validate_doi_prefix(&Some("10.1038".into())).is_none());
+        assert!(validate_doi_prefix(&Some("10.1038/".into())).is_none());
+        assert!(validate_doi_prefix(&Some("10.1234.5".into())).is_none());
+        assert!(validate_doi_prefix(&Some("nature".into())).is_some());
+        assert!(validate_doi_prefix(&Some("10/1038".into())).is_some());
+        assert!(validate_doi_prefix(&Some("10.1038/journal".into())).is_some());
+    }
+
     #[tokio::test]
     async fn enhanced_search_passes_the_new_filters_and_sort_as_query_parameters() {
         use wiremock::matchers::query_param;
@@ -7481,6 +7637,78 @@ mod tests {
             !result.contains("LOW CONFIDENCE"),
             "confident live hit was still labelled below the threshold: {result}"
         );
+    }
+
+    #[tokio::test]
+    async fn reverse_lookup_live_score_right_at_the_threshold_is_already_confident() {
+        // Boundary test for the live-vs-threshold comparison: a live
+        // score equal to MIN_CONFIDENT_REVERSE_LOOKUP_SCORE must be
+        // treated as confident (the comparison is `>=`, not `>`), and
+        // a live score one below the threshold must earn the LOW
+        // CONFIDENCE header. Kills mutants that flip `>=` to `<`, `<`
+        // or `>` or that replace the match guard with `true`/`false`.
+        let threshold = crate::constants::MIN_CONFIDENT_REVERSE_LOOKUP_SCORE;
+        for (score, confident) in [
+            (threshold, true),
+            (threshold - 0.1, false),
+            (threshold + 1.0, true),
+        ] {
+            let mock = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/reverse"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "metadata": {
+                            "title": "A weak local match",
+                            "doi": "10.5555/weak.local.boundary"
+                        },
+                        "score": 1.0
+                    }
+                ])))
+                .mount(&mock)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/resolve"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "query_type": "text",
+                    "match_type": "candidate_list",
+                    "candidates": [
+                        {
+                            "metadata": {
+                                "title": "A live hit at the boundary",
+                                "doi": "10.5555/live.boundary.hit"
+                            },
+                            "score": score
+                        }
+                    ]
+                })))
+                .mount(&mock)
+                .await;
+
+            let s = test_server(&mock.uri());
+            let result = s
+                .reverse_lookup(Parameters(ReverseArgs {
+                    text: "boundary test".into(),
+                    author: None,
+                    journal: None,
+                    year: None,
+                    orcid: None,
+                    use_live_queries: false,
+                }))
+                .await;
+            let has_header = result.contains("LOW CONFIDENCE");
+            if confident {
+                assert!(
+                    !has_header,
+                    "score {score} should have been treated as confident: {result}"
+                );
+            } else {
+                assert!(
+                    has_header,
+                    "score {score} should have earned the LOW CONFIDENCE header: {result}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

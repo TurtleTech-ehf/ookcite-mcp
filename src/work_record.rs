@@ -251,6 +251,45 @@ fn any_shared_family(stored: &[String], provider: &[String]) -> bool {
     stored.iter().any(|family| provider_set.contains(family))
 }
 
+/// Build a work record for a failed call. The shape matches the
+/// success path (`kind`, `doi`, `summary`), so a reader can parse the
+/// record the same way every time. `error.message` carries the prose a
+/// human reader sees; `error.kind` names the failure family a caller
+/// can switch on without string matching the message.
+pub fn build_error_record(doi: &str, message: &str) -> Value {
+    let kind = classify_error(message);
+    json!({
+        "kind": WORK_RECORD_KIND,
+        "doi": doi,
+        "source": "error",
+        "confidence": "low",
+        "summary": message,
+        "error": {
+            "kind": kind,
+            "message": message,
+        },
+        "fields": Value::Object(Map::new()),
+        "authors": Value::Array(Vec::new()),
+        "warnings": Value::Array(Vec::new()),
+    })
+}
+
+fn classify_error(message: &str) -> &'static str {
+    if message.starts_with("INVALID") {
+        "invalid_doi"
+    } else if message.starts_with("RATE LIMITED") || message.starts_with("RETRY-AFTER") {
+        "rate_limited"
+    } else if message.starts_with("TIMEOUT") {
+        "timeout"
+    } else if message.starts_with("UNAUTHORIZED") {
+        "unauthorized"
+    } else if message.starts_with("PLAN") {
+        "plan_required"
+    } else {
+        "error"
+    }
+}
+
 /// Build the structured ranked list a `reverse_lookup` call returns.
 /// `candidates` is an ordered list (best first) of `(doi, title, score)`.
 /// `top_confident` is true when the best score was above the server's
@@ -781,41 +820,58 @@ pub fn output_schema() -> Arc<JsonObject> {
         "title": "OokCite work record",
         "description": "Structured artifact a validate_doi call writes to `structured_content`. The prose summary stays in the text block for a human reader, and the record below is the machine-readable view an agent reads first.",
         "type": "object",
-        "required": [
-            "kind", "doi", "source", "confidence", "metadata_age_seconds",
-            "from_cache", "summary", "authors", "fields"
-        ],
+        "required": ["kind", "doi", "source", "confidence", "summary", "authors", "fields"],
         "properties": {
             "kind": {
                 "type": "string",
                 "const": WORK_RECORD_KIND,
                 "description": "Schema identifier. Bumped when the shape changes so an agent can skip a record whose version it does not understand."
             },
-            "doi": { "type": "string", "description": "The DOI the lookup resolved." },
+            "doi": { "type": "string", "description": "The DOI the lookup resolved, or the DOI the caller asked about on the error path." },
             "source": {
                 "type": "string",
-                "enum": ["ookcite_corpus", "not_in_corpus"],
-                "description": "`ookcite_corpus` is a corpus hit. `not_in_corpus` is a registered DOI the OokCite corpus has no entry for; the provider record is still returned."
+                "enum": ["ookcite_corpus", "not_in_corpus", "error"],
+                "description": "`ookcite_corpus` is a corpus hit. `not_in_corpus` is a registered DOI the OokCite corpus has no entry for; the provider record is still returned. `error` is the failure envelope: the lookup could not complete and `error` is populated."
             },
             "confidence": {
                 "type": "string",
                 "enum": ["low", "medium", "high"],
-                "description": "Coarse confidence in the whole record. `low` when a claim did not match. `high` when the corpus and a provider both answered. `medium` otherwise."
+                "description": "Coarse confidence in the whole record. `low` when a claim did not match or the lookup failed. `high` when the corpus and a provider both answered. `medium` otherwise."
             },
             "metadata_age_seconds": {
                 "type": "integer",
-                "description": "Seconds since this server retrieved the record, not since publication."
+                "description": "Seconds since this server retrieved the record, not since publication. Absent on the error path."
             },
             "from_cache": {
                 "type": "boolean",
-                "description": "True when the record was served from this process's identity-safe cache rather than fetched again."
+                "description": "True when the record was served from this process's identity-safe cache rather than fetched again. Absent on the error path."
             },
-            "summary": { "type": "string", "description": "The prose a human reader sees in `content[0].text`." },
+            "error": {
+                "type": "object",
+                "description": "Populated only when `source` is `error`. `kind` is a stable failure family (invalid_doi, rate_limited, timeout, unauthorized, plan_required, error); `message` is the prose the summary also carries.",
+                "required": ["kind", "message"],
+                "properties": {
+                    "kind": { "type": "string" },
+                    "message": { "type": "string" }
+                }
+            },
+            "warnings": {
+                "type": "array",
+                "description": "Consistency warnings the server raised while assembling the record (for example, the corpus and the registrar disagree on author families for this DOI). Each entry carries a `code` and a human-readable `detail`.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "code": { "type": "string" },
+                        "detail": { "type": "string" }
+                    }
+                }
+            },
             "claim_status": {
                 "type": ["string", "null"],
                 "enum": ["match", "mismatch", "incomplete", null],
-                "description": "`match` when every claim field agreed with the record, `mismatch` on any disagreement, `incomplete` when the record did not carry a claimed field. Null when the call carried no claim."
+                "description": "`match` when every claim field agreed with the record, `mismatch` on any disagreement, `incomplete` when the record did not carry a claimed field. Null when the call carried no claim. Absent on the error path."
             },
+            "summary": { "type": "string", "description": "The prose a human reader sees in `content[0].text`." },
             "authors": {
                 "type": "array",
                 "description": "Author list with family, given, optional ORCID, and `literal` flag. On a corpus hit the corpus author list wins; a provider ORCID may be folded in when the two sides agree on the family name.",
@@ -1253,6 +1309,73 @@ mod tests {
             .map(str::to_string)
             .collect();
         assert!(codes.contains(&"corpus_authors_disagree_with_provider".to_string()));
+    }
+
+    #[test]
+    fn provider_presence_is_what_lifts_corpus_confidence_to_high() {
+        // Kills a mutant that replaced the match guard
+        // `provider_record.is_some()` with `true`: a corpus hit with
+        // no provider overlay must stay at `medium` confidence, not
+        // jump to `high`.
+        let merged = serde_json::json!({"doi": "10.5555/conf.1", "title": "A paper"});
+
+        let no_provider = build_validate_doi_record(
+            "10.5555/conf.1",
+            DoiSource::Corpus,
+            Some(&merged),
+            None,
+            &merged,
+            0,
+            false,
+            "VALID",
+            None,
+        );
+        assert_eq!(no_provider["confidence"], "medium");
+
+        let with_provider = build_validate_doi_record(
+            "10.5555/conf.1",
+            DoiSource::Corpus,
+            Some(&merged),
+            Some(&serde_json::json!({"crossref": {"DOI": "10.5555/conf.1", "title": ["A paper"]}})),
+            &merged,
+            0,
+            false,
+            "VALID",
+            None,
+        );
+        assert_eq!(with_provider["confidence"], "high");
+    }
+
+    #[test]
+    fn the_defaults_for_locale_and_format_name_en_us_csl() {
+        // Kills mutants that replaced the default values with
+        // "xyzzy" or an empty string. The locale default must be a
+        // real BCP-47 tag and the format default must be `csl` for
+        // the format tools to work without explicit arguments.
+        assert_eq!(crate::tool_args::default_locale(), "en-US");
+        assert_eq!(crate::tool_args::default_format(), "csl");
+    }
+
+    #[test]
+    fn an_error_path_still_emits_a_versioned_envelope_with_a_classified_kind() {
+        let record = build_error_record(
+            "10.5555/does.not.exist",
+            "INVALID 10.5555/does.not.exist: not registered at doi.org",
+        );
+        assert_eq!(record["kind"], WORK_RECORD_KIND);
+        assert_eq!(record["doi"], "10.5555/does.not.exist");
+        assert_eq!(record["source"], "error");
+        assert_eq!(record["confidence"], "low");
+        assert_eq!(record["error"]["kind"], "invalid_doi");
+        assert!(record["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("INVALID"));
+        // The shape stays the same — authors, fields, warnings exist
+        // but are empty on the error path.
+        assert!(record["authors"].is_array());
+        assert!(record["fields"].is_object());
+        assert!(record["warnings"].is_array());
     }
 
     #[test]
