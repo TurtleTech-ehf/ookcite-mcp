@@ -345,10 +345,10 @@ pub(crate) async fn read_capped_api_body(
         .map_err(|error| provider_failure(source, error))
 }
 
-struct DoiLookup {
-    metadata: serde_json::Value,
-    retrieved_at: Instant,
-    from_cache: bool,
+pub(crate) struct DoiLookup {
+    pub metadata: serde_json::Value,
+    pub retrieved_at: Instant,
+    pub from_cache: bool,
     /// Where the record came from.
     ///
     /// `Corpus` is a hit on `/api/v1/lookup/doi`. `NotInCorpus` is a 404 on
@@ -356,11 +356,18 @@ struct DoiLookup {
     /// and the registrar answered, but OokCite's corpus did not. The verify
     /// head used to print INVALID for that case; the answer is NOT-IN-CORPUS
     /// because the paper exists and the fields below are the publisher's.
-    source: DoiSource,
+    pub source: DoiSource,
+    /// The raw OokCite corpus response for this DOI, before provider fields
+    /// were merged in. `None` when the corpus had no entry (NotInCorpus).
+    /// Used to compute per-field provenance for the structured work record.
+    pub stored_before_merge: Option<serde_json::Value>,
+    /// The raw provider record (`{"crossref": ..}`, `{"datacite": ..}` or
+    /// `{"zenodo": ..}`) that was merged into the metadata, when any.
+    pub provider_record: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DoiSource {
+pub(crate) enum DoiSource {
     Corpus,
     NotInCorpus,
 }
@@ -534,6 +541,17 @@ impl Server {
                     retrieved_at: cached.retrieved_at,
                     from_cache: true,
                     source: DoiSource::Corpus,
+                    // The pre-merge stored row and the raw provider
+                    // record cached on the first fetch are returned on
+                    // the hit, so the structured record built here has
+                    // the same per-field provenance, confidence, and
+                    // consistency warnings a fresh lookup would have
+                    // produced. The first version of this cache dropped
+                    // both, which left a cache hit without ORCID,
+                    // abstract, license, retraction, or the "live
+                    // provider agrees with OokCite" provenance tag.
+                    stored_before_merge: cached.stored_before_merge,
+                    provider_record: cached.provider_record,
                 });
             }
         }
@@ -541,11 +559,14 @@ impl Server {
         let r = lookup_doi_with_retry(&self.http, &self.api_base, doi).await;
         match r {
             Ok(resp) if resp.status().is_success() => {
-                let mut meta: serde_json::Value = resp.json().await.unwrap_or_default();
+                let raw: serde_json::Value = resp.json().await.unwrap_or_default();
+                let mut meta = raw.clone();
+                let mut provider_record = None;
                 if self.providers.is_some() {
                     match self.provider_record(doi).await {
                         Ok(Some(record)) => {
                             meta = bib_export::merge_provider_metadata(&meta, &record);
+                            provider_record = Some(record);
                         }
                         Ok(None) => {}
                         // The registration check already failed closed. A provider
@@ -555,7 +576,12 @@ impl Server {
                 }
                 let retrieved_at = if cacheable {
                     self.doi_cache
-                        .put_if_identity_ok(doi, meta.clone())
+                        .put_full_if_identity_ok(
+                            doi,
+                            meta.clone(),
+                            Some(raw.clone()),
+                            provider_record.clone(),
+                        )
                         .unwrap_or_else(Instant::now)
                 } else {
                     Instant::now()
@@ -565,6 +591,8 @@ impl Server {
                     retrieved_at,
                     from_cache: false,
                     source: DoiSource::Corpus,
+                    stored_before_merge: Some(raw),
+                    provider_record,
                 })
             }
             Ok(resp) if resp.status().as_u16() == 404 => {
@@ -588,6 +616,8 @@ impl Server {
                             retrieved_at: Instant::now(),
                             from_cache: false,
                             source: DoiSource::NotInCorpus,
+                            stored_before_merge: None,
+                            provider_record: Some(record),
                         })
                     }
                     Ok(None) => Err(classify_lookup_doi_failure(resp, doi).await),
@@ -1193,8 +1223,9 @@ impl Server {
 
     #[tool(
         name = "validate_doi",
-        description = "Resolve a DOI and compare it with the bibliographic claim you pass. Returns title, authors, year, journal, volume, issue, and pages. Pass title, authors (family names), year, journal, volume, issue, and pages when the citation states them. VALID means every field you passed agrees with the resolved record. A disagreement is MISMATCH, not VALID. A field the record does not carry is INCOMPLETE, not VALID. Omitting the claim only checks that the DOI exists, which does not prove it is the paper you named. Prefer verify_references for several DOIs.",
-        annotations(title = "Validate DOI", read_only_hint = true, idempotent_hint = true)
+        description = "Resolve a DOI and compare it with the bibliographic claim you pass. Returns a prose summary in `content[0].text` and the full structured record (schema `ookcite.work_record/v1`, advertised on tool listings) in `structured_content`: title, authors with ORCID when the provider carries it, year, container, volume, issue, pages, publisher, URL, abstract, licence, references, OA PDF URL, and retraction or update-to markers. Each field reports its provenance (`ookcite_corpus`, `ookcite_corpus+<provider>`, `crossref`, `datacite`, or `unknown`) and the record reports a coarse confidence. OokCite-first: a corpus value wins over a disagreeing provider value on a corpus hit. A corpus gap falls through to the publisher and is reported as NOT-IN-CORPUS with the provider record (not INVALID). Pass title, authors (family names), year, journal, volume, issue, and pages when the citation states them. VALID means every field you passed agrees with the resolved record. A disagreement is MISMATCH, not VALID. A field the record does not carry is INCOMPLETE, not VALID. Omitting the claim only checks that the DOI exists, which does not prove it is the paper you named. Prefer verify_references for several DOIs.",
+        annotations(title = "Validate DOI", read_only_hint = true, idempotent_hint = true),
+        output_schema = crate::work_record::output_schema()
     )]
     async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
         match self.lookup_doi_with_freshness(&args.doi).await {
@@ -1210,7 +1241,24 @@ impl Server {
                 } else {
                     body
                 };
-                format!("{body}\n{}", lookup.freshness_line())
+                let summary = format!("{body}\n{}", lookup.freshness_line());
+                let claim_status = if args.claim.is_empty() {
+                    None
+                } else {
+                    Some(crate::bibliographic::claim_verdict(&lookup.metadata, &args.claim).status)
+                };
+                let record = crate::work_record::build_validate_doi_record(
+                    &args.doi,
+                    lookup.source,
+                    lookup.stored_before_merge.as_ref(),
+                    lookup.provider_record.as_ref(),
+                    &lookup.metadata,
+                    lookup.retrieved_at.elapsed().as_secs(),
+                    lookup.from_cache,
+                    &summary,
+                    claim_status,
+                );
+                crate::work_record::append_structured_marker(&summary, &record)
             }
             Err(msg) => msg,
         }
@@ -4496,6 +4544,43 @@ fn tool_result_text(result: &CallToolResult) -> String {
         .join("\n")
 }
 
+/// Pull a structured work record out of the text a tool returned and hoist
+/// it into `structured_content`. The record travels in-band between two
+/// markers so the tool handler can return a single `String` (which is what
+/// the `#[tool_router]` macro signs up for) while the server still answers
+/// an MCP client that reads `structured_content` directly.
+pub(crate) fn promote_structured_marker(result: &mut CallToolResult) {
+    let text = tool_result_text(result);
+    let Some(begin) = text.find(crate::work_record::STRUCTURED_MARKER_BEGIN) else {
+        return;
+    };
+    let after_begin = begin + crate::work_record::STRUCTURED_MARKER_BEGIN.len();
+    let Some(end_relative) = text[after_begin..].find(crate::work_record::STRUCTURED_MARKER_END)
+    else {
+        return;
+    };
+    let end = after_begin + end_relative;
+    let json_blob = text[after_begin..end].trim();
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_blob) else {
+        return;
+    };
+    let tail_start = end + crate::work_record::STRUCTURED_MARKER_END.len();
+    let mut stripped = String::with_capacity(text.len());
+    stripped.push_str(text[..begin].trim_end_matches('\n'));
+    let tail = text[tail_start..].trim_start_matches('\n');
+    if !tail.is_empty() {
+        stripped.push('\n');
+        stripped.push_str(tail);
+    }
+    result.content = vec![ContentBlock::text(stripped)];
+    // `promote_upstream_failure` might already have written a structured
+    // payload (for a throttle or restart). The work record is a success
+    // artifact, so an already-set structured payload wins.
+    if result.structured_content.is_none() {
+        result.structured_content = Some(parsed);
+    }
+}
+
 /// A throttle, a timeout, or a restart is a tool error. The text stays,
 /// and the structured object carries the status and `Retry-After`.
 fn promote_upstream_failure(result: &mut CallToolResult) {
@@ -4539,6 +4624,7 @@ impl ServerHandler for Server {
         called.map(|response| match response {
             CallToolResponse::Complete(mut result) => {
                 promote_upstream_failure(&mut result);
+                promote_structured_marker(&mut result);
                 CallToolResponse::Complete(result)
             }
             other => other,
@@ -5904,6 +5990,291 @@ mod tests {
         assert!(result.starts_with("VALID"));
         assert!(result.contains("Stimulated Optical Radiation in Ruby"));
         assert!(result.contains("Maiman"));
+    }
+
+    #[tokio::test]
+    async fn validate_doi_embeds_a_structured_record_with_per_field_provenance() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/structured.corpus.1";
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .mount(&mock)
+            .await;
+        // Corpus has part of the record (title, authors, year, doi).
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains(doi))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": doi,
+                "title": "A paper the corpus knows",
+                "authors": [{"family": "Example", "given": "A."}],
+                "date": {"year": 2026}
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        // Crossref adds volume, pages, journal, publisher, URL, and type.
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": {
+                    "type": "journal-article",
+                    "DOI": doi,
+                    "title": ["A paper the corpus knows"],
+                    "container-title": ["Journal of Synthetic Fixtures"],
+                    "author": [{
+                        "family": "Example",
+                        "given": "A.",
+                        "ORCID": "https://orcid.org/0000-0001-0000-0000"
+                    }],
+                    "volume": "7",
+                    "page": "1-10",
+                    "publisher": "Example Press",
+                    "URL": "https://doi.org/10.5555/structured.corpus.1",
+                    "issued": {"date-parts": [[2026]]}
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let server = test_server(&mock.uri()).with_providers(mock.uri());
+        let text = server
+            .validate_doi(Parameters(DoiArgs {
+                doi: doi.into(),
+                ..Default::default()
+            }))
+            .await;
+
+        // The marker is still in the raw string the handler returned: it
+        // is promote_structured_marker in call_tool that strips it. Here
+        // we parse it directly.
+        let begin = crate::work_record::STRUCTURED_MARKER_BEGIN;
+        let end = crate::work_record::STRUCTURED_MARKER_END;
+        let start = text
+            .find(begin)
+            .unwrap_or_else(|| panic!("no begin marker: {text}"));
+        let after_begin = start + begin.len();
+        let end_offset = text[after_begin..]
+            .find(end)
+            .unwrap_or_else(|| panic!("no end marker: {text}"));
+        let json_slice = text[after_begin..after_begin + end_offset].trim();
+        let record: serde_json::Value =
+            serde_json::from_str(json_slice).expect("record is valid JSON");
+
+        assert_eq!(record["kind"], crate::work_record::WORK_RECORD_KIND);
+        assert_eq!(record["doi"], doi);
+        assert_eq!(record["source"], "ookcite_corpus");
+        assert_eq!(record["confidence"], "high");
+        assert_eq!(record["from_cache"], false);
+        assert!(record["summary"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("VALID\n"));
+        // Title and authors are in both the corpus and the provider, so the
+        // provenance tag names both.
+        assert_eq!(
+            record["fields"]["title"]["provenance"],
+            "ookcite_corpus+crossref"
+        );
+        assert_eq!(
+            record["fields"]["authors"]["provenance"],
+            "ookcite_corpus+crossref"
+        );
+        // Volume, pages, publisher only came from Crossref.
+        assert_eq!(record["fields"]["volume"]["provenance"], "crossref");
+        assert_eq!(record["fields"]["pages"]["provenance"], "crossref");
+        assert_eq!(record["fields"]["publisher"]["provenance"], "crossref");
+        assert_eq!(record["fields"]["volume"]["value"], "7");
+        // The summary is also carried next to the record so a client can
+        // read the prose head without parsing content[0].
+        assert!(
+            record["summary"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Metadata: live"),
+            "{record:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_doi_not_in_corpus_tags_fields_with_the_publisher() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/structured.publisher.1";
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": {
+                    "type": "journal-article",
+                    "DOI": doi,
+                    "title": ["Only at the publisher"],
+                    "container-title": ["Journal of Synthetic Fixtures"],
+                    "author": [{"family": "Jones", "given": "B."}],
+                    "publisher": "Example Press",
+                    "issued": {"date-parts": [[2026]]}
+                }
+            })))
+            .mount(&mock)
+            .await;
+
+        let server = test_server(&mock.uri()).with_providers(mock.uri());
+        let text = server
+            .validate_doi(Parameters(DoiArgs {
+                doi: doi.into(),
+                ..Default::default()
+            }))
+            .await;
+
+        let begin = crate::work_record::STRUCTURED_MARKER_BEGIN;
+        let end = crate::work_record::STRUCTURED_MARKER_END;
+        let start = text.find(begin).unwrap();
+        let after = start + begin.len();
+        let end_offset = text[after..].find(end).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(text[after..after + end_offset].trim()).unwrap();
+
+        assert_eq!(record["source"], "not_in_corpus");
+        assert_eq!(record["fields"]["title"]["provenance"], "crossref");
+        assert_eq!(record["fields"]["publisher"]["provenance"], "crossref");
+        assert_eq!(record["fields"]["year"]["provenance"], "crossref");
+        assert_eq!(record["fields"]["title"]["value"], "Only at the publisher");
+    }
+
+    fn extract_structured(text: &str) -> Option<serde_json::Value> {
+        let begin = crate::work_record::STRUCTURED_MARKER_BEGIN;
+        let end = crate::work_record::STRUCTURED_MARKER_END;
+        let start = text.find(begin)?;
+        let after_begin = start + begin.len();
+        let end_offset = text[after_begin..].find(end)?;
+        serde_json::from_str(text[after_begin..after_begin + end_offset].trim()).ok()
+    }
+
+    #[test]
+    fn validate_doi_tool_listing_advertises_the_work_record_output_schema() {
+        // An agent that wants the structured record without parsing
+        // the summary prose needs to find the schema on the tool
+        // listing. If the tool macro stops carrying it, downstream
+        // generators fall back to "unknown output shape".
+        let server = Server::new();
+        let tools = server.tool_router.list_all();
+        let validate = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "validate_doi")
+            .expect("validate_doi is listed");
+        let schema = validate
+            .output_schema
+            .as_ref()
+            .expect("validate_doi must advertise an output schema");
+        let kind = schema
+            .get("properties")
+            .and_then(|value| value.get("kind"))
+            .and_then(|value| value.get("const"))
+            .and_then(|value| value.as_str());
+        assert_eq!(kind, Some(crate::work_record::WORK_RECORD_KIND));
+    }
+
+    #[tokio::test]
+    async fn validate_doi_cache_hit_keeps_provider_and_corpus_provenance_tags() {
+        // The first call retrieves the corpus row and overlays the
+        // Crossref record; the overlay is kept in the cache. The
+        // second call must rebuild the structured record from the
+        // cached pre-merge row and cached provider record, so the
+        // field provenance ("ookcite_corpus+crossref", "crossref")
+        // and author ORCIDs are the same across the two calls.
+        let mock = MockServer::start().await;
+        let doi = "10.5555/cache.provenance.1";
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains(doi))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": doi,
+                "title": "A cached paper",
+                "authors": [{"family": "Keeper", "given": "K."}],
+                "date": {"year": 2026}
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": {
+                    "DOI": doi,
+                    "title": ["A cached paper"],
+                    "author": [{
+                        "family": "Keeper", "given": "K.",
+                        "ORCID": "https://orcid.org/0000-0003-5555-0002"
+                    }],
+                    "container-title": ["Fixtures Weekly"],
+                    "issued": {"date-parts": [[2026]]},
+                    "type": "journal-article"
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let server = test_server(&mock.uri()).with_providers(mock.uri());
+
+        let first = server
+            .validate_doi(Parameters(DoiArgs {
+                doi: doi.into(),
+                ..Default::default()
+            }))
+            .await;
+        let first_record = extract_structured(&first).expect("first call has a record");
+        assert_eq!(
+            first_record["fields"]["title"]["provenance"],
+            "ookcite_corpus+crossref"
+        );
+        let first_orcid = first_record["authors"][0]["orcid"].as_str().unwrap();
+        assert_eq!(first_orcid, "https://orcid.org/0000-0003-5555-0002");
+
+        let second = server
+            .validate_doi(Parameters(DoiArgs {
+                doi: doi.into(),
+                ..Default::default()
+            }))
+            .await;
+        assert!(
+            second.contains("Metadata: cached"),
+            "second call must be a cache hit: {second}"
+        );
+        let second_record = extract_structured(&second).expect("cache hit has a record");
+        assert_eq!(
+            second_record["fields"]["title"]["provenance"], "ookcite_corpus+crossref",
+            "cache hit must keep the provider+corpus provenance: {second}"
+        );
+        assert_eq!(
+            second_record["authors"][0]["orcid"].as_str(),
+            Some("https://orcid.org/0000-0003-5555-0002"),
+            "cache hit must keep the ORCID picked up from the provider: {second}"
+        );
     }
 
     #[tokio::test]
@@ -10382,6 +10753,39 @@ mod tests {
             .and_then(|value| value.as_object())
             .map(|object| object.len())
             .unwrap_or(0)
+    }
+
+    #[test]
+    fn promote_moves_a_structured_marker_into_structured_content_and_strips_the_text() {
+        let prose = "VALID\nDOI: 10.5555/record\nTitle: X";
+        let record = serde_json::json!({
+            "kind": crate::work_record::WORK_RECORD_KIND,
+            "doi": "10.5555/record",
+            "source": "ookcite_corpus"
+        });
+        let wrapped = crate::work_record::append_structured_marker(prose, &record);
+        let mut result = CallToolResult::success(vec![ContentBlock::text(wrapped)]);
+
+        promote_structured_marker(&mut result);
+
+        let text = tool_result_text(&result);
+        assert!(!text.contains("OOKCITE_STRUCTURED_JSON"), "{text}");
+        assert!(text.starts_with("VALID"), "{text}");
+        assert!(text.contains("Title: X"), "{text}");
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["kind"], crate::work_record::WORK_RECORD_KIND);
+        assert_eq!(structured["doi"], "10.5555/record");
+    }
+
+    #[test]
+    fn promote_leaves_an_upstream_failure_payload_in_place_when_the_text_has_no_marker() {
+        let mut result = CallToolResult::success(vec![ContentBlock::text(
+            "RATE LIMITED: 429 Too Many Requests: Daily limit reached (Retry-After: 30)",
+        )]);
+        promote_upstream_failure(&mut result);
+        promote_structured_marker(&mut result);
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["kind"], "rate_limited");
     }
 
     #[test]

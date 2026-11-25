@@ -4,3 +4,4 @@
 # ttech-cite API surface. Only contract/openapi.json.age is public.
 /contract/openapi.json
 /contract/openapi.json.plain
+mutants.out/

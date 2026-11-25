@@ -249,8 +249,23 @@ pub fn batch_add_shortfall_line(
 /// Identity-safe process-local exact-DOI metadata cache (TTL).
 #[derive(Clone, Default)]
 pub struct DoiResponseCache {
-    inner: Arc<Mutex<HashMap<String, (Instant, serde_json::Value)>>>,
+    inner: Arc<Mutex<HashMap<String, CacheSlot>>>,
     ttl: Duration,
+}
+
+#[derive(Clone)]
+struct CacheSlot {
+    retrieved_at: Instant,
+    metadata: serde_json::Value,
+    /// The raw OokCite corpus response before provider overlay, when
+    /// available. A reader that needs per-field provenance uses it to
+    /// decide whether a field came from the corpus or from a provider.
+    stored_before_merge: Option<serde_json::Value>,
+    /// The raw provider record (`{"crossref": ..}`, `{"datacite": ..}`,
+    /// or `{"zenodo": ..}`) that was merged in. Lets the structured
+    /// record reach provider-only fields such as ORCID, abstract,
+    /// license and retraction on a cache hit without a second fetch.
+    provider_record: Option<serde_json::Value>,
 }
 
 /// A valid cached metadata record and the instant its upstream lookup completed.
@@ -261,6 +276,8 @@ pub struct DoiResponseCache {
 pub struct CachedDoiMetadata {
     pub metadata: serde_json::Value,
     pub retrieved_at: Instant,
+    pub stored_before_merge: Option<serde_json::Value>,
+    pub provider_record: Option<serde_json::Value>,
 }
 
 impl CachedDoiMetadata {
@@ -289,26 +306,46 @@ impl DoiResponseCache {
     pub fn get_valid_with_timing(&self, requested_doi: &str) -> Option<CachedDoiMetadata> {
         let key = normalize_doi_token(requested_doi);
         let mut guard = self.inner.lock().ok()?;
-        let (at, meta) = guard.get(&key)?.clone();
-        if at.elapsed() > self.ttl {
+        let slot = guard.get(&key)?.clone();
+        if slot.retrieved_at.elapsed() > self.ttl {
             guard.remove(&key);
             return None;
         }
-        if !metadata_doi_matches_json(&meta, &key) {
+        if !metadata_doi_matches_json(&slot.metadata, &key) {
             guard.remove(&key);
             return None;
         }
         Some(CachedDoiMetadata {
-            metadata: meta,
-            retrieved_at: at,
+            metadata: slot.metadata,
+            retrieved_at: slot.retrieved_at,
+            stored_before_merge: slot.stored_before_merge,
+            provider_record: slot.provider_record,
         })
     }
 
-    /// Store only when identity matches the request key.
+    /// Store only when identity matches the request key. Thin shim
+    /// over [`put_full_if_identity_ok`] used where provenance for the
+    /// pre-merge and provider sides is not kept.
+    #[allow(dead_code)]
     pub fn put_if_identity_ok(
         &self,
         requested_doi: &str,
         meta: serde_json::Value,
+    ) -> Option<Instant> {
+        self.put_full_if_identity_ok(requested_doi, meta, None, None)
+    }
+
+    /// Store a full provenance tuple: the merged record plus (when the
+    /// caller has them) the raw pre-merge OokCite row and the raw
+    /// provider record. A later cache hit then rebuilds the structured
+    /// record with every provenance tag and warning a fresh lookup
+    /// would have produced, instead of stranding the provider fields.
+    pub fn put_full_if_identity_ok(
+        &self,
+        requested_doi: &str,
+        meta: serde_json::Value,
+        stored_before_merge: Option<serde_json::Value>,
+        provider_record: Option<serde_json::Value>,
     ) -> Option<Instant> {
         let key = normalize_doi_token(requested_doi);
         if !metadata_doi_matches_json(&meta, &key) {
@@ -316,7 +353,15 @@ impl DoiResponseCache {
         }
         let retrieved_at = Instant::now();
         if let Ok(mut guard) = self.inner.lock() {
-            guard.insert(key, (retrieved_at, meta));
+            guard.insert(
+                key,
+                CacheSlot {
+                    retrieved_at,
+                    metadata: meta,
+                    stored_before_merge,
+                    provider_record,
+                },
+            );
             Some(retrieved_at)
         } else {
             None

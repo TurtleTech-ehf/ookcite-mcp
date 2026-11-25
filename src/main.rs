@@ -32,6 +32,7 @@ mod ridley_library;
 mod server;
 mod setup;
 mod tool_args;
+mod work_record;
 
 use rmcp::ServiceExt;
 
