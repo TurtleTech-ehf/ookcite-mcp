@@ -7,7 +7,9 @@ use crate::batch_limits::{
 };
 use crate::bib_audit::{audit_quota_refusal, parse_bibtex, render_audit, AuditQuota, DoiOutcome};
 use crate::bib_export::{self, BibOptions};
-use crate::bibliographic::{format_validate_doi, format_verify_line};
+use crate::bibliographic::{
+    format_validate_doi, format_verify_line, format_verify_line_with_authors,
+};
 use crate::collection_entries::{
     apply_entry_metadata_overrides, entry_doi, entry_metadata_by_id,
     entry_metadata_overrides_present, format_collection_entry_line, looks_like_doi_token,
@@ -56,6 +58,24 @@ mod discovery;
 fn shared_doi_cache() -> &'static DoiResponseCache {
     static CACHE: OnceLock<DoiResponseCache> = OnceLock::new();
     CACHE.get_or_init(DoiResponseCache::with_default_ttl)
+}
+
+/// True when `meta` has at least one author with a non-empty family name.
+///
+/// The authorless "(in your collection)" stub has no authors. A record the
+/// publisher answered for has them, so this is how a member line decides
+/// whether to use the full-record formatter.
+fn is_publisher_backed(meta: &serde_json::Value) -> bool {
+    meta.get("authors")
+        .and_then(|value| value.as_array())
+        .is_some_and(|authors| {
+            authors.iter().any(|author| {
+                author
+                    .get("family")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|family| !family.trim().is_empty())
+            })
+        })
 }
 
 /// Mark a ranked list as below the confidence threshold without erasing it.
@@ -828,7 +848,12 @@ impl Server {
         }
     }
 
-    /// Collection-local metadata only — never hits LOOKUP_DOI (free tier path).
+    /// Collection-local fallback when no publisher record can be fetched.
+    /// Never used on its own by `batch_format` or `verify_references`: both
+    /// go through `member_metadata`, which asks the publisher first so a
+    /// stored DOI is not formatted as an authorless "(in your collection)"
+    /// stub when Crossref or DataCite still hold the work. The stub stays
+    /// as the offline / provider-unavailable degradation.
     fn synthetic_member_metadata(doi: &str, title: Option<&str>) -> serde_json::Value {
         serde_json::json!({
             "doi": doi,
@@ -836,6 +861,84 @@ impl Server {
             "entry_type": "article",
             "authors": [],
         })
+    }
+
+    /// Sentinel key attached to a member stub when the publisher read
+    /// failed (429, 5xx, timeout, transport). `verify_references` sees
+    /// it and prints DEGRADED on the member line so the caller does not
+    /// mistake an authorless stub for a verified publisher record.
+    pub(crate) const MEMBER_DEGRADED_KEY: &str = "_ookcite_member_degraded";
+
+    /// Build the member→metadata map used by batch tools, in input order.
+    ///
+    /// Runs the per-member provider reads with the shared read concurrency,
+    /// so a large collection batch does not fan out one request at a time.
+    async fn member_entries_for(
+        &self,
+        members: &[(String, Option<String>)],
+    ) -> HashMap<String, serde_json::Value> {
+        if members.is_empty() {
+            return HashMap::new();
+        }
+        let conc = read_only_concurrency();
+        let futs = members.iter().cloned().map(|(doi, title)| {
+            let server = self.clone();
+            async move {
+                let meta = server.member_metadata(&doi, title.as_deref()).await;
+                (doi, meta)
+            }
+        });
+        stream::iter(futs)
+            .buffered(conc)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect()
+    }
+
+    /// Metadata for a DOI the caller already keeps in a collection.
+    ///
+    /// Collection membership is the free path: it skips the OokCite lookup
+    /// meter. The previous policy also skipped the publisher, which left
+    /// `batch_format` and `verify_references` formatting an authorless
+    /// "(in your collection)" stub -- a line that said VALID without
+    /// checking the record. This fetches Crossref or DataCite directly
+    /// (same path the fall-through and audit tools take), merges those
+    /// fields, and returns the full record. No metered OokCite call is
+    /// made. A provider failure degrades to the stub so an offline run
+    /// still formats something rather than erroring out.
+    async fn member_metadata(&self, doi: &str, title: Option<&str>) -> serde_json::Value {
+        if self.providers.is_none() {
+            // No provider base configured (unit tests, offline run):
+            // the stub is the final answer, not a publisher failure, so
+            // the degraded marker is not attached.
+            return Self::synthetic_member_metadata(doi, title);
+        }
+        match self.provider_record(doi).await {
+            Ok(Some(record)) => {
+                let seed = serde_json::json!({ "doi": doi });
+                bib_export::merge_provider_metadata(&seed, &record)
+            }
+            // A clean 404 from both Crossref and DataCite: the collection
+            // DOI exists (the user has it) but no publisher record is
+            // reachable. The stub is honest here.
+            Ok(None) => Self::synthetic_member_metadata(doi, title),
+            // A 429, a 5xx, a timeout, or a transport failure: the
+            // record probably exists but we could not read it. Mark the
+            // stub degraded so verify_references prints DEGRADED instead
+            // of VALID, and keep the reason on the stub so an agent can
+            // retry later.
+            Err(reason) => {
+                let mut stub = Self::synthetic_member_metadata(doi, title);
+                if let Some(object) = stub.as_object_mut() {
+                    object.insert(
+                        Self::MEMBER_DEGRADED_KEY.to_string(),
+                        serde_json::Value::String(reason),
+                    );
+                }
+                stub
+            }
+        }
     }
 
     /// Preflight + membership for multi-DOI tools; metered DOIs use cache then API.
@@ -854,16 +957,7 @@ impl Server {
         if let Some(msg) = pf.refuse_message {
             return Err(msg);
         }
-        let member_entries: HashMap<String, serde_json::Value> = pf
-            .members
-            .iter()
-            .map(|(doi, title)| {
-                (
-                    doi.clone(),
-                    Self::synthetic_member_metadata(doi, title.as_deref()),
-                )
-            })
-            .collect();
+        let member_entries = self.member_entries_for(&pf.members).await;
         let conc = read_only_concurrency();
         let futs: Vec<_> = pf
             .need_lookup
@@ -1580,14 +1674,48 @@ impl Server {
             out.extend(format_member_valid_lines(&pf.members));
             return out.join("\n");
         }
+        // Verify a member against its full publisher record, not the
+        // "(in your collection)" stub. A stored DOI without a claim still
+        // answers VALID -- membership proves existence -- but the title
+        // and authors on that line are the publisher's, so a bibliography
+        // that pastes the line has real metadata to show.
+        let member_entries = self.member_entries_for(&pf.members).await;
         let member_lines: HashMap<String, String> = pf
             .members
             .iter()
             .map(|(doi, title)| {
-                let line = format_member_valid_lines(&[(doi.clone(), title.clone())])
-                    .into_iter()
-                    .next()
-                    .expect("one member produces one line");
+                let line = match member_entries.get(doi) {
+                    Some(meta) if is_publisher_backed(meta) => {
+                        let base = format_verify_line_with_authors(doi, meta, None);
+                        format!("{base} [collection — not metered]")
+                    }
+                    // A 429, a 5xx, a timeout or a transport failure
+                    // from the publisher: the DOI is in the collection
+                    // but we could not confirm its metadata. Print
+                    // DEGRADED and keep the reason so the caller sees
+                    // this was a provider failure, not a clean read.
+                    Some(meta)
+                        if meta
+                            .get(Self::MEMBER_DEGRADED_KEY)
+                            .and_then(serde_json::Value::as_str)
+                            .is_some() =>
+                    {
+                        let reason = meta
+                            .get(Self::MEMBER_DEGRADED_KEY)
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("publisher read failed");
+                        let shown_title = title
+                            .clone()
+                            .unwrap_or_else(|| "(in your collection)".into());
+                        format!(
+                            "DEGRADED {doi} : {shown_title} [collection — publisher read failed: {reason}]"
+                        )
+                    }
+                    _ => format_member_valid_lines(&[(doi.clone(), title.clone())])
+                        .into_iter()
+                        .next()
+                        .expect("one member produces one line"),
+                };
                 (doi.clone(), line)
             })
             .collect();
@@ -1774,19 +1902,13 @@ impl Server {
         }
 
         let use_live_queries = args.use_live_queries;
-        // Collection members: synthetic metadata only — never LOOKUP_DOI (free path).
-        // Keep their original positions: appending all members before the
-        // metered lookups changes a numeric citation sequence for mixed batches.
-        let member_entries: HashMap<String, serde_json::Value> = pf
-            .members
-            .iter()
-            .map(|(doi, title)| {
-                (
-                    doi.clone(),
-                    Self::synthetic_member_metadata(doi, title.as_deref()),
-                )
-            })
-            .collect();
+        // Collection members: real publisher record, free of the OokCite
+        // meter. Keep their original positions: appending all members
+        // before the metered lookups changes a numeric citation sequence
+        // for mixed batches. The old path formatted an authorless
+        // "(in your collection)" stub -- a bibliography a reviewer would
+        // reject even though the DOIs were the user's own.
+        let member_entries = self.member_entries_for(&pf.members).await;
 
         let conc = read_only_concurrency();
         let futs: Vec<_> = pf
@@ -5000,6 +5122,165 @@ mod tests {
         assert!(
             out.contains("Ruby") || out.contains("Maiman") || out.contains("Other"),
             "format should run on synthetic member meta: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_references_formats_collection_members_from_publisher_record() {
+        let mock = MockServer::start().await;
+        let member_doi = "10.5555/member.paper.1";
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan": "free",
+                "lookups_remaining": 60,
+                "lookups_limit": 60
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-member", "name": "lab"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-member"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": format!("doi:{member_doi}"),
+                    "metadata": {"doi": member_doi, "title": "Short collection title"}
+                }]
+            })))
+            .mount(&mock)
+            .await;
+        // The DOI is a member: /api/v1/lookup/doi must not be called for it.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        // Member formatting goes directly to the publisher.
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", member_doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": {
+                    "type": "journal-article",
+                    "DOI": member_doi,
+                    "title": ["The Full Record Title From Crossref"],
+                    "author": [{"family": "Example", "given": "A."}],
+                    "container-title": ["Journal of Synthetic Fixtures"],
+                    "volume": "4",
+                    "issue": "1",
+                    "page": "7-21",
+                    "publisher": "Example Press",
+                    "issued": {"date-parts": [[2026]]}
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_member_verify");
+        let out = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec![member_doi.into()],
+                claims: Vec::new(),
+            }))
+            .await;
+
+        assert!(
+            out.starts_with(&format!("VALID {member_doi} : ")),
+            "member line still starts with VALID: {out}"
+        );
+        assert!(
+            out.contains("The Full Record Title From Crossref"),
+            "title must come from the publisher record, not the collection stub: {out}"
+        );
+        assert!(
+            !out.contains("(in your collection)"),
+            "authorless stub must not reach the output: {out}"
+        );
+        assert!(
+            out.contains("[collection — not metered]"),
+            "member line still names the collection and the free semantic: {out}"
+        );
+        assert!(
+            out.contains("Example, A."),
+            "member line must carry the authors from the publisher record: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_references_prints_degraded_on_a_publisher_failure_for_a_member() {
+        let mock = MockServer::start().await;
+        let member_doi = "10.5555/member.degraded.1";
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan": "free",
+                "lookups_remaining": 60,
+                "lookups_limit": 60
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-degraded", "name": "lab"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-degraded"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": format!("doi:{member_doi}"),
+                    "metadata": {"doi": member_doi, "title": "Short collection title"}
+                }]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        // Crossref throttles the publisher read for this DOI: 429 with
+        // a Retry-After. DataCite is not tried after a 429, since 429
+        // is not a 404.
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", member_doi)))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "30")
+                    .set_body_string("slow down"),
+            )
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_member_degraded");
+        let out = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec![member_doi.into()],
+                claims: Vec::new(),
+            }))
+            .await;
+
+        assert!(
+            out.starts_with(&format!("DEGRADED {member_doi} : ")),
+            "a publisher throttle must not pass as VALID: {out}"
+        );
+        assert!(!out.contains("VALID"), "{out}");
+        assert!(
+            out.contains("publisher read failed"),
+            "DEGRADED line must name the cause so an agent can retry: {out}"
         );
     }
 

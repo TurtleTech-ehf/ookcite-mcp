@@ -34,6 +34,72 @@ pub fn format_verify_line(doi: &str, meta: &Value, claim: Option<&BibliographicC
     }
 }
 
+/// Same as [`format_verify_line`] but also folds the authors into the
+/// VALID head so a line a caller pastes into a bibliography carries the
+/// citation's byline, not only its title. A record with no authors (an
+/// authorless stub) renders exactly like [`format_verify_line`].
+pub fn format_verify_line_with_authors(
+    doi: &str,
+    meta: &Value,
+    claim: Option<&BibliographicClaim>,
+) -> String {
+    let base = format_verify_line(doi, meta, claim);
+    let authors = format_author_list(meta);
+    if authors.is_empty() {
+        return base;
+    }
+    match base.find('\n') {
+        Some(head_end) => {
+            let (head, tail) = base.split_at(head_end);
+            format!("{head} — {authors}{tail}")
+        }
+        None => format!("{base} — {authors}"),
+    }
+}
+
+fn format_author_list(meta: &Value) -> String {
+    let Some(authors) = meta.get("authors").and_then(Value::as_array) else {
+        return String::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    for author in authors.iter().take(3) {
+        if let Some(family) = author
+            .get("family")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let given = author
+                .get("given")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            if given.is_empty() {
+                names.push(family.to_string());
+            } else {
+                names.push(format!("{family}, {given}"));
+            }
+        } else if let Some(literal) = author
+            .get("literal")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            names.push(literal.to_string());
+        }
+    }
+    if names.is_empty() {
+        return String::new();
+    }
+    let total = authors.len();
+    let joined = names.join(", ");
+    if total > names.len() {
+        format!("{joined}, et al.")
+    } else {
+        joined
+    }
+}
+
 pub fn format_validate_doi(
     requested_doi: &str,
     meta: &Value,
