@@ -58,6 +58,29 @@ fn shared_doi_cache() -> &'static DoiResponseCache {
     CACHE.get_or_init(DoiResponseCache::with_default_ttl)
 }
 
+/// Mark a ranked list as below the confidence threshold without erasing it.
+///
+/// The old code replaced a weak hit with "No confident matches found",
+/// which left the agent with nothing to pick between. The near misses are
+/// what the caller would disambiguate, so they are kept with a header that
+/// names the threshold and the top rank-score.
+fn low_confidence_header(ranked: &str) -> String {
+    let top = ranked
+        .lines()
+        .find(|line| line.trim_start().starts_with("1. "))
+        .and_then(|line| {
+            let open = line.find("[confidence:")?;
+            let rest = &line[open + "[confidence:".len()..];
+            let close = rest.find(']')?;
+            Some(rest[..close].to_string())
+        })
+        .unwrap_or_else(|| "0".into());
+    format!(
+        "LOW CONFIDENCE (top rank-score {top} below threshold {:.0}; disambiguate from the list, do not cite without verifying)\n{ranked}",
+        MIN_CONFIDENT_REVERSE_LOOKUP_SCORE
+    )
+}
+
 #[derive(Clone)]
 struct ProviderBases {
     crossref: String,
@@ -1054,39 +1077,73 @@ impl Server {
                 if !args.use_live_queries
                     && local_match.top_score < MIN_CONFIDENT_REVERSE_LOOKUP_SCORE =>
             {
-                match self.live_reverse_lookup(&args).await {
-                    Ok(Some(live_match))
-                        if live_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE =>
-                    {
-                        match self.finish_reverse_hit(live_match).await {
-                            Ok(text) => text,
-                            Err(message) => return message,
-                        }
+                // The ranked candidates are what an agent would disambiguate
+                // between, so the weak hit is kept and the live leg is a
+                // chance to replace it with a confident one. "No confident
+                // matches found" used to erase both lists and leave the agent
+                // nothing to pick from.
+                let live = self.live_reverse_lookup(&args).await;
+                let (better, confident) = match live {
+                    Ok(Some(live_match)) if live_match.top_score > local_match.top_score => {
+                        // A live hit that also clears the confidence
+                        // threshold is a real improvement over the weak
+                        // local list: print it clean, without the LOW
+                        // CONFIDENCE header the local hit would have
+                        // earned. The old default path always prepended
+                        // the header, so a live score of 88 was labelled
+                        // "below threshold 25".
+                        let confident = live_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE;
+                        (live_match, confident)
                     }
-                    Ok(Some(_)) | Ok(None) => "No confident matches found".into(),
+                    Ok(_) => (local_match, false),
                     // A live 429 or 5xx is the answer. The weak local hit
                     // must not hide it.
+                    Err(message) => return message,
+                };
+                match self.finish_reverse_hit(better).await {
+                    Ok(text) => {
+                        if confident {
+                            text
+                        } else {
+                            low_confidence_header(&text)
+                        }
+                    }
                     Err(message) => return message,
                 }
             }
             Ok(Some(local_match)) if args.use_live_queries => {
                 // Caller asked for live on first pass: still prefer reverse
-                // hits when confident; otherwise try resolve+live.
+                // hits when confident; otherwise try resolve+live. A live
+                // hit at or above the threshold replaces a weak local one;
+                // otherwise the better-scored of the two is kept with a
+                // LOW CONFIDENCE marker so the ranking is still visible.
                 if local_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE {
                     match self.finish_reverse_hit(local_match).await {
                         Ok(text) => text,
                         Err(message) => return message,
                     }
                 } else {
-                    match self.live_reverse_lookup(&args).await {
-                        Ok(Some(live_match)) => match self.finish_reverse_hit(live_match).await {
-                            Ok(text) => text,
-                            Err(message) => return message,
-                        },
-                        Ok(None) => match self.finish_reverse_hit(local_match).await {
-                            Ok(text) => text,
-                            Err(message) => return message,
-                        },
+                    let live = self.live_reverse_lookup(&args).await;
+                    let (match_to_use, confident) = match live {
+                        Ok(Some(live_match))
+                            if live_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE =>
+                        {
+                            (live_match, true)
+                        }
+                        Ok(Some(live_match)) if live_match.top_score > local_match.top_score => {
+                            (live_match, false)
+                        }
+                        Ok(_) => (local_match, false),
+                        Err(message) => return message,
+                    };
+                    match self.finish_reverse_hit(match_to_use).await {
+                        Ok(text) => {
+                            if confident {
+                                text
+                            } else {
+                                low_confidence_header(&text)
+                            }
+                        }
                         Err(message) => return message,
                     }
                 }
@@ -1098,8 +1155,19 @@ impl Server {
             // An empty local list tries live whether or not the caller set
             // use_live_queries. The flag used to skip that search.
             Ok(None) => match self.live_reverse_lookup(&args).await {
+                Ok(Some(live_match))
+                    if live_match.top_score >= MIN_CONFIDENT_REVERSE_LOOKUP_SCORE =>
+                {
+                    match self.finish_reverse_hit(live_match).await {
+                        Ok(text) => text,
+                        Err(message) => return message,
+                    }
+                }
+                // A live hit under the threshold is still the only ranked
+                // list the agent has; keep it with the LOW CONFIDENCE
+                // marker rather than erase it with "No matches found".
                 Ok(Some(live_match)) => match self.finish_reverse_hit(live_match).await {
-                    Ok(text) => text,
+                    Ok(text) => low_confidence_header(&text),
                     Err(message) => return message,
                 },
                 Ok(None) => "No matches found".into(),
@@ -6272,10 +6340,18 @@ mod tests {
         assert!(result.contains("Attention Is All You Need"));
         assert!(result.contains("10.48550/arXiv.1706.03762"));
         assert!(!result.contains("Resource allocation based on redundancy models"));
+        // A live score of 88 clears MIN_CONFIDENT_REVERSE_LOOKUP_SCORE
+        // (25), so the default path must print the ranked list clean,
+        // without the LOW CONFIDENCE header the local score of 2 would
+        // have earned on its own.
+        assert!(
+            !result.contains("LOW CONFIDENCE"),
+            "confident live hit was still labelled below the threshold: {result}"
+        );
     }
 
     #[tokio::test]
-    async fn test_reverse_lookup_rejects_unconfident_local_and_live_matches() {
+    async fn test_reverse_lookup_keeps_low_confidence_candidates_with_scores() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/reverse"))
@@ -6283,7 +6359,7 @@ mod tests {
                 {
                     "metadata": {
                         "title": "Resource allocation based on redundancy models for high availability cloud",
-                        "doi": "10.1007/s00607-019-00728-1",
+                        "doi": "10.5555/weak.local.1",
                         "journal": "Computing"
                     },
                     "score": 2.0
@@ -6302,7 +6378,7 @@ mod tests {
                     {
                         "metadata": {
                             "title": "All You Need Is LSD",
-                            "doi": "10.5040/9781350101272.00000005",
+                            "doi": "10.5555/live.candidate.1",
                             "journal": "All You Need Is LSD"
                         },
                         "score": 10.0
@@ -6325,9 +6401,90 @@ mod tests {
             }))
             .await;
 
-        assert_eq!(
-            result,
-            "original: Attention Is All You Need Vaswani 2017\nNo confident matches found"
+        assert!(
+            result.contains("LOW CONFIDENCE"),
+            "low-confidence header is missing: {result}"
+        );
+        assert!(
+            result.contains("threshold 25"),
+            "threshold must be named so the agent knows the bar: {result}"
+        );
+        assert!(
+            !result.contains("No confident matches found"),
+            "near misses must not be erased: {result}"
+        );
+        // The higher-scoring live candidate replaces the weak local hit.
+        assert!(
+            result.contains("All You Need Is LSD"),
+            "better-scored candidate must be shown: {result}"
+        );
+        assert!(
+            result.contains("10.5555/live.candidate.1"),
+            "candidate DOI must be present: {result}"
+        );
+        assert!(
+            result.contains("[confidence:10]"),
+            "candidate rank-score must stay visible: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reverse_lookup_keeps_the_weak_local_hit_when_live_is_empty() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/reverse"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "metadata": {
+                        "title": "A near-miss title the ranker scored low",
+                        "doi": "10.5555/weak.local.2",
+                        "journal": "Journal of Synthetic Fixtures"
+                    },
+                    "score": 7.0
+                }
+            ])))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/resolve"))
+            .and(body_string_contains(r#""use_live_queries":true"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "query_type": "text",
+                "match_type": "candidate_list",
+                "candidates": []
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let s = test_server(&mock.uri());
+        let result = s
+            .reverse_lookup(Parameters(ReverseArgs {
+                text: "a messy citation string".into(),
+                author: None,
+                journal: None,
+                year: None,
+                orcid: None,
+                use_live_queries: false,
+            }))
+            .await;
+
+        assert!(
+            result.contains("LOW CONFIDENCE"),
+            "low-confidence header is missing: {result}"
+        );
+        assert!(
+            result.contains("10.5555/weak.local.2"),
+            "weak local hit must be preserved when live returns nothing: {result}"
+        );
+        assert!(
+            result.contains("[confidence:7]"),
+            "rank-score must stay visible: {result}"
+        );
+        assert!(
+            !result.contains("No confident matches found"),
+            "no erasure: {result}"
         );
     }
 
