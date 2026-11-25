@@ -92,15 +92,28 @@ pub struct DebugResolveArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FormatArgs {
     /// DOI of the paper
     pub doi: String,
     /// CSL style (default: "apa"). Options: apa, ieee, chicago-author-date, mla, nature, vancouver, etc.
     #[serde(default = "default_style")]
     pub style: String,
+    /// CSL locale (default: "en-US"). Only used when `format` is `csl` or `both`. Examples: "en-GB", "de-DE", "fr-FR".
+    #[serde(default = "default_locale")]
+    pub locale: String,
+    /// Output format: `csl` (default, in-text + bibliography text), `bibtex` (one @-entry), `ris` (one RIS record), or `both` (CSL text plus the BibTeX entry).
+    #[serde(default = "default_format")]
+    pub format: String,
 }
 pub fn default_style() -> String {
     "apa".into()
+}
+pub fn default_locale() -> String {
+    "en-US".into()
+}
+pub fn default_format() -> String {
+    "csl".into()
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -126,6 +139,12 @@ pub struct BatchArgs {
     /// CSL style for formatting
     #[serde(default = "default_style")]
     pub style: String,
+    /// CSL locale (BCP-47) that the format API uses to localise
+    /// punctuation and author/year joining. Defaults to en-US. Pass
+    /// fr-FR, de-DE, ja-JP, ... when the formatted output should be in
+    /// that language.
+    #[serde(default = "default_locale")]
+    pub locale: String,
     /// When true, allow live upstream provider queries in addition to the local corpus.
     #[serde(default)]
     pub use_live_queries: bool,
@@ -183,6 +202,10 @@ pub struct ExportCollectionArgs {
     /// CSL style when `format` is `csl` (default: "apa")
     #[serde(default = "default_style")]
     pub style: String,
+    /// CSL locale (BCP-47) for the formatted output. Defaults to en-US.
+    /// Only consulted when `format` is `csl` or a CSL style id.
+    #[serde(default = "default_locale")]
+    pub locale: String,
     /// How a software record is written in BibTeX: `software` (default) or `misc` (with `howpublished`)
     #[serde(default = "default_software_entry")]
     pub software_entry: String,
@@ -235,6 +258,10 @@ pub struct ImportBibliographyArgs {
     /// Optional CSL style; when set, plaintext import also returns formatted bibliography text
     #[serde(default)]
     pub style: Option<String>,
+    /// CSL locale (BCP-47) for the formatted output when `style` is set.
+    /// Defaults to en-US.
+    #[serde(default = "default_locale")]
+    pub locale: String,
 }
 pub fn default_import_format() -> String {
     "auto".into()

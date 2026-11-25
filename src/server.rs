@@ -60,6 +60,45 @@ fn shared_doi_cache() -> &'static DoiResponseCache {
     CACHE.get_or_init(DoiResponseCache::with_default_ttl)
 }
 
+/// BibTeX for one DOI, rendered from the provider-merged metadata already
+/// in hand. Uses the same `bib_export::render_pairs` path collection export
+/// uses, so a single DOI and a collection export produce the same shape.
+///
+/// The record the merge returned may not carry `doi` (an OokCite record
+/// that was built before the provider overlay, or a publisher record
+/// where the registrar field was omitted). The caller asked for a
+/// specific DOI, so that DOI is seeded onto the record before render so
+/// the resulting entry always carries `doi = {…}`. Same treatment the
+/// RIS path already gives it.
+fn render_single_bibtex(doi: &str, meta: &serde_json::Value) -> String {
+    let mut seeded = meta.clone();
+    if let Some(object) = seeded.as_object_mut() {
+        let already = object
+            .get("doi")
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .is_some();
+        if !already {
+            object.insert(
+                "doi".to_string(),
+                serde_json::Value::String(doi.to_string()),
+            );
+        }
+    }
+    let pairs = vec![(seeded, None)];
+    match bib_export::render_pairs(&pairs, &BibOptions::default()) {
+        Ok(text) => {
+            if text.trim().is_empty() {
+                format!("BibTeX unavailable for doi:{doi}: the record is empty.")
+            } else {
+                text
+            }
+        }
+        Err(error) => format!("BibTeX render failed for doi:{doi}: {error}"),
+    }
+}
+
 /// True when `meta` has at least one author with a non-empty family name.
 ///
 /// The authorless "(in your collection)" stub has no authors. A record the
@@ -1583,10 +1622,24 @@ impl Server {
         )
     )]
     async fn format_citation(&self, Parameters(args): Parameters<FormatArgs>) -> String {
+        let format = args.format.trim().to_ascii_lowercase();
+        if !matches!(format.as_str(), "csl" | "bibtex" | "ris" | "both") {
+            return format!(
+                "CLIENT ERROR: format must be \"csl\", \"bibtex\", \"ris\", or \"both\", not {:?}.",
+                args.format
+            );
+        }
         let meta = match self.lookup_doi_json_cached(&args.doi).await {
             Ok(meta) => meta,
             Err(error) => return error,
         };
+
+        if format == "bibtex" {
+            return render_single_bibtex(&args.doi, &meta);
+        }
+        if format == "ris" {
+            return bib_export::render_single_ris(&args.doi, &meta);
+        }
 
         let fmt = self
             .send_read(|| {
@@ -1594,7 +1647,7 @@ impl Server {
                     .json(&serde_json::json!({
                         "entries": [meta.clone()],
                         "style": args.style,
-                        "locale": "en-US"
+                        "locale": args.locale
                     }))
             })
             .await;
@@ -1607,7 +1660,13 @@ impl Server {
                     .and_then(|a| a.first())
                     .and_then(|c| c["plain"].as_str())
                     .unwrap_or("");
-                format!("In-text: {intext}\nReference: {plain}")
+                let csl = format!("In-text: {intext}\nReference: {plain}");
+                if format == "both" {
+                    let bibtex = render_single_bibtex(&args.doi, &meta);
+                    format!("{csl}\nBibTeX:\n{bibtex}")
+                } else {
+                    csl
+                }
             }
             Ok(r) => failure_text(r, "Format failed").await,
             Err(error) => format!("Format failed: {error}"),
@@ -2011,7 +2070,7 @@ impl Server {
                     .json(&serde_json::json!({
                         "entries": &entries,
                         "style": args.style,
-                        "locale": "en-US"
+                        "locale": args.locale,
                     }))
             })
             .await;
@@ -2317,7 +2376,10 @@ impl Server {
                 if entries.is_empty() {
                     return "Collection is empty.".into();
                 }
-                match self.format_entries_csl(&entries, &style).await {
+                match self
+                    .format_entries_csl(&entries, &style, &args.locale)
+                    .await
+                {
                     Ok(text) => text,
                     Err(e) => e,
                 }
@@ -2675,6 +2737,7 @@ impl Server {
         &self,
         entries: &[serde_json::Value],
         style: &str,
+        locale: &str,
     ) -> Result<String, String> {
         let fmt = self
             .send_read(|| {
@@ -2682,7 +2745,7 @@ impl Server {
                     .json(&serde_json::json!({
                         "entries": entries,
                         "style": style,
-                        "locale": "en-US"
+                        "locale": locale,
                     }))
             })
             .await;
@@ -2715,6 +2778,7 @@ impl Server {
         collection: Option<&str>,
         content: &str,
         style: Option<&str>,
+        locale: &str,
     ) -> String {
         let units = self.plaintext_citation_units(content).await;
         if units.is_empty() {
@@ -2746,7 +2810,7 @@ impl Server {
             units.len()
         );
         if let Some(style) = style.map(str::trim).filter(|s| !s.is_empty()) {
-            match self.format_entries_csl(&entries, style).await {
+            match self.format_entries_csl(&entries, style, locale).await {
                 Ok(csl) => {
                     out.push_str("\nCSL text:\n");
                     out.push_str(&csl);
@@ -2884,7 +2948,12 @@ impl Server {
         let collection = optional_collection_name(&args.collection);
         if kind == BibliographyKind::Plaintext {
             return self
-                .import_plaintext(collection, &args.content, args.style.as_deref())
+                .import_plaintext(
+                    collection,
+                    &args.content,
+                    args.style.as_deref(),
+                    &args.locale,
+                )
                 .await;
         }
         let Some(collection) = collection else {
@@ -5168,6 +5237,7 @@ mod tests {
             .batch_format(Parameters(crate::tool_args::BatchArgs {
                 citations: vec!["10.1038/187493a0".into(), "10.1/other".into()],
                 style: default_style(),
+                locale: "en-US".into(),
                 use_live_queries: false,
             }))
             .await;
@@ -5409,6 +5479,7 @@ mod tests {
             .batch_format(Parameters(crate::tool_args::BatchArgs {
                 citations: vec!["10.1/live".into(), "10.1/member".into()],
                 style: default_style(),
+                locale: "en-US".into(),
                 use_live_queries: false,
             }))
             .await;
@@ -6367,6 +6438,7 @@ mod tests {
         let s = test_server(&mock.uri());
         let result = s
             .import_bibliography(Parameters(ImportBibliographyArgs {
+                locale: "en-US".into(),
                 collection: None,
                 content: "1. Maiman, T. H. Stimulated Optical Radiation in Ruby. Nature (1960)."
                     .into(),
@@ -6419,6 +6491,7 @@ mod tests {
             .join("\n");
         let result = s
             .import_bibliography(Parameters(ImportBibliographyArgs {
+                locale: "en-US".into(),
                 collection: None,
                 content: list,
                 format: "plaintext".into(),
@@ -6465,6 +6538,7 @@ mod tests {
         let s = test_server(&mock.uri());
         let result = s
             .export_collection(Parameters(ExportCollectionArgs {
+                locale: "en-US".into(),
                 collection: "lab".into(),
                 format: "csl".into(),
                 style: "apa".into(),
@@ -6545,6 +6619,7 @@ mod tests {
         let result = test_server(&mock.uri())
             .with_providers(mock.uri())
             .export_collection(Parameters(ExportCollectionArgs {
+                locale: "en-US".into(),
                 collection: "lab".into(),
                 format: "bib".into(),
                 style: "apa".into(),
@@ -6663,6 +6738,7 @@ mod tests {
         let server = test_server(&mock.uri()).with_providers(mock.uri());
         let imported = server
             .import_bibliography(Parameters(ImportBibliographyArgs {
+                locale: "en-US".into(),
                 collection: Some("linkcell".into()),
                 content: format!(
                     "@software{{linkcell,\n  title = {{linkcell}},\n  author = {{Goswami, Rohit}},\n  year = {{2024}},\n  version = {{0.3.11}},\n  publisher = {{Old Press}},\n  doi = {{{doi}}}\n}}\n"
@@ -6684,6 +6760,7 @@ mod tests {
         assert!(updated.contains("Updated entry e-link"), "{updated}");
         let bib = server
             .export_collection(Parameters(ExportCollectionArgs {
+                locale: "en-US".into(),
                 collection: "linkcell".into(),
                 format: "bib".into(),
                 style: "apa".into(),
@@ -6743,6 +6820,7 @@ mod tests {
         let result = test_server(&mock.uri())
             .with_providers(mock.uri())
             .export_collection(Parameters(ExportCollectionArgs {
+                locale: "en-US".into(),
                 collection: "lab".into(),
                 format: "bib".into(),
                 style: "apa".into(),
@@ -6765,6 +6843,7 @@ mod tests {
         let s = test_server("http://127.0.0.1:9");
         let result = s
             .import_bibliography(Parameters(ImportBibliographyArgs {
+                locale: "en-US".into(),
                 collection: None,
                 content: "@article{a,\n  title={T},\n  author={A}\n}".into(),
                 format: "bibtex".into(),
@@ -8631,6 +8710,7 @@ mod tests {
             .batch_format(Parameters(crate::tool_args::BatchArgs {
                 citations: vec!["10.9999/mcp-rate-limit-contract".into()],
                 style: default_style(),
+                locale: "en-US".into(),
                 use_live_queries: true,
             }))
             .await;
@@ -9163,6 +9243,258 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_format_forwards_the_caller_locale_to_the_format_api() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/batch.locale.1";
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains(doi))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": doi,
+                "title": "Un article à formater en français",
+                "authors": [{"family": "Dupont", "given": "A."}],
+                "date": {"year": 2026}
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        // The single /api/v1/format call must carry `"locale":"fr-FR"`,
+        // the value the caller passed to batch_format. The old path
+        // hard-coded en-US and ignored the arg.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/format"))
+            .and(body_string_contains(r#""locale":"fr-FR""#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{"intext_plain": "(Dupont, 2026)", "bib_plain": "Dupont. Article."}]
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let out = test_server(&mock.uri())
+            .batch_format(Parameters(crate::tool_args::BatchArgs {
+                citations: vec![doi.into()],
+                style: "apa".into(),
+                locale: "fr-FR".into(),
+                use_live_queries: false,
+            }))
+            .await;
+
+        assert!(out.contains("Dupont"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn format_citation_renders_bibtex_from_the_record_without_calling_the_format_api() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/format.bibtex.1";
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains(doi))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": doi,
+                "title": "A record rendered as BibTeX",
+                "entry_type": "journal-article",
+                "authors": [{"family": "Example", "given": "A."}],
+                "date": {"year": 2026},
+                "journal": "Journal of Synthetic Fixtures",
+                "volume": "12",
+                "issue": "3",
+                "pages": "101-115",
+                "publisher": "Example Press"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        // /api/v1/format is NOT called for bibtex: the entry is rendered
+        // in-process from the merged record.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/format"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let text = test_server(&mock.uri())
+            .format_citation(Parameters(FormatArgs {
+                doi: doi.into(),
+                style: "apa".into(),
+                locale: "en-US".into(),
+                format: "bibtex".into(),
+            }))
+            .await;
+
+        assert!(text.contains("@article{"), "{text}");
+        assert!(text.contains("A record rendered as"), "{text}");
+        assert!(text.contains("Example"), "{text}");
+        assert!(text.contains("doi = {10.5555/format.bibtex.1"), "{text}");
+        assert!(text.contains("volume = {12}"), "{text}");
+        assert!(text.contains("pages = {101--115}"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn format_citation_bibtex_always_writes_the_requested_doi_even_if_the_record_omits_it() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/bibtex.doi.seed.1";
+        // The OokCite body returns a record with every field except
+        // `doi`, which the registrar sometimes omits when the stored
+        // row was imported from a .bib without one. The renderer used
+        // to emit `@article` without `doi = {...}`, so an agent could
+        // not round-trip the entry back to a DOI.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains(doi))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "title": "A record that does not store the DOI itself",
+                "authors": [{"family": "Example", "given": "A."}],
+                "date": {"year": 2026}
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/format"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let text = test_server(&mock.uri())
+            .format_citation(Parameters(FormatArgs {
+                doi: doi.into(),
+                style: "apa".into(),
+                locale: "en-US".into(),
+                format: "bibtex".into(),
+            }))
+            .await;
+
+        assert!(text.contains("@article{"), "{text}");
+        assert!(
+            text.contains(&format!("doi = {{{doi}")),
+            "requested DOI was dropped from the BibTeX entry: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn format_citation_renders_ris_from_the_record() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/format.ris.1";
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains(doi))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": doi,
+                "title": "A record exported as RIS",
+                "entry_type": "journal-article",
+                "authors": [
+                    {"family": "Example", "given": "A."},
+                    {"family": "Second", "given": "B."}
+                ],
+                "date": {"year": 2026},
+                "journal": "Journal of Synthetic Fixtures",
+                "volume": "5",
+                "issue": "2",
+                "pages": "7-21",
+                "publisher": "Example Press"
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/format"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let text = test_server(&mock.uri())
+            .format_citation(Parameters(FormatArgs {
+                doi: doi.into(),
+                style: "apa".into(),
+                locale: "en-US".into(),
+                format: "ris".into(),
+            }))
+            .await;
+
+        assert!(text.starts_with("TY  - JOUR"), "{text}");
+        assert!(text.contains("TI  - A record exported as RIS"), "{text}");
+        assert!(text.contains("AU  - Example, A."), "{text}");
+        assert!(text.contains("AU  - Second, B."), "{text}");
+        assert!(text.contains("PY  - 2026"), "{text}");
+        assert!(
+            text.contains("JO  - Journal of Synthetic Fixtures"),
+            "{text}"
+        );
+        assert!(text.contains("VL  - 5"), "{text}");
+        assert!(text.contains("IS  - 2"), "{text}");
+        assert!(text.contains("SP  - 7"), "{text}");
+        assert!(text.contains("EP  - 21"), "{text}");
+        assert!(text.contains("DO  - 10.5555/format.ris.1"), "{text}");
+        assert!(text.trim_end().ends_with("ER  -"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn format_citation_forwards_the_caller_locale_to_the_format_api() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/format.locale.1";
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains(doi))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "doi": doi,
+                "title": "A paper in French format",
+                "authors": [{"family": "Dupont", "given": "A."}],
+                "date": {"year": 2026}
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/format"))
+            .and(body_string_contains(r#""locale":"fr-FR""#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plain": "Dupont, A. (2026). Un article.",
+                "citations": [{"plain": "(Dupont, 2026)"}]
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let text = test_server(&mock.uri())
+            .format_citation(Parameters(FormatArgs {
+                doi: doi.into(),
+                style: "apa".into(),
+                locale: "fr-FR".into(),
+                format: "csl".into(),
+            }))
+            .await;
+
+        assert!(text.contains("Dupont"), "{text}");
+        assert!(text.contains("In-text: (Dupont, 2026)"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn format_citation_refuses_an_unknown_format_before_a_request() {
+        let mock = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let text = test_server(&mock.uri())
+            .format_citation(Parameters(FormatArgs {
+                doi: "10.5555/format.unknown.1".into(),
+                style: "apa".into(),
+                locale: "en-US".into(),
+                format: "jsonld".into(),
+            }))
+            .await;
+
+        assert!(text.starts_with("CLIENT ERROR:"), "{text}");
+        assert!(text.contains("\"jsonld\""), "{text}");
+    }
+
+    #[tokio::test]
     async fn test_format_citation_rate_limited() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
@@ -9179,6 +9511,8 @@ mod tests {
             .format_citation(Parameters(FormatArgs {
                 doi: "10.1038/187493a0".into(),
                 style: "apa".into(),
+                locale: "en-US".into(),
+                format: "csl".into(),
             }))
             .await;
         assert!(result.starts_with("RATE LIMITED"));
@@ -9821,6 +10155,7 @@ mod tests {
             collection: "Refs".into(),
             format: "bib".into(),
             style: "apa".into(),
+            locale: "en-US".into(),
             software_entry: "software".into(),
             eid_as: "eid".into(),
             local_overrides: true,
@@ -10387,6 +10722,7 @@ mod tests {
 
         let result = test_server(&mock.uri())
             .import_bibliography(Parameters(ImportBibliographyArgs {
+                locale: "en-US".into(),
                 collection: Some("femtolab".into()),
                 content: "10.1038/restart-import".into(),
                 format: "plaintext".into(),
@@ -10528,6 +10864,7 @@ mod tests {
             .with_overrides(overrides::OverrideStore::Enabled(dir.path().to_path_buf()));
         let imported = server
             .import_bibliography(Parameters(ImportBibliographyArgs {
+                locale: "en-US".into(),
                 collection: Some(collection.into()),
                 content: bib.into(),
                 format: "bibtex".into(),
@@ -10541,6 +10878,7 @@ mod tests {
         );
         server
             .export_collection(Parameters(ExportCollectionArgs {
+                locale: "en-US".into(),
                 collection: collection.into(),
                 format: "bib".into(),
                 style: "apa".into(),
@@ -10779,6 +11117,7 @@ mod tests {
             .with_overrides(overrides::OverrideStore::Enabled(dir.path().to_path_buf()));
         let imported = server
             .import_bibliography(Parameters(ImportBibliographyArgs {
+                locale: "en-US".into(),
                 collection: Some("manuals".into()),
                 content: bib.into(),
                 format: "bibtex".into(),
@@ -10796,6 +11135,7 @@ mod tests {
         }
         let exported = server
             .export_collection(Parameters(ExportCollectionArgs {
+                locale: "en-US".into(),
                 collection: "manuals".into(),
                 format: "bib".into(),
                 style: "apa".into(),
@@ -10931,6 +11271,7 @@ mod tests {
         let bib = include_str!("../tests/fixtures/roundtrip-shapes.bib");
         let imported = test_server(&mock.uri())
             .import_bibliography(Parameters(ImportBibliographyArgs {
+                locale: "en-US".into(),
                 collection: Some("shapes".into()),
                 content: bib.into(),
                 format: "bibtex".into(),

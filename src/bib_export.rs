@@ -160,6 +160,128 @@ pub fn render_stored_entries(
     render_pairs(&pairs, &BibOptions::default())
 }
 
+/// One RIS record from the publisher-merged metadata already in hand.
+///
+/// Uses a small, well-known subset of RIS tags: TY (type), TI (title),
+/// AU (author, Family, Given), PY (year), JO (journal / container),
+/// VL (volume), IS (issue), SP/EP (page range), DO (doi), UR (url),
+/// PB (publisher), AB (abstract). `ER  -` closes the record, as RIS
+/// requires. A reader (Zotero, EndNote, Papers) parses a single record
+/// from this text as it would from an export file.
+pub fn render_single_ris(doi: &str, meta: &Value) -> String {
+    let mut out = String::new();
+    let ris_type = ris_type_tag(meta);
+    push_ris_tag(&mut out, "TY", ris_type);
+    if let Some(title) = text(meta, "title") {
+        push_ris_tag(&mut out, "TI", &title);
+    }
+    if let Some(authors) = meta.get("authors").and_then(Value::as_array) {
+        for author in authors {
+            if let Some(family) = author
+                .get("family")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let given = author
+                    .get("given")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("");
+                let name = if given.is_empty() {
+                    family.to_string()
+                } else {
+                    format!("{family}, {given}")
+                };
+                push_ris_tag(&mut out, "AU", &name);
+            }
+        }
+    }
+    if let Some(year) = meta
+        .pointer("/date/year")
+        .and_then(Value::as_i64)
+        .or_else(|| meta.get("year").and_then(Value::as_i64))
+    {
+        push_ris_tag(&mut out, "PY", &year.to_string());
+    }
+    if let Some(journal) = text(meta, "journal") {
+        push_ris_tag(&mut out, "JO", &journal);
+    } else if let Some(booktitle) = text(meta, "booktitle") {
+        push_ris_tag(&mut out, "T2", &booktitle);
+    }
+    if let Some(volume) = text(meta, "volume") {
+        push_ris_tag(&mut out, "VL", &volume);
+    }
+    if let Some(issue) = text(meta, "issue") {
+        push_ris_tag(&mut out, "IS", &issue);
+    }
+    if let Some(pages) = text(meta, "pages") {
+        let (start, end) = split_page_range(&pages);
+        push_ris_tag(&mut out, "SP", &start);
+        if let Some(end) = end {
+            push_ris_tag(&mut out, "EP", &end);
+        }
+    }
+    if let Some(publisher) = text(meta, "publisher") {
+        push_ris_tag(&mut out, "PB", &publisher);
+    }
+    let printed_doi = text(meta, "doi").unwrap_or_else(|| doi.to_string());
+    push_ris_tag(&mut out, "DO", &printed_doi);
+    if let Some(url) = text(meta, "url") {
+        push_ris_tag(&mut out, "UR", &url);
+    }
+    if let Some(abstract_text) = text(meta, "abstract") {
+        push_ris_tag(&mut out, "AB", &abstract_text);
+    }
+    out.push_str("ER  - \n");
+    out
+}
+
+fn ris_type_tag(meta: &Value) -> &'static str {
+    let entry = meta
+        .get("entry_type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match entry.as_str() {
+        "journal-article" | "article" | "journalarticle" => "JOUR",
+        "proceedings-article" | "inproceedings" | "conferencepaper" => "CPAPER",
+        "book" => "BOOK",
+        "book-chapter" | "incollection" | "bookchapter" => "CHAP",
+        "report" | "techreport" => "RPRT",
+        "software" => "COMP",
+        "preprint" | "posted-content" => "UNPD",
+        "standard" => "STAND",
+        "manual" => "GEN",
+        _ => "GEN",
+    }
+}
+
+fn push_ris_tag(out: &mut String, tag: &str, value: &str) {
+    for line in value.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("{tag}  - {line}\n"));
+    }
+}
+
+fn split_page_range(pages: &str) -> (String, Option<String>) {
+    let separators = ['-', '\u{2013}', '\u{2014}', '/'];
+    let normalised = pages.replace("--", "-");
+    for sep in separators {
+        if let Some((start, end)) = normalised.split_once(sep) {
+            let start = start.trim();
+            let end = end.trim();
+            if !start.is_empty() && !end.is_empty() {
+                return (start.to_string(), Some(end.to_string()));
+            }
+        }
+    }
+    (normalised.trim().to_string(), None)
+}
+
 pub fn render_pairs(
     pairs: &[(Value, Option<Value>)],
     options: &BibOptions,
