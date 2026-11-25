@@ -290,13 +290,33 @@ struct DoiLookup {
     metadata: serde_json::Value,
     retrieved_at: Instant,
     from_cache: bool,
+    /// Where the record came from.
+    ///
+    /// `Corpus` is a hit on `/api/v1/lookup/doi`. `NotInCorpus` is a 404 on
+    /// that lookup paired with a publisher record: the DOI is registered
+    /// and the registrar answered, but OokCite's corpus did not. The verify
+    /// head used to print INVALID for that case; the answer is NOT-IN-CORPUS
+    /// because the paper exists and the fields below are the publisher's.
+    source: DoiSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoiSource {
+    Corpus,
+    NotInCorpus,
 }
 
 impl DoiLookup {
     fn freshness_line(&self) -> String {
         let age_secs = self.retrieved_at.elapsed().as_secs();
         let source = if self.from_cache { "cached" } else { "live" };
-        format!("Metadata: {source} (retrieved {age_secs}s ago)")
+        let origin = match self.source {
+            DoiSource::Corpus => "ookcite corpus",
+            DoiSource::NotInCorpus => {
+                "publisher record (not in OokCite corpus; Crossref or DataCite)"
+            }
+        };
+        format!("Metadata: {source} (retrieved {age_secs}s ago) from {origin}")
     }
 }
 
@@ -454,6 +474,7 @@ impl Server {
                     metadata: cached.metadata,
                     retrieved_at: cached.retrieved_at,
                     from_cache: true,
+                    source: DoiSource::Corpus,
                 });
             }
         }
@@ -484,7 +505,38 @@ impl Server {
                     metadata: meta,
                     retrieved_at,
                     from_cache: false,
+                    source: DoiSource::Corpus,
                 })
+            }
+            Ok(resp) if resp.status().as_u16() == 404 => {
+                // Registered DOI (require_registered passed) but the OokCite
+                // corpus has no entry. The old path reported INVALID and
+                // stopped, which is where agents learned to bypass this
+                // server for the registrar record they already have. Try the
+                // publisher directly and return a NotInCorpus lookup when
+                // Crossref or DataCite has it; otherwise classify as before.
+                if self.providers.is_none() {
+                    return Err(classify_lookup_doi_failure(resp, doi).await);
+                }
+                match self.provider_record(doi).await {
+                    Ok(Some(record)) => {
+                        let meta = bib_export::merge_provider_metadata(
+                            &serde_json::json!({ "doi": doi }),
+                            &record,
+                        );
+                        Ok(DoiLookup {
+                            metadata: meta,
+                            retrieved_at: Instant::now(),
+                            from_cache: false,
+                            source: DoiSource::NotInCorpus,
+                        })
+                    }
+                    Ok(None) => Err(classify_lookup_doi_failure(resp, doi).await),
+                    // A provider throttle, timeout, or payment wall must
+                    // reach the caller: it is not a miss and it is not an
+                    // invalid DOI.
+                    Err(error) => Err(error),
+                }
             }
             Ok(resp) => Err(classify_lookup_doi_failure(resp, doi).await),
             Err(e) => Err(format!("ERROR {doi} : {e}")),
@@ -991,11 +1043,20 @@ impl Server {
     )]
     async fn validate_doi(&self, Parameters(args): Parameters<DoiArgs>) -> String {
         match self.lookup_doi_with_freshness(&args.doi).await {
-            Ok(lookup) => format!(
-                "{}\n{}",
-                format_validate_doi(&args.doi, &lookup.metadata, &args.claim),
-                lookup.freshness_line()
-            ),
+            Ok(lookup) => {
+                let body = format_validate_doi(&args.doi, &lookup.metadata, &args.claim);
+                // NOT-IN-CORPUS replaces a plain VALID head when the record
+                // came from the publisher fall-through. The old head hid
+                // which store answered, which made every corpus gap look
+                // like a validation pass without context.
+                let body = if lookup.source == DoiSource::NotInCorpus && body.starts_with("VALID\n")
+                {
+                    body.replacen("VALID\n", "NOT-IN-CORPUS\n", 1)
+                } else {
+                    body
+                };
+                format!("{body}\n{}", lookup.freshness_line())
+            }
             Err(msg) => msg,
         }
     }
@@ -5458,7 +5519,8 @@ mod tests {
             }))
             .await;
         assert!(
-            first.contains("Metadata: live (retrieved ") && first.ends_with("s ago)"),
+            first.contains("Metadata: live (retrieved ")
+                && first.contains("s ago) from ookcite corpus"),
             "{first}"
         );
 
@@ -5469,7 +5531,8 @@ mod tests {
             }))
             .await;
         assert!(
-            second.contains("Metadata: cached (retrieved ") && second.ends_with("s ago)"),
+            second.contains("Metadata: cached (retrieved ")
+                && second.contains("s ago) from ookcite corpus"),
             "{second}"
         );
         assert!(
@@ -5496,6 +5559,130 @@ mod tests {
             .await;
         assert!(result.starts_with("INVALID"));
         assert!(!result.contains("CrossRef"));
+    }
+
+    #[tokio::test]
+    async fn validate_doi_falls_through_to_publisher_when_corpus_has_no_entry() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/corpus.gap.1";
+        // doi.org says the handle is registered.
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        // OokCite's corpus has no entry for this DOI.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .and(body_string_contains(doi))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        // Crossref holds the work.
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "message": {
+                    "type": "journal-article",
+                    "DOI": doi,
+                    "title": ["A publisher-only work the corpus has not ingested"],
+                    "container-title": ["Journal of Synthetic Fixtures"],
+                    "author": [{"family": "Example", "given": "A."}],
+                    "volume": "3",
+                    "issue": "2",
+                    "page": "101-110",
+                    "publisher": "Example Press",
+                    "URL": "https://doi.org/10.5555/corpus.gap.1",
+                    "issued": {"date-parts": [[2026]]}
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .validate_doi(Parameters(DoiArgs {
+                doi: doi.into(),
+                ..Default::default()
+            }))
+            .await;
+
+        assert!(
+            result.starts_with("NOT-IN-CORPUS\n"),
+            "head must say the corpus has no entry, not INVALID: {result}"
+        );
+        assert!(!result.contains("INVALID"), "{result}");
+        assert!(
+            result.contains("A publisher-only work the corpus has not ingested"),
+            "{result}"
+        );
+        assert!(result.contains("Volume: 3"), "{result}");
+        assert!(result.contains("Pages: 101-110"), "{result}");
+        assert!(
+            result.contains("from publisher record (not in OokCite corpus"),
+            "freshness line must name the publisher origin: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_doi_reports_provider_throttle_rather_than_invalid_on_corpus_miss() {
+        let mock = MockServer::start().await;
+        let doi = "10.5555/throttle.1";
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", doi)))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "47")
+                    .set_body_string("slow down"),
+            )
+            .mount(&mock)
+            .await;
+        // DataCite is tried only when Crossref says 404.
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/dois", doi)))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let result = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .validate_doi(Parameters(DoiArgs {
+                doi: doi.into(),
+                ..Default::default()
+            }))
+            .await;
+
+        assert!(
+            !result.contains("INVALID"),
+            "a provider throttle is not an INVALID DOI: {result}"
+        );
+        assert!(
+            !result.contains("NOT-IN-CORPUS"),
+            "a throttle is not a corpus-gap verdict: {result}"
+        );
+        assert!(
+            result.contains("RATE LIMITED") || result.contains("429"),
+            "throttle must reach the caller: {result}"
+        );
     }
 
     #[tokio::test]
