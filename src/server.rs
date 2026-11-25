@@ -104,6 +104,12 @@ fn render_single_bibtex(doi: &str, meta: &serde_json::Value) -> String {
 /// The authorless "(in your collection)" stub has no authors. A record the
 /// publisher answered for has them, so this is how a member line decides
 /// whether to use the full-record formatter.
+///
+/// Kept as a last-resort fallback. The member path now reads
+/// [`Server::MEMBER_PROVIDER_FETCHED_KEY`] instead, so a corpus stub that
+/// carries a family-name author because a .bib import wrote one is not
+/// treated as a publisher read.
+#[allow(dead_code)]
 fn is_publisher_backed(meta: &serde_json::Value) -> bool {
     meta.get("authors")
         .and_then(|value| value.as_array())
@@ -959,6 +965,14 @@ impl Server {
     /// it and prints DEGRADED on the member line so the caller does not
     /// mistake an authorless stub for a verified publisher record.
     pub(crate) const MEMBER_DEGRADED_KEY: &str = "_ookcite_member_degraded";
+    /// Marker attached to a collection member record when the
+    /// publisher answered with a real payload. The verify path reads
+    /// it instead of inspecting the authors array: a corpus-only stub
+    /// may still list an author family (a bibliography import wrote
+    /// one), and the old `is_publisher_backed` heuristic would then
+    /// treat the stub as a publisher read and print VALID without
+    /// ever having asked the publisher.
+    pub(crate) const MEMBER_PROVIDER_FETCHED_KEY: &str = "_ookcite_member_provider_fetched";
 
     /// Build the member→metadata map used by batch tools, in input order.
     ///
@@ -1008,7 +1022,14 @@ impl Server {
         match self.provider_record(doi).await {
             Ok(Some(record)) => {
                 let seed = serde_json::json!({ "doi": doi });
-                bib_export::merge_provider_metadata(&seed, &record)
+                let mut merged = bib_export::merge_provider_metadata(&seed, &record);
+                if let Some(object) = merged.as_object_mut() {
+                    object.insert(
+                        Self::MEMBER_PROVIDER_FETCHED_KEY.to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
+                merged
             }
             // A clean 404 from both Crossref and DataCite: the collection
             // DOI exists (the user has it) but no publisher record is
@@ -1814,7 +1835,17 @@ impl Server {
             .iter()
             .map(|(doi, title)| {
                 let line = match member_entries.get(doi) {
-                    Some(meta) if is_publisher_backed(meta) => {
+                    // Only a publisher-fetched record is used for the
+                    // VALID line. A corpus stub that happens to list a
+                    // family-name author (because an import wrote it)
+                    // used to pass `is_publisher_backed` and print VALID
+                    // without the publisher ever having been asked.
+                    Some(meta)
+                        if meta
+                            .get(Self::MEMBER_PROVIDER_FETCHED_KEY)
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false) =>
+                    {
                         let base = format_verify_line_with_authors(doi, meta, None);
                         format!("{base} [collection — not metered]")
                     }

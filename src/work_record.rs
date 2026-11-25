@@ -109,6 +109,8 @@ pub fn build_validate_doi_record(
         (DoiSource::NotInCorpus, _) => "medium",
     };
 
+    let warnings = detect_consistency_warnings(stored_before_merge, provider_record);
+
     json!({
         "kind": WORK_RECORD_KIND,
         "doi": doi,
@@ -120,7 +122,133 @@ pub fn build_validate_doi_record(
         "claim_status": claim_json,
         "authors": authors,
         "fields": Value::Object(fields),
+        "warnings": warnings,
     })
+}
+
+/// Flag inconsistencies between the OokCite corpus record and the
+/// provider record for the same DOI. The provider is the registrar: when
+/// the two disagree about author families or title, the corpus record
+/// has probably mixed fields from two different works.
+pub fn detect_consistency_warnings(stored: Option<&Value>, provider: Option<&Value>) -> Value {
+    let Some((stored, provider)) = stored.zip(provider) else {
+        return Value::Array(Vec::new());
+    };
+    let mut warnings: Vec<Value> = Vec::new();
+
+    let stored_authors = author_families(stored.get("authors"));
+    let provider_authors = provider_author_families(provider);
+    if !stored_authors.is_empty()
+        && !provider_authors.is_empty()
+        && !any_shared_family(&stored_authors, &provider_authors)
+    {
+        warnings.push(json!({
+            "code": "corpus_authors_disagree_with_provider",
+            "detail": format!(
+                "the corpus lists {stored_authors:?} as authors but the registrar lists {provider_authors:?}; the corpus record likely mixes fields from two different works"
+            ),
+        }));
+    }
+
+    let stored_title = stored
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let provider_title = provider_title(provider).map(|value| value.to_ascii_lowercase());
+    if let (Some(stored_title), Some(provider_title)) = (stored_title, provider_title) {
+        if stored_title != provider_title {
+            // A title-casing rewrite is not evidence of mixing. Only a
+            // fully distinct title (no common significant token) earns
+            // the warning.
+            let stored_tokens: std::collections::HashSet<&str> = stored_title
+                .split_whitespace()
+                .filter(|token| token.len() > 3)
+                .collect();
+            let provider_tokens: std::collections::HashSet<&str> = provider_title
+                .split_whitespace()
+                .filter(|token| token.len() > 3)
+                .collect();
+            if stored_tokens.is_disjoint(&provider_tokens) {
+                warnings.push(json!({
+                    "code": "corpus_title_disagrees_with_provider",
+                    "detail": format!(
+                        "the corpus title {stored_title:?} shares no significant words with the registrar title {provider_title:?}"
+                    ),
+                }));
+            }
+        }
+    }
+    Value::Array(warnings)
+}
+
+fn author_families(value: Option<&Value>) -> Vec<String> {
+    let Some(array) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    array
+        .iter()
+        .filter_map(|author| author.get("family").and_then(Value::as_str))
+        .map(|family| family.trim().to_ascii_lowercase())
+        .filter(|family| !family.is_empty())
+        .collect()
+}
+
+fn provider_author_families(provider: &Value) -> Vec<String> {
+    if let Some(crossref_authors) = provider
+        .get("crossref")
+        .and_then(|value| value.get("author"))
+        .and_then(Value::as_array)
+    {
+        return crossref_authors
+            .iter()
+            .filter_map(|author| author.get("family").and_then(Value::as_str))
+            .map(|family| family.trim().to_ascii_lowercase())
+            .filter(|family| !family.is_empty())
+            .collect();
+    }
+    if let Some(datacite_creators) = provider
+        .get("datacite")
+        .and_then(|value| value.get("creators"))
+        .and_then(Value::as_array)
+    {
+        return datacite_creators
+            .iter()
+            .filter_map(|creator| creator.get("familyName").and_then(Value::as_str))
+            .map(|family| family.trim().to_ascii_lowercase())
+            .filter(|family| !family.is_empty())
+            .collect();
+    }
+    Vec::new()
+}
+
+fn provider_title(provider: &Value) -> Option<String> {
+    if let Some(title) = provider
+        .get("crossref")
+        .and_then(|value| value.get("title"))
+        .and_then(Value::as_array)
+        .and_then(|array| array.first())
+        .and_then(Value::as_str)
+    {
+        return Some(title.trim().to_string());
+    }
+    if let Some(title) = provider
+        .get("datacite")
+        .and_then(|value| value.get("titles"))
+        .and_then(Value::as_array)
+        .and_then(|array| array.first())
+        .and_then(|first| first.get("title"))
+        .and_then(Value::as_str)
+    {
+        return Some(title.trim().to_string());
+    }
+    None
+}
+
+fn any_shared_family(stored: &[String], provider: &[String]) -> bool {
+    let provider_set: std::collections::HashSet<&String> = provider.iter().collect();
+    stored.iter().any(|family| provider_set.contains(family))
 }
 
 /// Build the structured ranked list a `reverse_lookup` call returns.
@@ -1096,6 +1224,35 @@ mod tests {
             1,
             "a corpus hit keeps the corpus author list length"
         );
+    }
+
+    #[test]
+    fn corpus_authors_that_disagree_with_the_provider_for_the_same_doi_earn_a_warning() {
+        // A stored record with the title+DOI of W1 and the authors of
+        // W2 earns the `corpus_authors_disagree_with_provider` warning
+        // so a reader can tell the corpus row mixed fields from two
+        // different works.
+        let stored = serde_json::json!({
+            "doi": "10.5555/mixed",
+            "title": "A paper",
+            "authors": [{"family": "Smith", "given": "A."}]
+        });
+        let provider = serde_json::json!({
+            "crossref": {
+                "DOI": "10.5555/mixed",
+                "title": ["A paper"],
+                "author": [{"family": "Jones", "given": "B."}]
+            }
+        });
+        let warnings = detect_consistency_warnings(Some(&stored), Some(&provider));
+        let codes: Vec<String> = warnings
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|w| w.get("code").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        assert!(codes.contains(&"corpus_authors_disagree_with_provider".to_string()));
     }
 
     #[test]

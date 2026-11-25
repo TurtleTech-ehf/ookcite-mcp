@@ -31,6 +31,7 @@ mod resolve_helpers;
 mod ridley_library;
 mod server;
 mod setup;
+mod shape_regressions;
 mod tool_args;
 mod work_record;
 
