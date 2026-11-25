@@ -636,7 +636,12 @@ impl Server {
                 Err(text) => return text,
             },
             Ok(response) => return failure_text(response, "Failed to search the corpus").await,
-            Err(error) => return format!("Failed to search the corpus: {error}"),
+            Err(error) => {
+                return format!(
+                    "Failed to search the corpus: {}",
+                    crate::policy::scrub_error(&error)
+                )
+            }
         };
 
         let (ranked, no_doi, too_old) = candidates_from(&data, &terms, args.year_from);

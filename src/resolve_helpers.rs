@@ -199,7 +199,10 @@ pub async fn classify_reverse_lookup_response(
             Err(format!("TEMPORARY ERROR: {}", error_detail(r).await))
         }
         Ok(r) => Err(format!("CLIENT ERROR: {}", error_detail(r).await)),
-        Err(e) => Err(format!("Reverse lookup failed: {e}")),
+        Err(e) => Err(format!(
+            "Reverse lookup failed: {}",
+            crate::policy::scrub_error(&e)
+        )),
     }
 }
 

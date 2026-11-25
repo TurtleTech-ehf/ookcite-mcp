@@ -382,7 +382,12 @@ impl Server {
             .dashboard_request("GET", "/libraries")
             .send()
             .await
-            .map_err(|error| format!("Failed to list Ridley libraries: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "Failed to list Ridley libraries: {}",
+                    crate::policy::scrub_error(&error)
+                )
+            })?;
         if !response.status().is_success() {
             return Err(dashboard_failure(response, "Failed to list Ridley libraries").await);
         }
@@ -400,7 +405,12 @@ impl Server {
             .dashboard_request("GET", "/ridley/libraries")
             .send()
             .await
-            .map_err(|error| format!("Failed to list Ridley libraries: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "Failed to list Ridley libraries: {}",
+                    crate::policy::scrub_error(&error)
+                )
+            })?;
         if !response.status().is_success() {
             return Err(dashboard_failure(response, "Failed to list Ridley libraries").await);
         }
@@ -459,7 +469,12 @@ impl Server {
             ])
             .send()
             .await
-            .map_err(|error| format!("Failed to search Ridley library: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "Failed to search Ridley library: {}",
+                    crate::policy::scrub_error(&error)
+                )
+            })?;
         if !response.status().is_success() {
             return Err(dashboard_failure(response, "Failed to search Ridley library").await);
         }
@@ -505,7 +520,12 @@ impl Server {
                 .query(&[("page", page_number)])
                 .send()
                 .await
-                .map_err(|error| format!("Failed to load Ridley items: {error}"))?;
+                .map_err(|error| {
+                    format!(
+                        "Failed to load Ridley items: {}",
+                        crate::policy::scrub_error(&error)
+                    )
+                })?;
             if !response.status().is_success() {
                 return Err(dashboard_failure(response, "Failed to load Ridley items").await);
             }
