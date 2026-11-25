@@ -399,8 +399,9 @@ pub struct NormalizeBibliographyArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EnhancedSearchArgs {
-    /// Search query text (title words, author names, topic, or a full citation string)
+    /// Search query text (title words, author names, topic, or a full citation string). Pass "*" when only the filters matter (e.g. "every work in Nature since 2026-10-01").
     pub q: String,
     /// Maximum matches to return (default: 20)
     #[serde(default = "default_enhanced_limit")]
@@ -417,6 +418,21 @@ pub struct EnhancedSearchArgs {
     /// When true, include aggregate citation statistics over the whole result set
     #[serde(default)]
     pub include_citation_stats: bool,
+    /// Keep only works first indexed on or after this date. ISO date (YYYY-MM-DD) or ISO-8601 instant. Use this for a related-work watch: "new since the last run".
+    #[serde(default)]
+    pub created_after: Option<String>,
+    /// Keep only works whose published date is on or after this date. ISO date or ISO-8601 instant. Use this for a topic watch that follows embargoes.
+    #[serde(default)]
+    pub published_after: Option<String>,
+    /// Keep only works in this container (journal name, book series, or conference). Compared after the same abbreviation expansion validate_doi uses.
+    #[serde(default)]
+    pub container: Option<String>,
+    /// Keep only DOIs whose prefix is this value (e.g. "10.1038" for Nature). Trailing slash is ignored.
+    #[serde(default)]
+    pub doi_prefix: Option<String>,
+    /// Order the matches. "relevance" (default, lexical rank) or "date" (newest first by published date, then indexed date).
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 pub fn default_enhanced_limit() -> u32 {
     20

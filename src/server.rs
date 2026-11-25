@@ -3838,7 +3838,7 @@ impl Server {
 
     #[tool(
         name = "enhanced_search",
-        description = "Search the citation corpus and optionally aggregate the hits by author, category, or citation statistics. Call this when the user wants an overview of a topic or a researcher's output -- who publishes on it, how it splits by topic, how heavily it is cited -- rather than the metadata of one known paper. Returns scored matches plus whichever facets were requested; the facets summarize the whole result set, not just the page returned.",
+        description = "Search the OokCite corpus for a topic, an author's output, or works that match a date, a container, or a DOI prefix, and optionally aggregate the hits by author, category, or citation statistics. Call this before falling back to Crossref or OpenAlex for a related-work watch: created_after and published_after answer \"what is new since T?\" from the local index, container and doi_prefix narrow to a venue or publisher, and sort=date lists the newest first. Pass q=\"*\" when only the filters matter. Returns scored matches plus whichever facets were requested; the facets summarise the whole result set, not just the page returned. When the local index does not yet know a recent paper, the result is a smaller list, not a lie; follow up with a provider resolve for a DOI the user knows is newer than the corpus watermark.",
         annotations(
             title = "Enhanced corpus search",
             read_only_hint = true,
@@ -3851,19 +3851,53 @@ impl Server {
         }
         let limit = args.limit.to_string();
         let offset = args.offset.to_string();
-        let mut query: Vec<(&str, &str)> = vec![
-            ("q", args.q.as_str()),
-            ("limit", limit.as_str()),
-            ("offset", offset.as_str()),
-        ];
+        let mut query: Vec<(&str, String)> =
+            vec![("q", args.q.clone()), ("limit", limit), ("offset", offset)];
         for (name, on) in [
             ("include_authors", args.include_authors),
             ("include_categories", args.include_categories),
             ("include_citation_stats", args.include_citation_stats),
         ] {
             if on {
-                query.push((name, "true"));
+                query.push((name, "true".into()));
             }
+        }
+        let push_filter =
+            |query: &mut Vec<(&str, String)>, name: &'static str, value: &Option<String>| {
+                if let Some(value) = value
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    query.push((name, value.to_string()));
+                }
+            };
+        push_filter(&mut query, "created_after", &args.created_after);
+        push_filter(&mut query, "published_after", &args.published_after);
+        push_filter(&mut query, "container", &args.container);
+        if let Some(prefix) = args
+            .doi_prefix
+            .as_deref()
+            .map(str::trim)
+            .map(|s| s.trim_end_matches('/'))
+            .filter(|value| !value.is_empty())
+        {
+            query.push(("doi_prefix", prefix.to_string()));
+        }
+        match args
+            .sort
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+        {
+            Some(ref value) if value == "date" => query.push(("sort", "date".into())),
+            Some(ref value) if value == "relevance" || value.is_empty() => {}
+            Some(other) => {
+                return format!(
+                    "CLIENT ERROR: sort must be \"relevance\" or \"date\", not {other:?}."
+                );
+            }
+            None => {}
         }
         let r = self
             .request(endpoints::SEARCH_ENHANCED, &[])
@@ -6106,6 +6140,134 @@ mod tests {
             .await;
         assert!(result.starts_with("TEMPORARY ERROR"));
         assert!(!result.contains("INVALID"));
+    }
+
+    #[tokio::test]
+    async fn enhanced_search_passes_the_new_filters_and_sort_as_query_parameters() {
+        use wiremock::matchers::query_param;
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/search/enhanced"))
+            .and(query_param("q", "*"))
+            .and(query_param("limit", "10"))
+            .and(query_param("offset", "0"))
+            .and(query_param("created_after", "2026-10-01"))
+            .and(query_param("published_after", "2026-09-15"))
+            .and(query_param("container", "Nature"))
+            .and(query_param("doi_prefix", "10.1038"))
+            .and(query_param("sort", "date"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total": 2,
+                "offset": 0,
+                "matches": [
+                    {
+                        "score": 42.0,
+                        "metadata": {
+                            "title": "A newer Nature paper",
+                            "doi": "10.5555/nature.new.1",
+                            "journal": "Nature",
+                            "date": {"year": 2026}
+                        }
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let text = test_server(&mock.uri())
+            .enhanced_search(Parameters(crate::tool_args::EnhancedSearchArgs {
+                q: "*".into(),
+                limit: 10,
+                offset: 0,
+                include_authors: false,
+                include_categories: false,
+                include_citation_stats: false,
+                created_after: Some("2026-10-01".into()),
+                published_after: Some("2026-09-15".into()),
+                container: Some("Nature".into()),
+                doi_prefix: Some("10.1038/".into()),
+                sort: Some("date".into()),
+            }))
+            .await;
+
+        assert!(text.contains("A newer Nature paper"), "{text}");
+        assert!(text.contains("doi:10.5555/nature.new.1"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn enhanced_search_omits_empty_filters_and_normalises_sort() {
+        use wiremock::matchers::query_param;
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/search/enhanced"))
+            .and(query_param("q", "neb"))
+            .and(query_param("limit", "20"))
+            .and(|request: &wiremock::Request| {
+                let pairs: Vec<_> = request.url.query_pairs().collect();
+                // No sort parameter is sent for "relevance" and no empty
+                // filters creep through.
+                !pairs.iter().any(|(key, value)| {
+                    (key == "created_after" && value.is_empty())
+                        || (key == "published_after" && value.is_empty())
+                        || (key == "container" && value.is_empty())
+                        || (key == "doi_prefix" && value.is_empty())
+                        || key == "sort"
+                })
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total": 0, "offset": 0, "matches": []
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let text = test_server(&mock.uri())
+            .enhanced_search(Parameters(crate::tool_args::EnhancedSearchArgs {
+                q: "neb".into(),
+                limit: 20,
+                offset: 0,
+                include_authors: false,
+                include_categories: false,
+                include_citation_stats: false,
+                created_after: Some("   ".into()),
+                published_after: None,
+                container: Some(String::new()),
+                doi_prefix: None,
+                sort: Some("relevance".into()),
+            }))
+            .await;
+
+        assert!(text.contains("No matches"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn enhanced_search_refuses_an_unknown_sort_before_making_a_request() {
+        let mock = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let text = test_server(&mock.uri())
+            .enhanced_search(Parameters(crate::tool_args::EnhancedSearchArgs {
+                q: "topic".into(),
+                limit: 20,
+                offset: 0,
+                include_authors: false,
+                include_categories: false,
+                include_citation_stats: false,
+                created_after: None,
+                published_after: None,
+                container: None,
+                doi_prefix: None,
+                sort: Some("popularity".into()),
+            }))
+            .await;
+
+        assert!(text.starts_with("CLIENT ERROR:"), "{text}");
+        assert!(text.contains("\"popularity\""), "{text}");
     }
 
     #[tokio::test]
