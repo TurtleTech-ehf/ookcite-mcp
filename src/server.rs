@@ -681,6 +681,28 @@ impl Server {
         })
     }
 
+    /// True when the server has a provider base (Crossref/DataCite/handles)
+    /// configured. The open-access fallback uses this before reading a
+    /// publisher record so a test server without providers does not try.
+    pub(crate) fn providers_available(&self) -> bool {
+        self.providers.is_some()
+    }
+
+    /// Fetch a publisher record for `doi` without the registration check.
+    ///
+    /// Used by the open-access fallback: a session without a contact email
+    /// cannot call Unpaywall, but it can still read Crossref's `license[]`
+    /// and the landing URL (or the DataCite rights list) and tell the
+    /// caller what the publisher recorded. A doi.org throttle or restart
+    /// must not keep the record from reaching the caller, so this takes
+    /// the direct provider_record path instead of require_registered.
+    pub(crate) async fn license_record_for_doi(
+        &self,
+        doi: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        self.provider_record(doi).await
+    }
+
     async fn provider_record(&self, doi: &str) -> Result<Option<serde_json::Value>, String> {
         let Some(bases) = &self.providers else {
             return Ok(None);

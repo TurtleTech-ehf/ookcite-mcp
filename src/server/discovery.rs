@@ -53,6 +53,18 @@ pub(super) fn contact_email_missing(source: &str) -> String {
     )
 }
 
+/// `contact_email_missing` text, plus the DOI the caller asked about and
+/// the Crossref-fallback nudge. Used by the open-access tool when
+/// providers are unreachable, so the caller still sees which DOI the
+/// refusal applies to.
+pub(super) fn contact_email_missing_with_hint(source: &str, doi: &str) -> String {
+    format!(
+        "{}\nUNAVAILABLE doi:{doi}\nCrossref and DataCite were not reachable from this \
+         session, so a license fallback could not be read either. No request was made to {source}.",
+        contact_email_missing(source)
+    )
+}
+
 #[derive(Clone)]
 pub(super) struct DiscoveryBases {
     pub(super) unpaywall: String,

@@ -10,7 +10,7 @@ use rmcp::{tool, tool_router};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{contact_email, contact_email_missing, doi_path, parse_doi_arg};
+use super::{contact_email, doi_path, parse_doi_arg};
 use crate::server::Server;
 
 /// How many alternative copies the answer lists after the best one.
@@ -229,11 +229,176 @@ fn source_line() -> String {
         .into()
 }
 
+fn degraded_source_line() -> String {
+    "Source: Crossref or DataCite license record only (DEGRADED; set OOKCITE_MCP_CONTACT_EMAIL to \
+     query Unpaywall for repository and preprint copies). Links only: no file was downloaded."
+        .into()
+}
+
+fn degraded_header(doi: &str, has_oa: bool) -> String {
+    if has_oa {
+        format!("OPEN ACCESS doi:{doi} [DEGRADED]")
+    } else {
+        format!("NO LEGAL COPY RECORDED doi:{doi} [DEGRADED]")
+    }
+}
+
+/// Map a bare SPDX-style Creative Commons rights identifier (as
+/// DataCite records in `rightsIdentifier`) to its canonical
+/// creativecommons.org URL. Any other identifier is returned verbatim.
+fn canonicalise_cc_identifier(identifier: &str) -> String {
+    let trimmed = identifier.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    let mapped = match upper.as_str() {
+        "CC0-1.0" | "CC0" => Some("https://creativecommons.org/publicdomain/zero/1.0/"),
+        "CC-BY-4.0" => Some("https://creativecommons.org/licenses/by/4.0/"),
+        "CC-BY-SA-4.0" => Some("https://creativecommons.org/licenses/by-sa/4.0/"),
+        "CC-BY-NC-4.0" => Some("https://creativecommons.org/licenses/by-nc/4.0/"),
+        "CC-BY-ND-4.0" => Some("https://creativecommons.org/licenses/by-nd/4.0/"),
+        "CC-BY-NC-SA-4.0" => Some("https://creativecommons.org/licenses/by-nc-sa/4.0/"),
+        "CC-BY-NC-ND-4.0" => Some("https://creativecommons.org/licenses/by-nc-nd/4.0/"),
+        _ => None,
+    };
+    mapped
+        .map(str::to_string)
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
+/// Render Crossref-only or DataCite-only open-access facts: Crossref's
+/// `license[]` with the landing URL, or DataCite's `rightsList` (both
+/// `rightsUri` and `rightsIdentifier`) with the DataCite landing URL,
+/// marked DEGRADED so the caller knows the Unpaywall repository /
+/// preprint sweep did not run.
+pub(super) fn render_license_only(doi: &str, record: &Value) -> String {
+    let crossref = record.get("crossref").filter(|value| value.is_object());
+    let datacite = record.get("datacite").filter(|value| value.is_object());
+    let title = crossref
+        .and_then(|m| m.get("title"))
+        .and_then(|value| value.as_array())
+        .and_then(|array| array.first())
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            datacite
+                .and_then(|m| m.get("titles"))
+                .and_then(|value| value.as_array())
+                .and_then(|array| array.first())
+                .and_then(|value| value.get("title"))
+                .and_then(|value| value.as_str())
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let journal = crossref
+        .and_then(|m| m.get("container-title"))
+        .and_then(|value| value.as_array())
+        .and_then(|array| array.first())
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let year = crossref
+        .and_then(|m| {
+            m.get("issued")
+                .or_else(|| m.get("published-print"))
+                .or_else(|| m.get("published"))
+        })
+        .and_then(|value| value.get("date-parts"))
+        .and_then(|value| value.as_array())
+        .and_then(|array| array.first())
+        .and_then(|value| value.as_array())
+        .and_then(|parts| parts.first())
+        .and_then(|value| value.as_i64())
+        .or_else(|| {
+            datacite
+                .and_then(|m| m.get("publicationYear"))
+                .and_then(|value| value.as_i64())
+        });
+    let mut licenses: Vec<String> = crossref
+        .and_then(|m| m.get("license"))
+        .and_then(|value| value.as_array())
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|item| item.get("URL").and_then(|value| value.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    // DataCite records the licence as a `rightsList[].rightsUri` or
+    // `rightsIdentifier` under each item. A DataCite-only work (a
+    // dataset, a Zenodo upload, an arXiv-datacite registration) has no
+    // Crossref `license[]` to read, so the old path called it "not
+    // stated" and closed with "NO LEGAL COPY RECORDED" even when the
+    // record carried `https://creativecommons.org/licenses/by/4.0/`.
+    if let Some(rights_list) = datacite
+        .and_then(|m| m.get("rightsList"))
+        .and_then(|value| value.as_array())
+    {
+        for item in rights_list {
+            let url = item
+                .get("rightsUri")
+                .or_else(|| item.get("rightsURI"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if let Some(url) = url {
+                licenses.push(url.to_string());
+                continue;
+            }
+            // SPDX ids like "CC-BY-4.0" land in `rightsIdentifier` with
+            // no URL. Map the common CC ids to their canonical URL so
+            // the open-access detection below still triggers; otherwise
+            // print the identifier verbatim.
+            if let Some(id) = item
+                .get("rightsIdentifier")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                licenses.push(canonicalise_cc_identifier(id));
+            }
+        }
+    }
+    let landing = crossref
+        .and_then(|m| {
+            m.pointer("/resource/primary/URL")
+                .and_then(|value| value.as_str())
+                .or_else(|| m.get("URL").and_then(|value| value.as_str()))
+        })
+        .or_else(|| datacite.and_then(|m| m.get("url").and_then(|value| value.as_str())))
+        .map(str::to_string);
+    let is_open = licenses.iter().any(|url| {
+        let lower = url.to_ascii_lowercase();
+        lower.contains("creativecommons.org/licenses")
+            || lower.contains("creativecommons.org/publicdomain")
+    });
+
+    let mut out = vec![degraded_header(doi, is_open && landing.is_some())];
+    push_work_lines(&mut out, title, journal, year);
+    if licenses.is_empty() {
+        out.push("Licence: not stated in the publisher record.".into());
+    } else {
+        out.push("Licences:".into());
+        for license in licenses {
+            out.push(format!("  - {license}"));
+        }
+    }
+    match (is_open, landing.as_ref()) {
+        (true, Some(landing)) => out.push(format!(
+            "Best copy (landing page, no PDF scan without Unpaywall): {landing}"
+        )),
+        (false, Some(landing)) => out.push(format!(
+            "Publisher landing page (open status not confirmed from licence alone): {landing}"
+        )),
+        (_, None) => out.push("No landing URL recorded on the publisher record.".into()),
+    }
+    out.push(degraded_source_line());
+    out.join("\n")
+}
+
 #[tool_router(router = open_access_tool_router, vis = "pub(super)")]
 impl Server {
     #[tool(
         name = "find_open_access_pdf",
-        description = "Find a legal open-access copy of a paper by DOI. Returns the best free PDF or landing-page link with its host (publisher or repository), version (published, accepted, or submitted), and licence, plus other legal copies. Call this when the user wants to read a paper they cannot get through a paywall. Unpaywall requires a contact address, so the server needs OOKCITE_MCP_CONTACT_EMAIL set to the operator's own email, and says so when it is not. Only copies that Unpaywall records as open access are returned, and nothing is downloaded: the result is a link. NOT OPEN ACCESS means no free legal copy is recorded, which is a real answer and not a failure. A 429 or 402 from the provider is reported with its Retry-After and is not a miss. Use validate_doi first when the DOI itself is in doubt.",
+        description = "Find a legal open-access copy of a paper by DOI. Returns the best free PDF or landing-page link with its host (publisher or repository), version (published, accepted, or submitted), and licence, plus other legal copies. Call this when the user wants to read a paper they cannot get through a paywall. The Unpaywall repository-and-preprint sweep needs a contact address, so set OOKCITE_MCP_CONTACT_EMAIL to the operator's own email for the full answer. When the email is unset the call does not fail: the server degrades to the publisher record (Crossref `license[]` + landing URL, or DataCite `rightsList` + URL) and returns an answer marked [DEGRADED], which still names the licence a publisher recorded and the landing page. Only copies that are legally free are returned, and nothing is downloaded: the result is a link. NOT OPEN ACCESS means no free legal copy is recorded, which is a real answer and not a failure. A 429 or 402 from the provider is reported with its Retry-After and is not a miss. Use validate_doi first when the DOI itself is in doubt.",
         annotations(
             title = "Find open-access PDF",
             read_only_hint = true,
@@ -253,7 +418,14 @@ impl Server {
             return "ERROR Unpaywall : provider access is disabled".into();
         };
         let Some(email) = contact_email() else {
-            return contact_email_missing("Unpaywall");
+            // Without an operator address Unpaywall refuses the request, so
+            // the old path returned an error and nothing else. Crossref
+            // records `license[]` and a landing URL on the work itself and
+            // its polite pool has no email requirement, so the free legal
+            // copy a publisher recorded can still be shown. The answer is
+            // marked DEGRADED so an agent knows the Unpaywall sweep of
+            // repository and preprint copies did not run.
+            return self.degraded_open_access(&doi).await;
         };
         let url = format!(
             "{}/v2/{}",
@@ -272,6 +444,25 @@ impl Server {
                 "NOT FOUND doi:{doi}\nUnpaywall has no record of this DOI. Check it with validate_doi."
             ),
             Err(message) => message,
+        }
+    }
+
+    /// Open-access answer from the publisher record alone, for sessions
+    /// that have not set a contact email. Reads Crossref `license[]` and
+    /// the landing URL (or the DataCite rights list) and marks the answer
+    /// DEGRADED so the caller knows the repository and preprint sweep
+    /// Unpaywall adds did not run. Still includes the source line, so a
+    /// reader knows nothing was downloaded.
+    async fn degraded_open_access(&self, doi: &str) -> String {
+        let fallback = || super::contact_email_missing_with_hint("Unpaywall", doi);
+        if self.providers_available() {
+            match self.license_record_for_doi(doi).await {
+                Ok(Some(record)) => render_license_only(doi, &record),
+                Ok(None) => fallback(),
+                Err(message) => message,
+            }
+        } else {
+            fallback()
         }
     }
 }
@@ -554,6 +745,232 @@ mod tests {
         assert!(
             include_str!("../../../README.md").contains(&text),
             "README throttle example is stale; it should contain:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_an_email_the_answer_degrades_to_crossref_license_and_url() {
+        let _email = EnvGuard::unset("OOKCITE_MCP_CONTACT_EMAIL");
+        let doi = "10.5555/degraded.oa.1";
+        let mock = MockServer::start().await;
+        // Unpaywall must not be called when no email is set.
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/{doi}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(unpaywall_gold()))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        // Crossref holds a cc-by licence record for the work.
+        Mock::given(method("GET"))
+            .and(path(format!("/works/{}", crate::server::encode_path_segment(doi))))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "message": {
+                    "type": "journal-article",
+                    "DOI": doi,
+                    "title": ["A Degraded-Path Open-Access Example"],
+                    "container-title": ["Journal of Synthetic Fixtures"],
+                    "URL": "https://journals.example.org/article/degraded.oa.1",
+                    "resource": {"primary": {"URL": "https://journals.example.org/article/degraded.oa.1"}},
+                    "license": [{"URL": "http://creativecommons.org/licenses/by/4.0/"}],
+                    "issued": {"date-parts": [[2026]]}
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let server = Server::new_with_base(mock.uri())
+            .with_discovery(mock.uri())
+            .with_providers(mock.uri());
+        let text = server.find_open_access_pdf(args(doi)).await;
+
+        assert!(
+            text.contains("[DEGRADED]"),
+            "fallback must mark the answer as degraded: {text}"
+        );
+        assert!(
+            text.starts_with(&format!("OPEN ACCESS doi:{doi}")),
+            "cc-by licence plus landing URL is open access: {text}"
+        );
+        assert!(
+            text.contains("A Degraded-Path Open-Access Example"),
+            "title must come from the publisher record: {text}"
+        );
+        assert!(
+            text.contains("creativecommons.org/licenses/by/4.0"),
+            "licence must be shown: {text}"
+        );
+        assert!(
+            text.contains("journals.example.org/article/degraded.oa.1"),
+            "landing URL must be shown: {text}"
+        );
+        assert!(
+            text.contains("set OOKCITE_MCP_CONTACT_EMAIL"),
+            "hint for a fuller sweep must be present: {text}"
+        );
+        assert!(
+            !text.contains("No request was made."),
+            "a request was made (to Crossref), so the old sentence is gone: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_an_email_a_closed_paper_still_names_the_publisher_landing_page() {
+        let _email = EnvGuard::unset("OOKCITE_MCP_CONTACT_EMAIL");
+        let doi = "10.5555/degraded.closed.1";
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/works/{}",
+                crate::server::encode_path_segment(doi)
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "message": {
+                    "type": "journal-article",
+                    "DOI": doi,
+                    "title": ["A paywalled work"],
+                    "URL": "https://journals.example.org/paywalled/1",
+                    "resource": {"primary": {"URL": "https://journals.example.org/paywalled/1"}},
+                    "issued": {"date-parts": [[2026]]}
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let server = Server::new_with_base(mock.uri())
+            .with_discovery(mock.uri())
+            .with_providers(mock.uri());
+        let text = server.find_open_access_pdf(args(doi)).await;
+
+        assert!(
+            text.starts_with(&format!("NO LEGAL COPY RECORDED doi:{doi}")),
+            "no cc licence is not an open-access verdict: {text}"
+        );
+        assert!(text.contains("[DEGRADED]"), "{text}");
+        assert!(
+            text.contains("Licence: not stated in the publisher record."),
+            "{text}"
+        );
+        assert!(
+            text.contains("https://journals.example.org/paywalled/1"),
+            "landing URL must still be shown so the caller has somewhere to go: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_an_email_a_datacite_only_cc_licence_is_open_access_and_not_blank() {
+        let _email = EnvGuard::unset("OOKCITE_MCP_CONTACT_EMAIL");
+        let doi = "10.5555/degraded.datacite.cc.1";
+        let mock = MockServer::start().await;
+        // Crossref has no record of this DOI (a dataset or a Zenodo
+        // upload), so the fall-through reaches DataCite.
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/works/{}",
+                crate::server::encode_path_segment(doi)
+            )))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+        // DataCite holds the work with a CC-BY-4.0 rights URL and a
+        // landing URL under `data.attributes.url`.
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/dois/{}",
+                crate::server::encode_path_segment(doi)
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "attributes": {
+                        "titles": [{"title": "A DataCite-only dataset"}],
+                        "publicationYear": 2026,
+                        "publisher": "Example Archive",
+                        "url": "https://data.example.org/dataset/42",
+                        "rightsList": [
+                            {
+                                "rights": "Creative Commons Attribution 4.0 International",
+                                "rightsUri": "https://creativecommons.org/licenses/by/4.0/",
+                                "rightsIdentifier": "CC-BY-4.0"
+                            }
+                        ]
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let server = Server::new_with_base(mock.uri())
+            .with_discovery(mock.uri())
+            .with_providers(mock.uri());
+        let text = server.find_open_access_pdf(args(doi)).await;
+
+        assert!(
+            text.starts_with(&format!("OPEN ACCESS doi:{doi}")),
+            "DataCite-only CC licence must count as open access, not NO LEGAL COPY RECORDED: {text}"
+        );
+        assert!(text.contains("[DEGRADED]"), "{text}");
+        assert!(
+            text.contains("https://creativecommons.org/licenses/by/4.0/"),
+            "rightsUri must be printed: {text}"
+        );
+        assert!(
+            text.contains("https://data.example.org/dataset/42"),
+            "DataCite landing URL must be printed when Crossref has no record: {text}"
+        );
+        assert!(
+            !text.contains("Licence: not stated in the publisher record."),
+            "DataCite rights must not be reported as blank: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_an_email_a_datacite_rights_identifier_is_canonicalised() {
+        let _email = EnvGuard::unset("OOKCITE_MCP_CONTACT_EMAIL");
+        let doi = "10.5555/degraded.datacite.spdx.1";
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/works/{}",
+                crate::server::encode_path_segment(doi)
+            )))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/dois/{}",
+                crate::server::encode_path_segment(doi)
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "attributes": {
+                        "titles": [{"title": "A dataset with only an SPDX identifier"}],
+                        "publicationYear": 2026,
+                        "url": "https://data.example.org/dataset/99",
+                        "rightsList": [
+                            {"rightsIdentifier": "CC-BY-SA-4.0"}
+                        ]
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let server = Server::new_with_base(mock.uri())
+            .with_discovery(mock.uri())
+            .with_providers(mock.uri());
+        let text = server.find_open_access_pdf(args(doi)).await;
+
+        assert!(
+            text.starts_with(&format!("OPEN ACCESS doi:{doi}")),
+            "{text}"
+        );
+        assert!(
+            text.contains("https://creativecommons.org/licenses/by-sa/4.0/"),
+            "bare SPDX id must be canonicalised to the CC URL: {text}"
         );
     }
 
