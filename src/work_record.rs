@@ -155,32 +155,51 @@ pub fn detect_consistency_warnings(stored: Option<&Value>, provider: Option<&Val
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase);
-    let provider_title = provider_title(provider).map(|value| value.to_ascii_lowercase());
-    if let (Some(stored_title), Some(provider_title)) = (stored_title, provider_title) {
-        if stored_title != provider_title {
-            // A title-casing rewrite is not evidence of mixing. Only a
-            // fully distinct title (no common significant token) earns
-            // the warning.
-            let stored_tokens: std::collections::HashSet<&str> = stored_title
-                .split_whitespace()
-                .filter(|token| token.len() > 3)
-                .collect();
-            let provider_tokens: std::collections::HashSet<&str> = provider_title
-                .split_whitespace()
-                .filter(|token| token.len() > 3)
-                .collect();
-            if stored_tokens.is_disjoint(&provider_tokens) {
+        .map(str::to_string);
+    let provider_title_text = provider_title(provider);
+    if let (Some(stored_title), Some(provider_title_text)) = (stored_title, provider_title_text) {
+        if !stored_title.eq_ignore_ascii_case(provider_title_text.trim()) {
+            // A title-casing or punctuation rewrite is not evidence of
+            // mixing. Only a fully distinct title earns the warning, and
+            // an empty token set (a short title, or one whose words are
+            // all three letters or fewer) is not a disagreement.
+            let stored_tokens = significant_title_tokens(&stored_title);
+            let provider_tokens = significant_title_tokens(&provider_title_text);
+            if !stored_tokens.is_empty()
+                && !provider_tokens.is_empty()
+                && stored_tokens.is_disjoint(&provider_tokens)
+            {
                 warnings.push(json!({
                     "code": "corpus_title_disagrees_with_provider",
                     "detail": format!(
-                        "the corpus title {stored_title:?} shares no significant words with the registrar title {provider_title:?}"
+                        "the corpus title {stored_title:?} shares no significant words with the registrar title {provider_title_text:?}"
                     ),
                 }));
             }
         }
     }
     Value::Array(warnings)
+}
+
+/// Words long enough to identify a title, with punctuation stripped so
+/// `Lattice.` and `Lattice` are the same token. One comparison covers
+/// both titles.
+fn significant_title_tokens(title: &str) -> std::collections::HashSet<String> {
+    title
+        .split_whitespace()
+        .filter_map(|token| {
+            let bare: String = token
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric())
+                .flat_map(|ch| ch.to_lowercase())
+                .collect();
+            if bare.chars().count() > 3 {
+                Some(bare)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn author_families(value: Option<&Value>) -> Vec<String> {
@@ -257,7 +276,8 @@ fn any_shared_family(stored: &[String], provider: &[String]) -> bool {
 /// human reader sees; `error.kind` names the failure family a caller
 /// can switch on without string matching the message.
 pub fn build_error_record(doi: &str, message: &str) -> Value {
-    let kind = classify_error(message);
+    let message = crate::policy::redact_urls_in_text(message);
+    let kind = classify_error(&message);
     json!({
         "kind": WORK_RECORD_KIND,
         "doi": doi,
@@ -275,16 +295,27 @@ pub fn build_error_record(doi: &str, message: &str) -> Value {
 }
 
 fn classify_error(message: &str) -> &'static str {
-    if message.starts_with("INVALID") {
+    // Prefixes are the ones `http_error::classify_lookup_doi_failure`,
+    // `require_registered`, and the provider transport path actually emit.
+    let head = message.lines().next().unwrap_or(message);
+    if head.starts_with("INVALID") {
         "invalid_doi"
-    } else if message.starts_with("RATE LIMITED") || message.starts_with("RETRY-AFTER") {
+    } else if head.starts_with("RATE LIMITED") || head.starts_with("RETRY-AFTER") {
         "rate_limited"
-    } else if message.starts_with("TIMEOUT") {
+    } else if head.starts_with("TIMEOUT") {
         "timeout"
-    } else if message.starts_with("UNAUTHORIZED") {
+    } else if head.starts_with("ACCESS DENIED") || head.starts_with("UNAUTHORIZED") {
         "unauthorized"
-    } else if message.starts_with("PLAN") {
+    } else if head.starts_with("PAYMENT REQUIRED") || head.starts_with("PLAN") {
         "plan_required"
+    } else if head.starts_with("UNREGISTERED") {
+        "unregistered"
+    } else if head.starts_with("UNREACHABLE") {
+        "unreachable"
+    } else if head.starts_with("TEMPORARY ERROR") {
+        "temporary_error"
+    } else if head.starts_with("CLIENT ERROR") {
+        "client_error"
     } else {
         "error"
     }
@@ -341,7 +372,7 @@ fn detect_provider_kind(provider_record: Option<&Value>) -> Option<&'static str>
 /// value always wins over a provider's, and a provider value is used
 /// only when the corpus had nothing for that field. The returned
 /// provenance is `ookcite_corpus`, `ookcite_corpus+<provider>` (when
-/// the provider also carried a value, so the two sources agree), the
+/// that field's values agree), the
 /// provider tag alone (when the corpus had nothing, or the DOI was not
 /// in the corpus and the provider answered), or `unknown`.
 ///
@@ -359,7 +390,17 @@ fn build_field(
     let provider_value = provider_record.and_then(|value| read_provider_field(value, key));
 
     let (value, provenance) = match (stored_value, provider_value, provider_kind) {
-        (Some(stored), Some(_), Some(kind)) => (stored, format!("ookcite_corpus+{kind}")),
+        (Some(stored), Some(provider), Some(kind)) => {
+            let provenance = if field_values_agree(key, &stored, &provider) {
+                format!("ookcite_corpus+{kind}")
+            } else {
+                // The combined tag means the two sources agree. A
+                // disagreement keeps the corpus value and does not claim
+                // agreement; `warnings` names the clash.
+                "ookcite_corpus".to_string()
+            };
+            (stored, provenance)
+        }
         (Some(stored), Some(_), None) => (stored, "ookcite_corpus".to_string()),
         (Some(stored), None, _) => (stored, "ookcite_corpus".to_string()),
         (None, Some(provider), Some(kind)) => (provider, kind.to_string()),
@@ -585,6 +626,39 @@ fn path_get(root: &Value, path: &[&str]) -> Option<Value> {
     Some(cursor.clone())
 }
 
+fn field_values_agree(key: &str, stored: &Value, provider: &Value) -> bool {
+    if key == "title" {
+        return stored.as_str().is_some_and(|left| {
+            provider
+                .as_str()
+                .is_some_and(|right| left.trim().eq_ignore_ascii_case(right.trim()))
+        });
+    }
+    if key == "authors" {
+        let left = person_family_set(stored);
+        let right = person_family_set(provider);
+        return !left.is_empty() && left == right;
+    }
+    stored == provider
+}
+
+fn person_family_set(value: &Value) -> std::collections::BTreeSet<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|author| {
+            author
+                .get("family")
+                .and_then(Value::as_str)
+                .or_else(|| author.get("familyName").and_then(Value::as_str))
+                .or_else(|| author.get("name").and_then(Value::as_str))
+                .map(|name| name.trim().to_ascii_lowercase())
+                .filter(|name| !name.is_empty())
+        })
+        .collect()
+}
+
 fn non_empty(value: Option<Value>) -> Option<Value> {
     match value {
         None => None,
@@ -638,6 +712,12 @@ fn extract_authors(
                 .map(str::to_string)
                 .or_else(|| {
                     author
+                        .get("familyName")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .or_else(|| {
+                    author
                         .get("lastName")
                         .and_then(Value::as_str)
                         .map(str::to_string)
@@ -646,6 +726,12 @@ fn extract_authors(
                 .get("given")
                 .and_then(Value::as_str)
                 .map(str::to_string)
+                .or_else(|| {
+                    author
+                        .get("givenName")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
                 .or_else(|| {
                     author
                         .get("firstName")
@@ -657,6 +743,16 @@ fn extract_authors(
             }
             if let Some(given) = given {
                 entry.insert("given".into(), Value::String(given));
+            }
+            // An organisational creator has `name` and neither family nor given.
+            if !entry.contains_key("family") && !entry.contains_key("given") {
+                if let Some(name) = author.get("name").and_then(Value::as_str) {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        entry.insert("family".into(), Value::String(name.to_string()));
+                        entry.insert("literal".into(), Value::Bool(true));
+                    }
+                }
             }
             let mut orcid = author
                 .get("orcid")
@@ -848,7 +944,7 @@ pub fn output_schema() -> Arc<JsonObject> {
             },
             "error": {
                 "type": "object",
-                "description": "Populated only when `source` is `error`. `kind` is a stable failure family (invalid_doi, rate_limited, timeout, unauthorized, plan_required, error); `message` is the prose the summary also carries.",
+                "description": "Populated only when `source` is `error`. `kind` matches the prefix the server emits: invalid_doi (INVALID), rate_limited (RATE LIMITED), timeout (TIMEOUT), unauthorized (ACCESS DENIED), plan_required (PAYMENT REQUIRED), unregistered (UNREGISTERED), unreachable (UNREACHABLE), temporary_error (TEMPORARY ERROR), client_error (CLIENT ERROR), or error. `message` is the prose the summary also carries, with userinfo and query strings removed from any URL.",
                 "required": ["kind", "message"],
                 "properties": {
                     "kind": { "type": "string" },
@@ -1205,6 +1301,9 @@ mod tests {
             record["authors"][0]["orcid"].as_str(),
             Some("https://orcid.org/0000-0004-5555-0003")
         );
+        assert_eq!(record["authors"][0]["family"], "Example");
+        assert_eq!(record["authors"][0]["given"], "A.");
+        assert_eq!(fields["authors"]["provenance"], "datacite");
     }
 
     #[test]
@@ -1232,20 +1331,19 @@ mod tests {
     #[test]
     fn a_corpus_hit_keeps_corpus_values_even_when_the_provider_disagrees() {
         // The OokCite row has one author and one title. Crossref lists
-        // a different title and extra authors. OokCite-first means the
-        // structured record keeps the corpus title and carries both
-        // sources in the provenance so a reader can tell they agreed
-        // on the DOI but not on the title string.
+        // a different title and extra authors. The structured record
+        // keeps the corpus title. Provenance names only the corpus when
+        // the strings disagree, and the warning records the clash.
         let stored = serde_json::json!({
             "doi": "10.5555/precedence.1",
-            "title": "The curated OokCite title",
+            "title": "The curated OokCite manuscript",
             "authors": [{"family": "Keeper", "given": "K."}],
             "date": {"year": 2024}
         });
         let provider = serde_json::json!({
             "crossref": {
                 "DOI": "10.5555/precedence.1",
-                "title": ["A DIFFERENT title from the publisher record"],
+                "title": ["A different publisher headline gamma"],
                 "author": [{"family": "Keeper", "given": "K."}, {"family": "Other"}],
                 "container-title": ["Fixtures Weekly"],
                 "issued": {"date-parts": [[2024]]},
@@ -1267,12 +1365,19 @@ mod tests {
         let title = &record["fields"]["title"];
         assert_eq!(
             title["value"].as_str(),
-            Some("The curated OokCite title"),
+            Some("The curated OokCite manuscript"),
             "a corpus title must not be replaced by a provider title"
         );
         assert_eq!(
-            title["provenance"], "ookcite_corpus+crossref",
-            "both sources have a title so the provenance names both"
+            title["provenance"], "ookcite_corpus",
+            "a disagreeing provider title must not be tagged as agreement"
+        );
+        let warnings = record["warnings"].as_array().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| { warning["code"] == "corpus_title_disagrees_with_provider" }),
+            "a distinct provider title is a warning: {warnings:?}"
         );
         let authors = record["authors"].as_array().unwrap();
         assert_eq!(
@@ -1376,6 +1481,238 @@ mod tests {
         assert!(record["authors"].is_array());
         assert!(record["fields"].is_object());
         assert!(record["warnings"].is_array());
+    }
+
+    #[test]
+    fn datacite_family_and_given_survive_when_the_merged_row_has_no_authors() {
+        // The merged row is empty on purpose. Deleting the DataCite arm
+        // of `provider_authors` would fall through to that empty row and
+        // drop the names. `familyName` / `givenName` are the registrar keys.
+        let provider = serde_json::json!({
+            "datacite": {
+                "creators": [{
+                    "familyName": "Example",
+                    "givenName": "A.",
+                    "nameIdentifiers": [{
+                        "nameIdentifierScheme": "ORCID",
+                        "nameIdentifier": "https://orcid.org/0000-0004-5555-0003"
+                    }]
+                }]
+            }
+        });
+        let merged = serde_json::json!({"doi": "10.5555/dc.names.1"});
+        let record = build_validate_doi_record(
+            "10.5555/dc.names.1",
+            DoiSource::NotInCorpus,
+            None,
+            Some(&provider),
+            &merged,
+            0,
+            false,
+            "NOT-IN-CORPUS",
+            None,
+        );
+        assert_eq!(record["authors"][0]["family"], "Example");
+        assert_eq!(record["authors"][0]["given"], "A.");
+        assert_eq!(
+            record["authors"][0]["orcid"],
+            "https://orcid.org/0000-0004-5555-0003"
+        );
+    }
+
+    #[test]
+    fn an_organisational_creator_name_is_a_literal_family() {
+        let provider = serde_json::json!({
+            "datacite": {
+                "creators": [{"name": "Example Collaboration", "nameType": "Organizational"}]
+            }
+        });
+        let record = build_validate_doi_record(
+            "10.5555/dc.org.1",
+            DoiSource::NotInCorpus,
+            None,
+            Some(&provider),
+            &serde_json::json!({"doi": "10.5555/dc.org.1"}),
+            0,
+            false,
+            "NOT-IN-CORPUS",
+            None,
+        );
+        assert_eq!(record["authors"][0]["family"], "Example Collaboration");
+        assert_eq!(record["authors"][0]["literal"], true);
+    }
+
+    #[test]
+    fn title_warnings_ignore_punctuation_and_empty_token_sets() {
+        let stored = serde_json::json!({
+            "doi": "10.5555/title.warn.1",
+            "title": "On War.",
+            "authors": [{"family": "Clausewitz"}]
+        });
+        let provider = serde_json::json!({
+            "crossref": {
+                "DOI": "10.5555/title.warn.1",
+                "title": ["On War"],
+                "author": [{"family": "Clausewitz"}]
+            }
+        });
+        let warnings = detect_consistency_warnings(Some(&stored), Some(&provider));
+        assert_eq!(warnings, serde_json::json!([]), "{warnings}");
+
+        let punctuated = serde_json::json!({
+            "title": "Lattice methods.",
+            "authors": [{"family": "Keeper"}]
+        });
+        let punctuated_provider = serde_json::json!({
+            "crossref": {
+                "title": ["Lattice methods"],
+                "author": [{"family": "Keeper"}]
+            }
+        });
+        assert_eq!(
+            detect_consistency_warnings(Some(&punctuated), Some(&punctuated_provider)),
+            serde_json::json!([])
+        );
+
+        let distinct = serde_json::json!({
+            "title": "Curated OokCite Manuscript Title Alpha",
+            "authors": [{"family": "Keeper"}]
+        });
+        let distinct_provider = serde_json::json!({
+            "crossref": {
+                "title": ["Completely Different Crossref Paper Gamma"],
+                "author": [{"family": "Keeper"}]
+            }
+        });
+        let warnings = detect_consistency_warnings(Some(&distinct), Some(&distinct_provider));
+        assert!(
+            warnings
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning["code"] == "corpus_title_disagrees_with_provider"),
+            "{warnings}"
+        );
+        assert!(warnings[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Completely Different Crossref Paper Gamma"));
+    }
+
+    #[test]
+    fn agreeing_authors_and_titles_produce_no_warning() {
+        let stored = serde_json::json!({
+            "title": "A shared paper about lattice transport",
+            "authors": [{"family": "Keeper"}, {"family": "Quinn"}]
+        });
+        let provider = serde_json::json!({
+            "crossref": {
+                "title": ["A shared paper about lattice transport"],
+                "author": [{"family": "Quinn"}, {"family": "Keeper"}]
+            }
+        });
+        assert_eq!(
+            detect_consistency_warnings(Some(&stored), Some(&provider)),
+            serde_json::json!([])
+        );
+        // A missing author list on one side is not a disagreement.
+        let no_provider_authors =
+            serde_json::json!({"crossref": {"title": ["A shared paper about lattice transport"]}});
+        assert_eq!(
+            detect_consistency_warnings(Some(&stored), Some(&no_provider_authors)),
+            serde_json::json!([])
+        );
+        let no_stored_authors =
+            serde_json::json!({"title": "A shared paper about lattice transport"});
+        assert_eq!(
+            detect_consistency_warnings(Some(&no_stored_authors), Some(&provider)),
+            serde_json::json!([])
+        );
+        // An empty DataCite familyName is not an author. Keeping it would
+        // look like a disjoint byline.
+        let blank_family = serde_json::json!({
+            "datacite": {
+                "titles": [{"title": "A shared paper about lattice transport"}],
+                "creators": [{"familyName": ""}]
+            }
+        });
+        assert_eq!(
+            detect_consistency_warnings(Some(&stored), Some(&blank_family)),
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn a_three_letter_word_does_not_hide_a_real_title_clash() {
+        // Tokens of length 3 are ignored. Sharing "cat" must not cancel
+        // two disjoint longer words, and a length check that keeps
+        // three-letter words would hide the clash.
+        let stored = serde_json::json!({"title": "cat abcd"});
+        let provider = serde_json::json!({"crossref": {"title": ["cat wxyz"]}});
+        let warnings = detect_consistency_warnings(Some(&stored), Some(&provider));
+        assert!(
+            warnings
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning["code"] == "corpus_title_disagrees_with_provider"),
+            "{warnings}"
+        );
+    }
+
+    #[test]
+    fn classify_error_uses_the_prefixes_the_server_emits() {
+        assert_eq!(
+            classify_error("INVALID 10.5555/x : HTTP 404"),
+            "invalid_doi"
+        );
+        assert_eq!(
+            classify_error("RATE LIMITED 10.5555/x : slow"),
+            "rate_limited"
+        );
+        assert_eq!(classify_error("RETRY-AFTER: 30"), "rate_limited");
+        assert_eq!(classify_error("TIMEOUT 10.5555/x : slow"), "timeout");
+        assert_eq!(
+            classify_error("ACCESS DENIED 10.5555/x : 401"),
+            "unauthorized"
+        );
+        assert_eq!(classify_error("UNAUTHORIZED"), "unauthorized");
+        assert_eq!(
+            classify_error("PAYMENT REQUIRED 10.5555/x : 402"),
+            "plan_required"
+        );
+        assert_eq!(classify_error("PLAN required"), "plan_required");
+        assert_eq!(
+            classify_error("UNREGISTERED 10.5555/x: not registered"),
+            "unregistered"
+        );
+        assert_eq!(
+            classify_error("UNREACHABLE 10.5555/x : could not connect"),
+            "unreachable"
+        );
+        assert_eq!(
+            classify_error("TEMPORARY ERROR 10.5555/x : 503"),
+            "temporary_error"
+        );
+        assert_eq!(
+            classify_error("CLIENT ERROR 10.5555/x : 400"),
+            "client_error"
+        );
+        assert_eq!(classify_error("something else"), "error");
+    }
+
+    #[test]
+    fn an_error_record_strips_userinfo_and_query_secrets() {
+        let record = build_error_record(
+            "10.5555/secret.url",
+            "ERROR 10.5555/secret.url : error sending request for url (http://alice:hunter2@127.0.0.1:9/api/v1/lookup/doi?api_key=secret_query)",
+        );
+        let message = record["error"]["message"].as_str().unwrap();
+        assert!(!message.contains("hunter2"), "{message}");
+        assert!(!message.contains("alice"), "{message}");
+        assert!(!message.contains("secret_query"), "{message}");
+        assert!(!message.contains("api_key"), "{message}");
+        assert!(message.contains("127.0.0.1"), "{message}");
     }
 
     #[test]
