@@ -125,6 +125,17 @@ pub fn redact_urls_in_text(text: &str) -> String {
         let end = url_text
             .find(|ch: char| ch.is_whitespace() || matches!(ch, ')' | '>' | '"' | '\'' | ','))
             .unwrap_or(url_text.len());
+        // A delimiter at the start of this slice is not a URL. Advancing
+        // one character keeps a zero-width match from spinning.
+        if end == 0 {
+            let mut chars = url_text.chars();
+            let Some(ch) = chars.next() else {
+                break;
+            };
+            out.push(ch);
+            rest = chars.as_str();
+            continue;
+        }
         out.push_str(&redact_url(&url_text[..end]));
         rest = &url_text[end..];
     }
