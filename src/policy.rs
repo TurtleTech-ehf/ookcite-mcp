@@ -216,8 +216,10 @@ fn http_url_end(url_text: &str) -> usize {
 }
 
 fn find_url_start(text: &str) -> Option<usize> {
-    let https = text.find("https://");
-    let http = text.find("http://");
+    // Schemes are ASCII case-insensitive. ASCII lowercasing keeps byte indexes.
+    let lower = text.to_ascii_lowercase();
+    let https = lower.find("https://");
+    let http = lower.find("http://");
     match (https, http) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (Some(a), None) => Some(a),
@@ -327,6 +329,67 @@ mod tests {
         assert_eq!(
             redact_urls_in_text("note?keep#frag before http://example.com/a"),
             "note?keep#frag before http://example.com/a"
+        );
+    }
+
+    #[test]
+    fn redaction_exact_encoded_userinfo_keeps_scheme_and_host() {
+        // `after + at_rel - 3` keeps a credential suffix (`er2%40`).
+        // Replacing either `+` with `*` drops the host. A one-byte scheme
+        // marker keeps `h` and drops `ttp%3A%2F%2F`.
+        let text = redact_urls_in_text(
+            "error sending request for url (http://127.0.0.1/hop/http%3A%2F%2Falice:hunter2%40evil.test/x?token=secret)",
+        );
+        assert_eq!(
+            text,
+            "error sending request for url (http://127.0.0.1/hop/http%3A%2F%2Fevil.test/x)"
+        );
+        assert!(text.contains("http%3A%2F%2Fevil.test/x"), "{text}");
+        assert!(!text.contains("er2%40"), "{text}");
+    }
+
+    #[test]
+    fn redaction_exact_url_boundaries_keep_the_text_after_the_url() {
+        // A wrapper `)` at depth 0 ends the URL, so the query after it stays.
+        assert_eq!(
+            redact_urls_in_text("(https://alice:hunter2@example.test/a)?api_key=secret#frag after"),
+            "(https://example.test/a)?api_key=secret#frag after"
+        );
+        // Balanced path parens stay inside the URL (the query is stripped)
+        // and the wrapper `)` still ends it before `?keep`.
+        assert_eq!(
+            redact_urls_in_text(
+                "see (https://example.test/wiki/Foo_(bar)/z?api_key=secret)?keep=1#frag tail"
+            ),
+            "see (https://example.test/wiki/Foo_(bar)/z)?keep=1#frag tail"
+        );
+        assert_eq!(
+            redact_urls_in_text("https://alice:hunter2@example.test/a tail?api_key=secret"),
+            "https://example.test/a tail?api_key=secret"
+        );
+        assert_eq!(
+            redact_urls_in_text("https://alice:hunter2@example.test/a>tail?api_key=secret"),
+            "https://example.test/a>tail?api_key=secret"
+        );
+        assert_eq!(
+            redact_urls_in_text("https://alice:hunter2@example.test/a\"tail?api_key=secret"),
+            "https://example.test/a\"tail?api_key=secret"
+        );
+        assert_eq!(
+            redact_urls_in_text("https://alice:hunter2@example.test/a'tail?api_key=secret"),
+            "https://example.test/a'tail?api_key=secret"
+        );
+    }
+
+    #[test]
+    fn redaction_exact_url_schemes_match_ascii_case_insensitively() {
+        assert_eq!(
+            redact_urls_in_text("HTTP://alice:hunter2@example.test/a?api_key=secret#frag"),
+            "HTTP://example.test/a"
+        );
+        assert_eq!(
+            redact_urls_in_text("HtTpS://alice:hunter2@example.test/a?api_key=secret#frag"),
+            "HtTpS://example.test/a"
         );
     }
 
