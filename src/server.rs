@@ -431,20 +431,276 @@ fn member_failure_is_degraded(reason: &str) -> bool {
         || reason.starts_with("CLIENT ERROR")
 }
 
-fn classify_write_probe(status: reqwest::StatusCode, body: &str) -> String {
-    let body = body.trim();
+const PROBE_SUMMARY_CHARS: usize = 120;
+const KNOWN_WRITE_REFUSAL: &str =
+    "collection preconditions cannot be used; refusing collection writes";
+
+fn response_refuses_collection_writes(status: reqwest::StatusCode, body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
-    let shown: String = body.chars().take(120).collect();
-    let refused = (status.as_u16() == 400
+    (status.as_u16() == 400
         && (lower.contains("collection preconditions cannot be used")
             || lower.contains("refusing collection writes")))
-        || (status.as_u16() == 503 && lower.contains("have not been checked"));
-    if refused {
-        format!("collection writes: refused ({status} {shown})")
+        || (status.as_u16() == 503 && lower.contains("have not been checked"))
+}
+
+fn classify_write_probe(status: reqwest::StatusCode, body: &str) -> (String, bool) {
+    let lower = body.to_ascii_lowercase();
+    let summary = redact_probe_summary(body);
+    if response_refuses_collection_writes(status, body) {
+        (probe_status_line("refused", status, &summary), false)
     } else if status.as_u16() == 404 && lower.contains("collection not found") {
-        "collection writes: allowed".into()
+        (probe_status_line("allowed", status, ""), false)
+    } else if status.is_success() {
+        (probe_status_line("allowed", status, &summary), true)
     } else {
-        format!("collection writes: unchecked ({status} {shown})")
+        (probe_status_line("unchecked", status, &summary), true)
+    }
+}
+
+fn probe_status_line(label: &str, status: reqwest::StatusCode, summary: &str) -> String {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        format!("collection writes: {label} ({status})")
+    } else {
+        format!("collection writes: {label} ({status} {summary})")
+    }
+}
+
+/// Status plus a short summary. Bearer tokens, key assignments, URL
+/// userinfo, and long hex or base64 runs are removed. The known refusal
+/// sentence stays readable when the body contains it.
+fn redact_probe_summary(body: &str) -> String {
+    let mut text = policy::redact_urls_in_text(body.trim());
+    text = redact_bearer_tokens(&text);
+    text = redact_key_assignments(&text);
+    text = redact_ookc_keys(&text);
+    text = redact_long_token_runs(&text);
+    let mut summary: String = text.chars().take(PROBE_SUMMARY_CHARS).collect();
+    if body.to_ascii_lowercase().contains(KNOWN_WRITE_REFUSAL)
+        && !summary.to_ascii_lowercase().contains(KNOWN_WRITE_REFUSAL)
+    {
+        summary = KNOWN_WRITE_REFUSAL.to_string();
+    }
+    summary
+}
+
+fn redact_bearer_tokens(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bearer_at(bytes, index) {
+            let mut cursor = index + "bearer".len();
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            let token_start = cursor;
+            while cursor < bytes.len() && is_secret_token_byte(bytes[cursor]) {
+                cursor += 1;
+            }
+            if token_start > index + "bearer".len() && cursor > token_start {
+                out.push_str("Bearer [redacted]");
+                index = cursor;
+                continue;
+            }
+        }
+        let ch = text[index..].chars().next().unwrap();
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+fn bearer_at(bytes: &[u8], index: usize) -> bool {
+    let word = b"bearer";
+    if index + word.len() > bytes.len() || !bytes[index..].starts_with(word) {
+        return false;
+    }
+    let before_ok = index == 0 || !bytes[index - 1].is_ascii_alphanumeric();
+    let after = index + word.len();
+    let after_ok = after == bytes.len() || !bytes[after].is_ascii_alphanumeric();
+    before_ok && after_ok
+}
+
+fn is_secret_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'+' | b'/' | b'-' | b'=')
+}
+
+fn redact_key_assignments(text: &str) -> String {
+    const KEYS: &[&[u8]] = &[
+        b"access_token",
+        b"access-token",
+        b"api_key",
+        b"api-key",
+        b"apikey",
+        b"password",
+        b"secret",
+        b"token",
+        b"key",
+    ];
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(end) = assignment_end(bytes, index, KEYS) {
+            out.push_str("[redacted]");
+            index = end;
+            continue;
+        }
+        let ch = text[index..].chars().next().unwrap();
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+fn assignment_end(bytes: &[u8], index: usize, keys: &[&[u8]]) -> Option<usize> {
+    if index > 0 && (bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_') {
+        return None;
+    }
+    for key in keys {
+        if index + key.len() > bytes.len() || !bytes[index..].starts_with(key) {
+            continue;
+        }
+        let mut cursor = index + key.len();
+        if cursor < bytes.len() && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_')
+        {
+            continue;
+        }
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || (bytes[cursor] != b'=' && bytes[cursor] != b':') {
+            continue;
+        }
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        let value_start = cursor;
+        while cursor < bytes.len() && !bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor > value_start {
+            return Some(cursor);
+        }
+    }
+    None
+}
+
+fn redact_ookc_keys(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(end) = ookc_key_end(bytes, index) {
+            out.push_str("[redacted]");
+            index = end;
+            continue;
+        }
+        let ch = text[index..].chars().next().unwrap();
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+fn ookc_key_end(bytes: &[u8], index: usize) -> Option<usize> {
+    if index > 0 && (bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_') {
+        return None;
+    }
+    const PREFIX: &[u8] = b"ookc_";
+    if index + PREFIX.len() > bytes.len() || !bytes[index..].starts_with(PREFIX) {
+        return None;
+    }
+    let mut cursor = index + PREFIX.len();
+    if cursor >= bytes.len() || !bytes[cursor].is_ascii_alphanumeric() {
+        return None;
+    }
+    while cursor < bytes.len() && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_') {
+        cursor += 1;
+    }
+    Some(cursor)
+}
+
+fn redact_long_token_runs(text: &str) -> String {
+    const MIN_RUN: usize = 32;
+    let mut out = String::with_capacity(text.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if run.chars().count() >= MIN_RUN {
+            out.push_str("[redacted]");
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    for ch in text.chars() {
+        if is_token_run_char(ch) {
+            run.push(ch);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(ch);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+fn is_token_run_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '-' | '_' | '=')
+}
+
+struct ProbeAttempt {
+    report: String,
+    may_have_stored: bool,
+}
+
+fn probe_collection_id() -> String {
+    format!("ookcite-doctor-{}", uuid::Uuid::new_v4().simple())
+}
+
+const PROBE_BODY_CAP: usize = 4096;
+
+/// The first few kilobytes, or an error when the bytes are not UTF-8.
+/// A lossy decode would keep a secret that sat in front of a bad byte.
+async fn read_probe_body(mut response: reqwest::Response) -> Result<String, ()> {
+    let mut buf = Vec::new();
+    let mut hit_cap = false;
+    loop {
+        if buf.len() >= PROBE_BODY_CAP {
+            hit_cap = true;
+            break;
+        }
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = PROBE_BODY_CAP - buf.len();
+                if chunk.len() > room {
+                    buf.extend_from_slice(&chunk[..room]);
+                    hit_cap = true;
+                    break;
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => return Err(()),
+        }
+    }
+    match String::from_utf8(buf) {
+        Ok(text) => Ok(text),
+        Err(error) => {
+            let utf8 = error.utf8_error();
+            if hit_cap && utf8.error_len().is_none() {
+                let valid = utf8.valid_up_to();
+                let bytes = error.into_bytes();
+                String::from_utf8(bytes[..valid].to_vec()).map_err(|_| ())
+            } else {
+                Err(())
+            }
+        }
     }
 }
 
@@ -1214,12 +1470,25 @@ impl Server {
         out.join("\n")
     }
 
-    /// One import of a missing collection id. The server checks storage
-    /// preconditions inside the write lock, then reports the id as missing,
-    /// so a 404 means writes are accepted and nothing was stored. A 400/503
-    /// that names the precondition refusal means the store cannot write.
-    /// The request carries no `If-Match` or `If-None-Match`.
+    /// Import into a fresh collection id. A missing id is checked inside the
+    /// write lock and then rejected, so a 404 stores nothing. The id is not
+    /// `doctor-write-probe`: a fixed id is a real collection once someone
+    /// creates it, and the next doctor run would import into it. The id is
+    /// deleted on every return, including a transport error after the server
+    /// may have committed the import. A failed delete is part of the report.
     async fn probe_collection_writes(&self) -> String {
+        let id = probe_collection_id();
+        let attempt = self.import_write_probe(&id).await;
+        match self
+            .delete_probe_collection(&id, attempt.may_have_stored)
+            .await
+        {
+            Ok(()) => attempt.report,
+            Err(reason) => format!("{} cleanup failed: {reason}", attempt.report),
+        }
+    }
+
+    async fn import_write_probe(&self, id: &str) -> ProbeAttempt {
         let probe = "@misc{doctorwriteprobe,\n  title = {write probe}\n}\n";
         let part = match reqwest::multipart::Part::text(probe)
             .file_name("import.bib")
@@ -1227,28 +1496,70 @@ impl Server {
         {
             Ok(part) => part,
             Err(error) => {
-                return format!(
-                    "collection writes: unchecked ({})",
-                    policy::scrub_error(&error)
-                );
+                return ProbeAttempt {
+                    report: format!(
+                        "collection writes: unchecked ({})",
+                        redact_probe_summary(&policy::scrub_error(&error))
+                    ),
+                    may_have_stored: false,
+                };
             }
         };
         let form = reqwest::multipart::Form::new().part("file", part);
         let response = self
-            .request(
-                endpoints::COLLECTION_IMPORT,
-                &[("id", "doctor-write-probe")],
-            )
+            .request(endpoints::COLLECTION_IMPORT, &[("id", id)])
             .multipart(form)
             .send()
             .await;
         match response {
-            Err(error) => format!(
-                "collection writes: unchecked ({})",
-                policy::scrub_error(&error)
-            ),
-            Ok(resp) => classify_write_probe(resp.status(), &resp.text().await.unwrap_or_default()),
+            Err(error) => ProbeAttempt {
+                report: format!(
+                    "collection writes: unchecked ({})",
+                    redact_probe_summary(&policy::scrub_error(&error))
+                ),
+                may_have_stored: true,
+            },
+            Ok(resp) => {
+                let status = resp.status();
+                match read_probe_body(resp).await {
+                    Ok(body) => {
+                        let (report, may_have_stored) = classify_write_probe(status, &body);
+                        ProbeAttempt {
+                            report,
+                            may_have_stored,
+                        }
+                    }
+                    Err(()) => ProbeAttempt {
+                        report: format!(
+                            "collection writes: unchecked ({status} response body was not utf-8)"
+                        ),
+                        may_have_stored: status.is_success() || status.is_server_error(),
+                    },
+                }
+            }
         }
+    }
+
+    async fn delete_probe_collection(&self, id: &str, may_have_stored: bool) -> Result<(), String> {
+        let response = match self
+            .request(endpoints::COLLECTION_DELETE, &[("id", id)])
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(redact_probe_summary(&policy::scrub_error(&error)));
+            }
+        };
+        let status = response.status();
+        if status.is_success() || status.as_u16() == 404 {
+            return Ok(());
+        }
+        let body = read_probe_body(response).await.unwrap_or_default();
+        if !may_have_stored && response_refuses_collection_writes(status, &body) {
+            return Ok(());
+        }
+        Err(format!("{status} {}", redact_probe_summary(&body)))
     }
 
     /// Build a request to a registered endpoint, substituting any path
@@ -2487,7 +2798,12 @@ impl Server {
                 let collection: serde_json::Value = match r {
                     Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
                     Ok(r) => return failure_text(r, "Failed to load collection").await,
-                    Err(error) => return format!("Failed to load collection: {error}"),
+                    Err(error) => {
+                        return format!(
+                            "Failed to load collection: {}",
+                            policy::scrub_error(&error)
+                        )
+                    }
                 };
                 let entries = collection
                     .get("entries")
@@ -2529,7 +2845,12 @@ impl Server {
                 let collection: serde_json::Value = match r {
                     Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
                     Ok(r) => return failure_text(r, "Failed to load collection").await,
-                    Err(error) => return format!("Failed to load collection: {error}"),
+                    Err(error) => {
+                        return format!(
+                            "Failed to load collection: {}",
+                            policy::scrub_error(&error)
+                        )
+                    }
                 };
                 let entries: Vec<serde_json::Value> = collection
                     .get("entries")
@@ -2574,7 +2895,9 @@ impl Server {
         let collection: serde_json::Value = match r {
             Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
             Ok(r) => return failure_text(r, "Failed to load collection").await,
-            Err(error) => return format!("Failed to load collection: {error}"),
+            Err(error) => {
+                return format!("Failed to load collection: {}", policy::scrub_error(&error))
+            }
         };
 
         let query_lower = args.query.to_lowercase();
@@ -2642,7 +2965,12 @@ impl Server {
                     prefixed_failure(r, "Failed to load collection for entry lookup").await,
                 );
             }
-            Err(e) => return Err(format!("Failed to load collection for entry lookup: {e}")),
+            Err(e) => {
+                return Err(format!(
+                    "Failed to load collection for entry lookup: {}",
+                    policy::scrub_error(&e)
+                ))
+            }
         };
         Ok(collection["entries"]
             .as_array()
@@ -2738,7 +3066,11 @@ impl Server {
                 })
             }
             Ok(r) => Err(classify_collection_create_failure(r, name).await),
-            Err(e) => Err(format!("Failed to create collection '{}': {e}", name)),
+            Err(e) => Err(format!(
+                "Failed to create collection '{}': {}",
+                name,
+                policy::scrub_error(&e)
+            )),
         }
     }
 
@@ -2782,7 +3114,7 @@ impl Server {
                 None
             }
             Err(error) => {
-                failures.push(format!("Resolve failed: {error}"));
+                failures.push(format!("Resolve failed: {}", policy::scrub_error(&error)));
                 None
             }
         };
@@ -2806,7 +3138,7 @@ impl Server {
                     Vec::new()
                 }
                 Err(error) => {
-                    failures.push(format!("Reverse failed: {error}"));
+                    failures.push(format!("Reverse failed: {}", policy::scrub_error(&error)));
                     Vec::new()
                 }
             };
@@ -2937,7 +3269,7 @@ impl Server {
                 Err("Format returned no bibliography text.".into())
             }
             Ok(r) => Err(failure_text(r, "Format failed").await),
-            Err(e) => Err(format!("Format failed: {e}")),
+            Err(e) => Err(format!("Format failed: {}", policy::scrub_error(&e))),
         }
     }
 
@@ -2984,7 +3316,10 @@ impl Server {
                     out.push_str(&csl);
                 }
                 Err(e) => {
-                    out.push_str(&format!("\nCSL format skipped: {e}"));
+                    out.push_str(&format!(
+                        "\nCSL format skipped: {}",
+                        policy::scrub_error(&e)
+                    ));
                 }
             }
         }
@@ -2994,7 +3329,7 @@ impl Server {
             }
             let col_id = match self.resolve_or_create_collection(name).await {
                 Ok(id) => id,
-                Err(e) => return format!("{e}\n\n{out}"),
+                Err(e) => return format!("{}\n\n{out}", policy::scrub_error(&e)),
             };
             let r = self
                 .send_read(|| {
@@ -3011,7 +3346,7 @@ impl Server {
                 }
                 Ok(r) if r.status().as_u16() == 401 => inbound_auth::auth_required_text().into(),
                 Ok(r) => failure_text(r, "Import failed").await,
-                Err(e) => format!("Import failed: {e}"),
+                Err(e) => format!("Import failed: {}", policy::scrub_error(&e)),
             };
             out = format!("{saved}\n\n{out}");
         }
@@ -3067,7 +3402,10 @@ impl Server {
                             out.push_str(&format!("\nCollections: HTTP {status}"));
                         }
                         Err(error) => {
-                            out.push_str(&format!("\nCollections: unreachable ({error})"));
+                            out.push_str(&format!(
+                                "\nCollections: unreachable ({})",
+                                policy::scrub_error(&error)
+                            ));
                         }
                     }
                 }
@@ -3176,7 +3514,7 @@ impl Server {
             }
             Ok(r) if r.status().as_u16() == 401 => inbound_auth::auth_required_text().into(),
             Ok(r) => failure_text(r, "Import failed").await,
-            Err(e) => format!("Import failed: {e}"),
+            Err(e) => format!("Import failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -3306,7 +3644,7 @@ impl Server {
                 }
             }
             Ok(r) => failure_text(r, "Duplicate check failed").await,
-            Err(error) => format!("Duplicate check failed: {error}"),
+            Err(error) => format!("Duplicate check failed: {}", policy::scrub_error(&error)),
         }
     }
 
@@ -3404,7 +3742,7 @@ impl Server {
                 out
             }
             Ok(r) => prefixed_failure(r, "Batch add failed").await,
-            Err(e) => format!("Batch add failed: {e}"),
+            Err(e) => format!("Batch add failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -3440,7 +3778,7 @@ impl Server {
                 format!("Deleted collection '{}'.", args.collection)
             }
             Ok(r) => prefixed_failure(r, "Failed to delete collection").await,
-            Err(e) => format!("Failed to delete collection: {e}"),
+            Err(e) => format!("Failed to delete collection: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -3488,7 +3826,7 @@ impl Server {
                 format!("Updated collection '{}'.", args.collection)
             }
             Ok(r) => prefixed_failure(r, "Failed to update collection").await,
-            Err(e) => format!("Failed to update collection: {e}"),
+            Err(e) => format!("Failed to update collection: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -3545,7 +3883,7 @@ impl Server {
                 }
             }
             Ok(r) => prefixed_failure(r, "Failed to remove entry").await,
-            Err(e) => format!("Failed to remove entry: {e}"),
+            Err(e) => format!("Failed to remove entry: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -3577,7 +3915,7 @@ impl Server {
                 format!("Updated tags on '{}'.", args.collection)
             }
             Ok(r) => prefixed_failure(r, "Failed to update tags").await,
-            Err(e) => format!("Failed to update tags: {e}"),
+            Err(e) => format!("Failed to update tags: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -3612,7 +3950,7 @@ impl Server {
                 format!("Reordered entries in '{}'.", args.collection)
             }
             Ok(r) => prefixed_failure(r, "Failed to reorder collection").await,
-            Err(e) => format!("Failed to reorder collection: {e}"),
+            Err(e) => format!("Failed to reorder collection: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -3647,7 +3985,7 @@ impl Server {
                 format!("Shared '{}': {share_url}", args.collection)
             }
             Ok(r) => prefixed_failure(r, "Failed to share collection").await,
-            Err(e) => format!("Failed to share collection: {e}"),
+            Err(e) => format!("Failed to share collection: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -3681,7 +4019,7 @@ impl Server {
                 format!("Unshared '{}'.", args.collection)
             }
             Ok(r) => prefixed_failure(r, "Failed to unshare collection").await,
-            Err(e) => format!("Failed to unshare collection: {e}"),
+            Err(e) => format!("Failed to unshare collection: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -3740,7 +4078,12 @@ impl Server {
                         failure_text(r, "request failed").await
                     );
                 }
-                Err(e) => return format!("Failed to load collection '{name}': {e}"),
+                Err(e) => {
+                    return format!(
+                        "Failed to load collection '{name}': {}",
+                        policy::scrub_error(&e)
+                    )
+                }
             }
         }
 
@@ -3758,7 +4101,7 @@ impl Server {
                 format!("Merged: {merged} entries, {created} new, {dupes} duplicates skipped")
             }
             Ok(r) => prefixed_failure(r, "Merge failed").await,
-            Err(e) => format!("Merge failed: {e}"),
+            Err(e) => format!("Merge failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -3803,7 +4146,7 @@ impl Server {
                 )
             }
             Ok(r) => prefixed_failure(r, "Batch move failed").await,
-            Err(e) => format!("Batch move failed: {e}"),
+            Err(e) => format!("Batch move failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -3855,7 +4198,10 @@ impl Server {
                 "Shared collection not found or link expired.".into()
             }
             Ok(r) => failure_text(r, "Failed to load shared collection").await,
-            Err(e) => format!("Failed to load shared collection: {e}"),
+            Err(e) => format!(
+                "Failed to load shared collection: {}",
+                policy::scrub_error(&e)
+            ),
         }
     }
 
@@ -3908,7 +4254,10 @@ impl Server {
                 }
             }
             Ok(r) => failure_text(r, "Citation key generation failed").await,
-            Err(e) => format!("Citation key generation failed: {e}"),
+            Err(e) => format!(
+                "Citation key generation failed: {}",
+                policy::scrub_error(&e)
+            ),
         }
     }
 
@@ -3940,7 +4289,7 @@ impl Server {
                 }
             }
             Ok(r) => failure_text(r, "Journal expansion failed").await,
-            Err(e) => format!("Journal expansion failed: {e}"),
+            Err(e) => format!("Journal expansion failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -3965,7 +4314,7 @@ impl Server {
                 format_usage_report(&data)
             }
             Ok(r) => failure_text(r, "Failed to read usage").await,
-            Err(e) => format!("Failed to read usage: {e}"),
+            Err(e) => format!("Failed to read usage: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -4008,7 +4357,7 @@ impl Server {
                 out.join("\n")
             }
             Ok(r) => failure_text(r, "Failed to list styles").await,
-            Err(e) => format!("Failed to list styles: {e}"),
+            Err(e) => format!("Failed to list styles: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -4075,7 +4424,7 @@ impl Server {
                 format!("Normalized {count} entries.\n\n{content}")
             }
             Ok(r) => failure_text(r, "Normalization failed").await,
-            Err(e) => format!("Normalization failed: {e}"),
+            Err(e) => format!("Normalization failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -4235,7 +4584,7 @@ impl Server {
                 "ORCID author index is not configured on this server.".into()
             }
             Ok(r) => failure_text(r, "ORCID search failed").await,
-            Err(e) => format!("ORCID search failed: {e}"),
+            Err(e) => format!("ORCID search failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -4269,7 +4618,7 @@ impl Server {
                 "ORCID author index is not configured on this server.".into()
             }
             Ok(r) => failure_text(r, "ORCID profile lookup failed").await,
-            Err(e) => format!("ORCID profile lookup failed: {e}"),
+            Err(e) => format!("ORCID profile lookup failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -4322,7 +4671,7 @@ impl Server {
                 "The index that receives ingested works is not available on this server.".into()
             }
             Ok(r) => failure_text(r, "ORCID ingest failed").await,
-            Err(e) => format!("ORCID ingest failed: {e}"),
+            Err(e) => format!("ORCID ingest failed: {}", policy::scrub_error(&e)),
         }
     }
 
@@ -4414,7 +4763,10 @@ impl Server {
                 let failure = prefixed_failure(r, "Failed to update entry metadata").await;
                 format!("{failure}{local_note}")
             }
-            Err(e) => format!("Failed to update entry metadata: {e}{local_note}"),
+            Err(e) => format!(
+                "Failed to update entry metadata: {}{local_note}",
+                policy::scrub_error(&e)
+            ),
         }
     }
 
@@ -4477,7 +4829,7 @@ impl Server {
                 }
             }
             Ok(r) => prefixed_failure(r, "Failed to merge entries").await,
-            Err(e) => format!("Failed to merge entries: {e}"),
+            Err(e) => format!("Failed to merge entries: {}", policy::scrub_error(&e)),
         }
     }
 }
@@ -6190,7 +6542,9 @@ mod tests {
             .mount(&mock)
             .await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/collections/doctor-write-probe/import"))
+            .and(path_regex(
+                r"^/api/v1/collections/ookcite-doctor-[0-9a-f]{32}/import$",
+            ))
             .and(|request: &wiremock::Request| {
                 request.headers.get("if-match").is_none()
                     && request.headers.get("if-none-match").is_none()
@@ -6235,7 +6589,9 @@ mod tests {
             .mount(&mock)
             .await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/collections/doctor-write-probe/import"))
+            .and(path_regex(
+                r"^/api/v1/collections/ookcite-doctor-[0-9a-f]{32}/import$",
+            ))
             .respond_with(ResponseTemplate::new(404).set_body_string("Collection not found"))
             .expect(1)
             .mount(&mock)
@@ -6245,6 +6601,232 @@ mod tests {
         assert!(report.contains("collection writes: allowed"), "{report}");
         assert!(report.contains("mutate tools: allowed"), "{report}");
         assert!(!report.contains("refused"), "{report}");
+    }
+
+    async fn mount_doctor_reads(mock: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/api/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "version": "0.1.1"
+            })))
+            .mount(mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "username": "ada",
+                "plan": "Operator"
+            })))
+            .mount(mock)
+            .await;
+    }
+
+    fn ids_for(requests: &[wiremock::Request], verb: &str, suffix: &str) -> Vec<String> {
+        requests
+            .iter()
+            .filter(|request| request.method.as_str() == verb)
+            .filter_map(|request| {
+                let rest = request.url.path().strip_prefix("/api/v1/collections/")?;
+                if suffix.is_empty() {
+                    (!rest.contains('/')).then(|| rest.to_string())
+                } else {
+                    rest.strip_suffix(suffix).map(str::to_string)
+                }
+            })
+            .collect()
+    }
+
+    fn assert_probe_was_deleted(requests: &[wiremock::Request]) {
+        let imports = ids_for(requests, "POST", "/import");
+        let deletes = ids_for(requests, "DELETE", "");
+        assert_eq!(imports.len(), 1, "import count {}", imports.len());
+        assert_eq!(deletes, imports, "probe collection was not deleted");
+        assert!(
+            imports[0].starts_with("ookcite-doctor-"),
+            "probe id {}",
+            imports[0]
+        );
+        assert_ne!(imports[0], "doctor-write-probe");
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.path().contains("doctor-write-probe")),
+            "fixed probe collection was used"
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_probe_deletes_the_collection_after_a_successful_write() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_doctor_probe");
+        let mock = MockServer::start().await;
+        mount_doctor_reads(&mock).await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/v1/collections/[^/]+/import$"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"added": 1})))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"^/api/v1/collections/[^/]+$"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let report = test_server(&mock.uri()).doctor_report().await;
+        assert!(
+            report.contains("collection writes: allowed"),
+            "missing allowed"
+        );
+        assert!(report.contains("201"), "missing status");
+        assert!(
+            !report.contains("cleanup failed"),
+            "cleanup reported failed"
+        );
+        let requests = mock.received_requests().await.expect("recorded");
+        assert_probe_was_deleted(&requests);
+    }
+
+    #[tokio::test]
+    async fn doctor_probe_deletes_the_collection_after_a_failed_write() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_doctor_probe");
+        let mock = MockServer::start().await;
+        mount_doctor_reads(&mock).await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/v1/collections/[^/]+/import$"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("store unavailable"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"^/api/v1/collections/[^/]+$"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let report = test_server(&mock.uri()).doctor_report().await;
+        assert!(
+            report.contains("collection writes: unchecked"),
+            "missing unchecked"
+        );
+        assert!(report.contains("500"), "missing status");
+        assert!(
+            !report.contains("cleanup failed"),
+            "cleanup reported failed"
+        );
+        let requests = mock.received_requests().await.expect("recorded");
+        assert_probe_was_deleted(&requests);
+    }
+
+    #[tokio::test]
+    async fn doctor_probe_deletes_the_collection_after_a_mid_probe_error() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_doctor_probe");
+        let mock = MockServer::start().await;
+        mount_doctor_reads(&mock).await;
+        let mut body = b"Bearer ookc_midprobeleak ".to_vec();
+        body.push(0xff);
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/v1/collections/[^/]+/import$"))
+            .respond_with(ResponseTemplate::new(201).set_body_bytes(body))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"^/api/v1/collections/[^/]+$"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let report = test_server(&mock.uri()).doctor_report().await;
+        assert!(report.contains("not utf-8"), "missing mid-probe error");
+        assert!(
+            !report.contains("ookc_midprobeleak"),
+            "mid-probe body leaked"
+        );
+        assert!(
+            !report.contains("cleanup failed"),
+            "cleanup reported failed"
+        );
+        let requests = mock.received_requests().await.expect("recorded");
+        assert_probe_was_deleted(&requests);
+    }
+
+    #[tokio::test]
+    async fn doctor_probe_redacts_secrets_in_the_response_summary() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_doctor_probe");
+        let mock = MockServer::start().await;
+        mount_doctor_reads(&mock).await;
+        let hex = "0123456789abcdef".repeat(2);
+        let b64 = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo";
+        let bearer = "ookc_supersecretvalue";
+        let userinfo = "hunter2";
+        let refusal = "collection preconditions cannot be used; refusing collection writes";
+        let body = format!(
+            "{refusal} {hex} Bearer {bearer} http://alice:{userinfo}@127.0.0.1/x?api_key={bearer} {b64}"
+        );
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/v1/collections/[^/]+/import$"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(body))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"^/api/v1/collections/[^/]+$"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let report = test_server(&mock.uri()).doctor_report().await;
+        assert!(
+            report.contains("collection writes: refused"),
+            "missing refused"
+        );
+        assert!(report.contains("400"), "missing status");
+        assert!(
+            report.contains(refusal),
+            "refusal sentence was not recognisable"
+        );
+        assert!(!report.contains(&hex), "hex leaked");
+        assert!(!report.contains(bearer), "bearer leaked");
+        assert!(!report.contains(userinfo), "userinfo leaked");
+        assert!(!report.contains("api_key"), "query key leaked");
+        assert!(!report.contains(b64), "base64 leaked");
+        assert!(!report.contains("alice:"), "userinfo leaked");
+        let requests = mock.received_requests().await.expect("recorded");
+        assert_probe_was_deleted(&requests);
+    }
+
+    #[tokio::test]
+    async fn doctor_probe_reports_a_failed_cleanup() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_doctor_probe");
+        let mock = MockServer::start().await;
+        mount_doctor_reads(&mock).await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/v1/collections/[^/]+/import$"))
+            .respond_with(ResponseTemplate::new(201).set_body_string("{\"added\":1}"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"^/api/v1/collections/[^/]+$"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("Bearer ookc_cleanupsecret"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let report = test_server(&mock.uri()).doctor_report().await;
+        assert!(report.contains("cleanup failed"), "missing cleanup failure");
+        assert!(report.contains("500"), "missing cleanup status");
+        assert!(
+            !report.contains("ookc_cleanupsecret"),
+            "cleanup body leaked"
+        );
+        let requests = mock.received_requests().await.expect("recorded");
+        assert_probe_was_deleted(&requests);
     }
 
     #[tokio::test]
@@ -6259,6 +6841,18 @@ mod tests {
         let source = include_str!("../tests/fixtures/readcon-import-staged.bib");
         let exported = import_and_export("readcon-staged", source).await;
         assert_eq!(exported, source, "{exported}");
+    }
+
+    #[tokio::test]
+    async fn usage_transport_error_does_not_print_the_request_url_secret() {
+        let server =
+            test_server("http://alice:hunter2@127.0.0.1:1/root?api_key=secret_query#fragsecret");
+        let text = server.usage(Parameters(UsageArgs {})).await;
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(!text.contains("alice"), "{text}");
+        assert!(!text.contains("secret_query"), "{text}");
+        assert!(!text.contains("api_key"), "{text}");
+        assert!(!text.contains("fragsecret"), "{text}");
     }
 
     #[tokio::test]

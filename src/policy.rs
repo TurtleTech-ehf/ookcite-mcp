@@ -97,34 +97,92 @@ pub fn policy_summary_lines() -> Vec<String> {
 }
 
 /// Drop userinfo, query, and fragment from one URL. The path stays so a
-/// diagnostic can still name the route.
+/// diagnostic can still name the route. Every authority is cleaned, including
+/// a nested `http://user:pass@host` in the path and a percent-encoded
+/// `http%3A%2F%2Fuser:pass%40host`.
 pub fn redact_url(raw: &str) -> String {
     let without_fragment = raw.split_once('#').map(|(head, _)| head).unwrap_or(raw);
     let without_query = without_fragment
         .split_once('?')
         .map(|(head, _)| head)
         .unwrap_or(without_fragment);
-    let Some(scheme_end) = without_query.find("://") else {
-        return without_query.to_string();
-    };
-    let rest = &without_query[scheme_end + 3..];
-    let slash = rest.find('/').unwrap_or(rest.len());
-    if let Some(at) = rest[..slash].find('@') {
-        return format!("{}{}", &without_query[..scheme_end + 3], &rest[at + 1..]);
+    strip_encoded_userinfo(&strip_userinfo(without_query))
+}
+
+/// `scheme_end + "://".len()` is one offset shared by the prefix and the
+/// authority. Two copies of `+ 3` let a mutant flip only the authority
+/// index and still emit a host that the older equality tests accept.
+fn strip_userinfo(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    let mut rest = url;
+    while let Some(scheme_end) = rest.find("://") {
+        let authority_at = scheme_end + "://".len();
+        out.push_str(&rest[..authority_at]);
+        let after = &rest[authority_at..];
+        let auth_end = after.find(['/', '?', '#']).unwrap_or(after.len());
+        let authority = &after[..auth_end];
+        match authority.rsplit_once('@') {
+            Some((_, host)) => out.push_str(host),
+            None => out.push_str(authority),
+        }
+        rest = &after[auth_end..];
     }
-    without_query.to_string()
+    out.push_str(rest);
+    out
+}
+
+fn strip_encoded_userinfo(url: &str) -> String {
+    let lower = url.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut out = String::with_capacity(url.len());
+    let mut index = 0;
+    while index < url.len() {
+        if let Some(marker_len) = encoded_http_scheme_at(bytes, index) {
+            out.push_str(&url[index..index + marker_len]);
+            let after = index + marker_len;
+            if let Some(at_rel) = lower[after..].find("%40") {
+                let userinfo = &lower[after..after + at_rel];
+                if !userinfo.contains(['/', '?', '#']) {
+                    index = after + at_rel + "%40".len();
+                    continue;
+                }
+            }
+            index = after;
+            continue;
+        }
+        let ch = url[index..].chars().next().unwrap();
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+fn encoded_http_scheme_at(bytes: &[u8], index: usize) -> Option<usize> {
+    const HTTPS: &[u8] = b"https%3a%2f%2f";
+    const HTTP: &[u8] = b"http%3a%2f%2f";
+    if bytes[index..].starts_with(HTTPS) {
+        Some(HTTPS.len())
+    } else if bytes[index..].starts_with(HTTP) {
+        Some(HTTP.len())
+    } else {
+        None
+    }
 }
 
 /// Replace every http(s) URL in `text` with [`redact_url`].
+///
+/// A comma or a parenthesis inside the URL is part of the URL. `Foo_(bar)`
+/// and `?filter=a,b&api_key=` used to end the token early, so the query tail
+/// never reached [`redact_url`]. A `)` ends the URL only when it closes a
+/// wrapper that started before the URL, which is how reqwest prints
+/// `error sending request for url (http://...)`.
 pub fn redact_urls_in_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = find_url_start(rest) {
         out.push_str(&rest[..start]);
         let url_text = &rest[start..];
-        let end = url_text
-            .find(|ch: char| ch.is_whitespace() || matches!(ch, ')' | '>' | '"' | '\'' | ','))
-            .unwrap_or(url_text.len());
+        let end = http_url_end(url_text);
         // A delimiter at the start of this slice is not a URL. Advancing
         // one character keeps a zero-width match from spinning.
         if end == 0 {
@@ -141,6 +199,20 @@ pub fn redact_urls_in_text(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+fn http_url_end(url_text: &str) -> usize {
+    let mut depth = 0usize;
+    for (index, ch) in url_text.char_indices() {
+        match ch {
+            '(' => depth = depth.saturating_add(1),
+            ')' if depth == 0 => return index,
+            ')' => depth -= 1,
+            ch if ch.is_whitespace() || matches!(ch, '>' | '"' | '\'') => return index,
+            _ => {}
+        }
+    }
+    url_text.len()
 }
 
 fn find_url_start(text: &str) -> Option<usize> {
@@ -197,6 +269,65 @@ mod tests {
         assert!(scrubbed.contains("http://127.0.0.1:9/api"), "{scrubbed}");
         assert!(!scrubbed.contains("hunter2"), "{scrubbed}");
         assert!(!scrubbed.contains("secret_query"), "{scrubbed}");
+    }
+
+    #[test]
+    fn diagnostic_urls_drop_userinfo_query_and_fragment_for_ipv6_percent_and_nested() {
+        let ipv6 = redact_url("http://alice:hunter2@[::1]:9/api?api_key=secret#frag");
+        assert_eq!(ipv6, "http://[::1]:9/api", "{ipv6}");
+        assert!(!ipv6.contains("hunter2"), "{ipv6}");
+        assert!(!ipv6.contains("secret"), "{ipv6}");
+        assert!(!ipv6.contains("frag"), "{ipv6}");
+
+        let encoded = redact_urls_in_text(
+            "error sending request for url (http://alice:hunter%3A2@[2001:db8::1]/v1?token=secret#x)",
+        );
+        assert!(!encoded.contains("hunter"), "{encoded}");
+        assert!(!encoded.contains("alice"), "{encoded}");
+        assert!(!encoded.contains("secret"), "{encoded}");
+        assert!(!encoded.contains('#'), "{encoded}");
+
+        let nested = redact_urls_in_text(
+            "error sending request for url (http://127.0.0.1/hop/http://alice:hunter2@evil.test/secret?api_key=secret)",
+        );
+        assert!(!nested.contains("hunter2"), "{nested}");
+        assert!(!nested.contains("alice:"), "{nested}");
+        assert!(!nested.contains("api_key"), "{nested}");
+
+        let nested_pct = redact_urls_in_text(
+            "error sending request for url (http://127.0.0.1/hop/http%3A%2F%2Falice:hunter2%40evil.test/x?token=secret)",
+        );
+        assert!(!nested_pct.contains("hunter2"), "{nested_pct}");
+        assert!(!nested_pct.contains("secret"), "{nested_pct}");
+
+        let comma = redact_urls_in_text(
+            "error sending request for url (http://alice:hunter2@127.0.0.1:9/api?filter=a,b&api_key=secret)",
+        );
+        assert!(!comma.contains("hunter2"), "{comma}");
+        assert!(!comma.contains("api_key"), "{comma}");
+        assert!(!comma.contains("secret"), "{comma}");
+
+        let paren = redact_urls_in_text(
+            "error sending request for url (http://alice:hunter2@127.0.0.1/wiki/Foo_(bar)?api_key=secret)",
+        );
+        assert!(!paren.contains("hunter2"), "{paren}");
+        assert!(!paren.contains("api_key"), "{paren}");
+        assert!(!paren.contains("secret"), "{paren}");
+    }
+
+    #[test]
+    fn redact_url_uses_one_scheme_offset_and_ignores_non_url_text() {
+        // `scheme_end * 3` keeps a slice of the userinfo glued to the host.
+        assert_eq!(
+            redact_url("https://user:secret@example.com/a"),
+            "https://example.com/a"
+        );
+        // `find_url_start` returning `Some(0)` would treat `note?keep#frag`
+        // as the URL and drop the query and the fragment.
+        assert_eq!(
+            redact_urls_in_text("note?keep#frag before http://example.com/a"),
+            "note?keep#frag before http://example.com/a"
+        );
     }
 
     #[test]

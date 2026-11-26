@@ -676,6 +676,14 @@ fn non_empty(value: Option<Value>) -> Option<Value> {
 /// record are folded onto a corpus author when the two sides agree on
 /// the family name, so a corpus hit with no ORCID on the local row
 /// still reports the author's ORCID.
+fn trimmed_author_text(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
 fn extract_authors(
     stored_before_merge: Option<&Value>,
     provider_record: Option<&Value>,
@@ -706,38 +714,14 @@ fn extract_authors(
         .iter()
         .map(|author| {
             let mut entry = Map::new();
-            let family = author
-                .get("family")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| {
-                    author
-                        .get("familyName")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .or_else(|| {
-                    author
-                        .get("lastName")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                });
-            let given = author
-                .get("given")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| {
-                    author
-                        .get("givenName")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .or_else(|| {
-                    author
-                        .get("firstName")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                });
+            // An empty DataCite `familyName` is `Some("")`. Treating that as
+            // a name skips the organisational `name` (`Example Collaboration`).
+            let family = trimmed_author_text(author.get("family"))
+                .or_else(|| trimmed_author_text(author.get("familyName")))
+                .or_else(|| trimmed_author_text(author.get("lastName")));
+            let given = trimmed_author_text(author.get("given"))
+                .or_else(|| trimmed_author_text(author.get("givenName")))
+                .or_else(|| trimmed_author_text(author.get("firstName")));
             if let Some(family) = family.clone() {
                 entry.insert("family".into(), Value::String(family));
             }
@@ -1617,6 +1601,32 @@ mod tests {
             None,
             Some(&provider),
             &serde_json::json!({"doi": "10.5555/dc.org.1"}),
+            0,
+            false,
+            "NOT-IN-CORPUS",
+            None,
+        );
+        assert_eq!(record["authors"][0]["family"], "Example Collaboration");
+        assert_eq!(record["authors"][0]["literal"], true);
+    }
+
+    #[test]
+    fn an_empty_datacite_family_name_does_not_hide_the_creator_name() {
+        let provider = serde_json::json!({
+            "datacite": {
+                "creators": [{
+                    "familyName": "",
+                    "name": "Example Collaboration",
+                    "nameType": "Organizational"
+                }]
+            }
+        });
+        let record = build_validate_doi_record(
+            "10.5555/dc.blankfam.1",
+            DoiSource::NotInCorpus,
+            None,
+            Some(&provider),
+            &serde_json::json!({"doi": "10.5555/dc.blankfam.1"}),
             0,
             false,
             "NOT-IN-CORPUS",

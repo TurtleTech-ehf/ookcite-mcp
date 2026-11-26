@@ -106,7 +106,6 @@ struct Work {
     note: Option<String>,
     howpublished: Option<String>,
     citation_key: Option<String>,
-    from_crossref: bool,
     zenodo: Option<ZenodoRecord>,
     note_locked: bool,
     howpublished_locked: bool,
@@ -142,7 +141,6 @@ impl Work {
             note: None,
             howpublished: None,
             citation_key: None,
-            from_crossref: false,
             zenodo: None,
             note_locked: false,
             howpublished_locked: false,
@@ -345,18 +343,18 @@ fn flush_works(
     Ok(())
 }
 
-/// Stored metadata with provider fields filled in. Caller locks win.
-/// A Crossref byline that covers the stored families may replace a
-/// shorter stored list. Corpus lookups use [`merge_corpus_first`].
+/// Stored metadata with empty fields filled from the provider.
+/// A present title or author list is kept, the same rule as
+/// [`merge_corpus_first`].
 pub fn merge_provider_metadata(stored: &Value, provider: &Value) -> Value {
-    project_assembled(stored, assemble(stored, Some(provider)))
+    merge_corpus_first(stored, provider)
 }
 
 /// Corpus fields win. A provider value is copied only into a field the
 /// corpus left empty, so a disagreeing title or author list cannot
-/// replace the OokCite row on a hit.
+/// replace the OokCite row on a hit. Bibliography export uses this too.
 pub fn merge_corpus_first(stored: &Value, provider: &Value) -> Value {
-    project_assembled(stored, assemble_with(stored, Some(provider), true))
+    project_assembled(stored, assemble(stored, Some(provider)))
 }
 
 fn project_assembled(stored: &Value, work: Work) -> Value {
@@ -428,11 +426,9 @@ fn json_person_literal(name: &str) -> Value {
 
 /// One collection entry plus an optional provider payload
 /// (`{"crossref": ..., "datacite": ..., "zenodo": ...}`).
+/// A present OokCite title and byline stay. Empty fields still take the
+/// provider value. Export and corpus hits share this merge.
 fn assemble(stored: &Value, provider: Option<&Value>) -> Work {
-    assemble_with(stored, provider, false)
-}
-
-fn assemble_with(stored: &Value, provider: Option<&Value>, corpus_first: bool) -> Work {
     let stored_work = work_from_stored(stored);
     let Some(record) = provider else {
         return stored_work;
@@ -446,19 +442,13 @@ fn assemble_with(stored: &Value, provider: Option<&Value>, corpus_first: bool) -
         return stored_work;
     }
     let locked = user_fields(stored);
-    // A corpus hit keeps the title it already stored. Bibliography
-    // export still lets an unlocked empty title take the provider's.
-    if locked.contains("title") || (corpus_first && !stored_work.title.is_empty()) {
+    // A present title stays, including on bibliography export. An empty
+    // title still takes the provider title later in this function.
+    if locked.contains("title") || !stored_work.title.is_empty() {
         work.title = stored_work.title.clone();
     }
-    // A longer Crossref byline may complete a partial bibliography
-    // entry. It must not replace the author list on a corpus hit.
-    let provider_has_more_authors = !corpus_first
-        && work.from_crossref
-        && work.authors.len() > stored_work.authors.len()
-        && authors_cover(&stored_work.authors, &work.authors);
-    if locked.contains("authors") || (!stored_work.authors.is_empty() && !provider_has_more_authors)
-    {
+    // A longer Crossref byline must not replace a stored author list.
+    if locked.contains("authors") || !stored_work.authors.is_empty() {
         work.authors = stored_work.authors.clone();
     }
     if locked.contains("entry_type") {
@@ -578,17 +568,6 @@ fn overlay_record_on_source(source: &mut crate::bib_source::BibSource, meta: &Va
     if let Some(version) = text(meta, "version") {
         source.set_field("version", version);
     }
-}
-
-fn authors_cover(stored: &[Person], provider: &[Person]) -> bool {
-    let have: HashSet<String> = provider.iter().map(family_key).collect();
-    stored
-        .iter()
-        .all(|person| have.contains(&family_key(person)))
-}
-
-fn family_key(person: &Person) -> String {
-    fold_ascii(&person.family).to_ascii_lowercase()
 }
 
 fn extra_locked(meta: &Value, locked: &HashSet<String>) -> Vec<(String, String)> {
@@ -726,9 +705,7 @@ fn user_fields(meta: &Value) -> HashSet<String> {
 
 fn work_from_provider_record(record: &Value) -> Option<Work> {
     let mut work = if let Some(message) = record.get("crossref").filter(|v| v.is_object()) {
-        let mut parsed = work_from_crossref(message);
-        parsed.from_crossref = true;
-        parsed
+        work_from_crossref(message)
     } else {
         let attrs = record.get("datacite").filter(|value| value.is_object())?;
         work_from_datacite(attrs)
@@ -2528,7 +2505,7 @@ mod tests {
     }
 
     #[test]
-    fn an_article_number_keeps_every_provider_author() {
+    fn an_article_number_keeps_the_stored_byline() {
         let stored = json!({
             "doi": "10.5555/synth.article-number",
             "entry_type": "techreport",
@@ -2560,8 +2537,12 @@ mod tests {
             &BibOptions::default(),
         );
         assert!(bib.starts_with("@article{"), "{bib}");
-        assert!(bib.contains("Quinn"), "{bib}");
-        assert!(bib.contains("Løvstad") || bib.contains("Lovstad"), "{bib}");
+        assert!(bib.contains("Pell"), "{bib}");
+        assert!(!bib.contains("Quinn"), "{bib}");
+        assert!(
+            !bib.contains("Løvstad") && !bib.contains("Lovstad"),
+            "{bib}"
+        );
         assert!(bib.contains("eid = {qz707}"), "{bib}");
         assert!(!bib.contains("qz707--qz707"), "{bib}");
         assert!(!bib.contains("number = {qz707}"), "{bib}");
@@ -2599,18 +2580,50 @@ mod tests {
         assert_eq!(corpus["title"], "Curated OokCite Manuscript Title Alpha");
         assert_eq!(corpus["authors"].as_array().unwrap().len(), 1);
         assert_eq!(corpus["authors"][0]["family"], "Keeper");
-        // A bibliography export still takes the longer covering byline.
+        // Export uses the same merge: a present title and byline stay.
         let exported = merge_provider_metadata(&stored, &provider);
-        assert_eq!(
-            exported["title"],
-            "Completely Different Crossref Paper Gamma"
-        );
-        assert_eq!(exported["authors"].as_array().unwrap().len(), 2);
+        assert_eq!(exported["title"], "Curated OokCite Manuscript Title Alpha");
+        assert_eq!(exported["authors"].as_array().unwrap().len(), 1);
+        assert_eq!(exported["authors"][0]["family"], "Keeper");
 
         let empty = json!({"doi": "10.5555/corpus.merge.1", "title": "", "authors": []});
         let filled = merge_corpus_first(&empty, &provider);
         assert_eq!(filled["title"], "Completely Different Crossref Paper Gamma");
         assert_eq!(filled["authors"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_present_ookcite_title_and_author_list_survive_bibliography_merge() {
+        let stored = json!({
+            "doi": "10.5555/corpus.keep.1",
+            "title": "Curated OokCite Manuscript Title Alpha",
+            "authors": [{"family": "Keeper", "given": "K."}],
+            "date": {"year": 2024}
+        });
+        let provider = json!({
+            "crossref": {
+                "DOI": "10.5555/corpus.keep.1",
+                "type": "journal-article",
+                "title": ["Completely Different Crossref Paper Gamma"],
+                "author": [
+                    {"family": "Keeper", "given": "K."},
+                    {"family": "Extra", "given": "E."}
+                ],
+                "container-title": ["Fixtures Weekly"],
+                "issued": {"date-parts": [[2024]]}
+            }
+        });
+        let exported = merge_provider_metadata(&stored, &provider);
+        assert_eq!(
+            exported["title"], "Curated OokCite Manuscript Title Alpha",
+            "a present OokCite title must not be replaced: {exported}"
+        );
+        assert_eq!(
+            exported["authors"].as_array().unwrap().len(),
+            1,
+            "{exported}"
+        );
+        assert_eq!(exported["authors"][0]["family"], "Keeper");
     }
 
     #[test]
