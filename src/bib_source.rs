@@ -2158,6 +2158,39 @@ mod tests {
         assert_eq!(unique.len(), keys.len());
     }
 
+    #[test]
+    fn paper_entries_are_byte_identical_after_a_source_round_trip() {
+        let source = include_str!("../tests/fixtures/readcon-paper-entries.bib");
+        let exported = round_trip(source);
+        assert_eq!(exported, source, "{exported}");
+        assert!(
+            exported.contains(r"\url{https://docs.lammps.org/Howto_triclinic.html}"),
+            "{exported}"
+        );
+        assert!(!exported.contains(r"Howto\_"), "{exported}");
+        assert!(
+            exported.contains("author       = {Goswami, Rohit}"),
+            "{exported}"
+        );
+        assert!(
+            exported.contains("note         = {Accessed 2026-11-01}"),
+            "{exported}"
+        );
+        assert!(
+            exported.contains("author       = {{Bloomberg}}"),
+            "{exported}"
+        );
+        assert!(
+            exported.contains("url = {https://github.com/henkelmangroup/tsase}"),
+            "{exported}"
+        );
+        assert!(
+            exported.contains("doi = {10.5281/zenodo.18753567}"),
+            "{exported}"
+        );
+        assert!(!exported.contains(r"\_"), "{exported}");
+    }
+
     fn finish_within<T>(limit: std::time::Duration, work: impl FnOnce() -> T + Send + 'static) -> T
     where
         T: Send + 'static,

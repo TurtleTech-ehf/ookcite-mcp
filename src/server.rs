@@ -431,6 +431,23 @@ fn member_failure_is_degraded(reason: &str) -> bool {
         || reason.starts_with("CLIENT ERROR")
 }
 
+fn classify_write_probe(status: reqwest::StatusCode, body: &str) -> String {
+    let body = body.trim();
+    let lower = body.to_ascii_lowercase();
+    let shown: String = body.chars().take(120).collect();
+    let refused = (status.as_u16() == 400
+        && (lower.contains("collection preconditions cannot be used")
+            || lower.contains("refusing collection writes")))
+        || (status.as_u16() == 503 && lower.contains("have not been checked"));
+    if refused {
+        format!("collection writes: refused ({status} {shown})")
+    } else if status.as_u16() == 404 && lower.contains("collection not found") {
+        "collection writes: allowed".into()
+    } else {
+        format!("collection writes: unchecked ({status} {shown})")
+    }
+}
+
 #[tool_router]
 impl Server {
     pub fn new() -> Self {
@@ -1178,10 +1195,60 @@ impl Server {
             out.push("Auth /me: skipped (no OOKCITE_API_KEY; anonymous IP limits apply)".into());
         }
 
+        if inbound_auth::has_api_key() && policy::mutate_allowed() {
+            let probe = self.probe_collection_writes().await;
+            if probe.starts_with("collection writes: refused") {
+                if let Some(line) = out
+                    .iter_mut()
+                    .find(|line| line.starts_with("mutate tools: "))
+                {
+                    *line = "mutate tools: refused (server refused collection writes)".into();
+                }
+            }
+            out.push(probe);
+        }
+
         out.push(String::new());
         out.push("Next: health_check for a short probe; doctor after env changes.".into());
         out.push("Never paste full API keys into chat; use redact-friendly doctor output.".into());
         out.join("\n")
+    }
+
+    /// One import of a missing collection id. The server checks storage
+    /// preconditions inside the write lock, then reports the id as missing,
+    /// so a 404 means writes are accepted and nothing was stored. A 400/503
+    /// that names the precondition refusal means the store cannot write.
+    /// The request carries no `If-Match` or `If-None-Match`.
+    async fn probe_collection_writes(&self) -> String {
+        let probe = "@misc{doctorwriteprobe,\n  title = {write probe}\n}\n";
+        let part = match reqwest::multipart::Part::text(probe)
+            .file_name("import.bib")
+            .mime_str("text/plain")
+        {
+            Ok(part) => part,
+            Err(error) => {
+                return format!(
+                    "collection writes: unchecked ({})",
+                    policy::scrub_error(&error)
+                );
+            }
+        };
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let response = self
+            .request(
+                endpoints::COLLECTION_IMPORT,
+                &[("id", "doctor-write-probe")],
+            )
+            .multipart(form)
+            .send()
+            .await;
+        match response {
+            Err(error) => format!(
+                "collection writes: unchecked ({})",
+                policy::scrub_error(&error)
+            ),
+            Ok(resp) => classify_write_probe(resp.status(), &resp.text().await.unwrap_or_default()),
+        }
     }
 
     /// Build a request to a registered endpoint, substituting any path
@@ -6098,6 +6165,100 @@ mod tests {
         assert!(!report.contains("alice:"), "{report}");
         assert!(!report.contains("secret_query"), "{report}");
         assert!(!report.contains("api_key"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_collection_writes_refused_when_the_server_refuses() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_doctor_probe");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "version": "0.1.1"
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "username": "ada",
+                "plan": "Operator",
+                "lookups_remaining": 10,
+                "lookups_limit": 10
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/doctor-write-probe/import"))
+            .and(|request: &wiremock::Request| {
+                request.headers.get("if-match").is_none()
+                    && request.headers.get("if-none-match").is_none()
+                    && !request.body.windows(12).any(|window| window == b"if-match")
+            })
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                "collection preconditions cannot be used; refusing collection writes",
+            ))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let report = test_server(&mock.uri()).doctor_report().await;
+        assert!(report.contains("collection writes: refused"), "{report}");
+        assert!(
+            report.contains("collection preconditions cannot be used"),
+            "{report}"
+        );
+        assert!(!report.contains("mutate tools: allowed"), "{report}");
+        assert!(!report.contains("collection writes: allowed"), "{report}");
+        assert!(!report.contains("ookc_doctor_probe"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_collection_writes_allowed_only_after_a_write_probe() {
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_doctor_probe");
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "version": "0.1.1"
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "username": "ada",
+                "plan": "Operator"
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/collections/doctor-write-probe/import"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Collection not found"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let report = test_server(&mock.uri()).doctor_report().await;
+        assert!(report.contains("collection writes: allowed"), "{report}");
+        assert!(report.contains("mutate tools: allowed"), "{report}");
+        assert!(!report.contains("refused"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn imported_paper_entries_export_byte_for_byte() {
+        let source = include_str!("../tests/fixtures/readcon-paper-entries.bib");
+        let exported = import_and_export("readcon-paper", source).await;
+        assert_eq!(exported, source, "{exported}");
+    }
+
+    #[tokio::test]
+    async fn imported_staged_bibliography_exports_byte_for_byte() {
+        let source = include_str!("../tests/fixtures/readcon-import-staged.bib");
+        let exported = import_and_export("readcon-staged", source).await;
+        assert_eq!(exported, source, "{exported}");
     }
 
     #[tokio::test]

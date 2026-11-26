@@ -565,12 +565,16 @@ fn copy_locked(work: &mut Work, stored: &Work, locked: &HashSet<String>) {
     }
 }
 
-/// Replace the imported `version` when the current record has one.
+/// Copy a user-edited `version` onto the imported snapshot.
 ///
-/// Other snapshot fields stay. `apply` lists every source field in
-/// `user_fields` while leaving the server's copy of that field in the
-/// record, so those names are not a signal that the record is newer.
+/// `apply` lists `version` in `user_fields` when the snapshot has that field
+/// or a later edit set it. A resolver version on a record the source never
+/// locked is not a user edit, and a missing record version must not delete
+/// the one the source already has.
 fn overlay_record_on_source(source: &mut crate::bib_source::BibSource, meta: &Value) {
+    if !user_fields(meta).contains("version") {
+        return;
+    }
     if let Some(version) = text(meta, "version") {
         source.set_field("version", version);
     }
@@ -1813,15 +1817,9 @@ fn needs_brace(word: &str, first: bool, title_cased: bool) -> bool {
 }
 
 fn escape_bib_text(value: &str) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    let mut out = String::new();
-    for (index, ch) in chars.iter().enumerate() {
-        if matches!(ch, '&' | '%' | '#' | '_') && (index == 0 || chars[index - 1] != '\\') {
-            out.push('\\');
-        }
-        out.push(*ch);
-    }
-    out
+    // Same rules as the source renderer: `\_` outside `\url` / `\href` and
+    // outside math, and those commands copied unchanged.
+    crate::bib_source::escape_latex_specials(value)
 }
 
 /// Plain text of a provider string: HTML entities decoded, JATS, HTML and
@@ -4204,6 +4202,87 @@ mod tests {
                 panic!("citation key disambiguation stopped before returning a key");
             }
         }
+    }
+
+    #[test]
+    fn an_unlocked_howpublished_url_and_verbatim_fields_are_not_escaped() {
+        let bib = render_stored_entries(&[json!({
+            "entry_type": "misc",
+            "title": "LAMMPS Documentation",
+            "citation_key": "lammpsHowtoTriclinic2026",
+            "howpublished": r"\url{https://docs.lammps.org/Howto_triclinic.html}",
+            "url": "https://example.org/a_b%20c#d",
+            "doi": "10.5555/synth.a_b",
+            "eprint": "cond-mat/9801_5",
+            "user_fields": ["eprint"]
+        })])
+        .expect("citation keys");
+        assert!(
+            bib.contains(r"howpublished = {\url{https://docs.lammps.org/Howto_triclinic.html}}"),
+            "{bib}"
+        );
+        assert!(!bib.contains(r"Howto\_"), "{bib}");
+        assert!(
+            bib.contains("url = {https://example.org/a_b%20c#d}"),
+            "{bib}"
+        );
+        assert!(!bib.contains(r"a\_b"), "{bib}");
+        assert!(bib.contains("doi = {10.5555/synth.a_b}"), "{bib}");
+        assert!(bib.contains("eprint = {cond-mat/9801_5}"), "{bib}");
+        assert!(!bib.contains(r"9801\_5"), "{bib}");
+    }
+
+    #[test]
+    fn a_resolver_record_does_not_replace_imported_user_fields() {
+        let source = include_str!("../tests/fixtures/readcon-paper-entries.bib");
+        let parsed = crate::bib_audit::parse_bibtex_raw(source).expect("fixture parses");
+        let pairs: Vec<(Value, Option<Value>)> = parsed
+            .iter()
+            .map(|entry| {
+                let fields: Vec<Value> = entry
+                    .fields
+                    .iter()
+                    .map(|(name, value)| json!([name, value]))
+                    .collect();
+                let separators: Vec<Value> = entry
+                    .separators
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect();
+                let stored = json!({
+                    "entry_type": "software",
+                    "title": "Transition-State Library for ASE",
+                    "version": "1.0",
+                    "note": "Software, Zenodo concept record of all versions",
+                    "authors": [{"family": "Henkelman Research Group", "literal": true}],
+                    "publisher": "Resolver Press",
+                    "url": "https://zenodo.org/records/9",
+                    "bib_source": {
+                        "key": entry.key,
+                        "entry_type": entry.entry_type,
+                        "fields": fields,
+                        "separators": separators,
+                    }
+                });
+                let provider = json!({
+                    "crossref": {
+                        "type": "dataset",
+                        "title": ["Transition-State Library for ASE"],
+                        "author": [{"name": "Henkelman Research Group"}],
+                        "DOI": "10.5281/zenodo.18753567"
+                    },
+                    "zenodo": {
+                        "conceptdoi": "10.5281/zenodo.18753567",
+                        "doi": "10.5281/zenodo.999",
+                        "version": "1.0"
+                    }
+                });
+                (stored, Some(provider))
+            })
+            .collect();
+        let bib = render_pairs(&pairs, &BibOptions::default()).expect("citation keys");
+        assert_eq!(bib, source, "{bib}");
     }
 
     fn split_entries(bib: &str) -> Vec<String> {
