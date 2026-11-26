@@ -1074,6 +1074,90 @@ mod tests {
             record["fields"]["volume"]["provenance"], "crossref",
             "volume was not in the corpus record so the provider owns it"
         );
+        assert_eq!(
+            record["fields"]["year"]["provenance"], "ookcite_corpus+crossref",
+            "a year both sides carry as the same number is agreement"
+        );
+    }
+
+    #[test]
+    fn blank_provider_families_do_not_count_as_agreement() {
+        let stored = serde_json::json!({
+            "doi": "10.5555/agree.authors.1",
+            "title": "A shared paper about lattice transport",
+            "authors": [{"family": "Keeper"}],
+            "date": {"year": 2024}
+        });
+        let provider = serde_json::json!({
+            "crossref": {
+                "title": ["A shared paper about lattice transport"],
+                "author": [{"family": ""}],
+                "issued": {"date-parts": [[2024]]},
+                "type": "journal-article"
+            }
+        });
+        let record = build_validate_doi_record(
+            "10.5555/agree.authors.1",
+            DoiSource::Corpus,
+            Some(&stored),
+            Some(&provider),
+            &stored,
+            0,
+            false,
+            "VALID",
+            None,
+        );
+        assert_eq!(
+            record["fields"]["authors"]["provenance"], "ookcite_corpus",
+            "an empty provider family is not the same byline"
+        );
+    }
+
+    #[test]
+    fn a_crossref_family_survives_when_the_merged_row_has_no_authors() {
+        let provider = serde_json::json!({
+            "crossref": {
+                "author": [{"family": "Keeper", "given": "K."}]
+            }
+        });
+        let record = build_validate_doi_record(
+            "10.5555/cr.names.1",
+            DoiSource::NotInCorpus,
+            None,
+            Some(&provider),
+            &serde_json::json!({"doi": "10.5555/cr.names.1"}),
+            0,
+            false,
+            "NOT-IN-CORPUS",
+            None,
+        );
+        assert_eq!(record["authors"][0]["family"], "Keeper");
+        assert_eq!(record["authors"][0]["given"], "K.");
+    }
+
+    #[test]
+    fn a_personal_name_is_not_replaced_by_a_name_field() {
+        let provider = serde_json::json!({
+            "datacite": {
+                "creators": [{
+                    "familyName": "Keeper",
+                    "name": "Should Not Replace"
+                }]
+            }
+        });
+        let record = build_validate_doi_record(
+            "10.5555/dc.personal.1",
+            DoiSource::NotInCorpus,
+            None,
+            Some(&provider),
+            &serde_json::json!({"doi": "10.5555/dc.personal.1"}),
+            0,
+            false,
+            "NOT-IN-CORPUS",
+            None,
+        );
+        assert_eq!(record["authors"][0]["family"], "Keeper");
+        assert!(record["authors"][0].get("literal").is_none());
     }
 
     #[test]

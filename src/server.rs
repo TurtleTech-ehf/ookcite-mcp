@@ -5705,6 +5705,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_member_miss_stays_a_valid_stub_and_not_degraded() {
+        let mock = MockServer::start().await;
+        let member_doi = "10.5555/member.miss.1";
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "plan": "free",
+                "lookups_remaining": 60,
+                "lookups_limit": 60
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "col-miss", "name": "lab"}
+            ])))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/collections/col-miss"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "id": format!("doi:{member_doi}"),
+                    "metadata": {"doi": member_doi, "title": "Short collection title"}
+                }]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/handles", member_doi)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "responseCode": 1
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/lookup/doi"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(doi_http_path("/works", member_doi)))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        let _key = EnvGuard::set("OOKCITE_API_KEY", "ookc_member_miss");
+        let out = test_server(&mock.uri())
+            .with_providers(mock.uri())
+            .verify_references(Parameters(VerifyArgs {
+                dois: vec![member_doi.into()],
+                claims: Vec::new(),
+            }))
+            .await;
+        assert!(
+            out.starts_with(&format!("VALID {member_doi} : ")),
+            "a plain miss stays the collection stub: {out}"
+        );
+        assert!(!out.contains("DEGRADED"), "{out}");
+    }
+
+    #[test]
+    fn each_lookup_failure_prefix_marks_a_member_degraded() {
+        for reason in [
+            "RATE LIMITED 10.5555/member.prefix.1",
+            "TIMEOUT 10.5555/member.prefix.1",
+            "TEMPORARY ERROR 10.5555/member.prefix.1",
+            "UNREACHABLE 10.5555/member.prefix.1",
+            "PAYMENT REQUIRED 10.5555/member.prefix.1",
+            "ACCESS DENIED 10.5555/member.prefix.1",
+            "ERROR 10.5555/member.prefix.1 : boom",
+            "UNREGISTERED 10.5555/member.prefix.1",
+            "CLIENT ERROR 10.5555/member.prefix.1",
+        ] {
+            assert!(member_failure_is_degraded(reason), "{reason}");
+        }
+        assert!(!member_failure_is_degraded(
+            "INVALID 10.5555/member.prefix.1 : HTTP 404"
+        ));
+    }
+
+    #[tokio::test]
     async fn verify_references_reads_ookcite_before_the_publisher_for_a_member() {
         let mock = MockServer::start().await;
         let doi = "10.5555/member.corpus.1";
@@ -11420,6 +11504,19 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("OOKCITE_STRUCTURED_JSON"));
+    }
+
+    #[test]
+    fn an_upstream_failure_replaces_a_structured_object_that_is_not_a_work_record() {
+        let mut result = CallToolResult::success(vec![ContentBlock::text(
+            "RATE LIMITED 10.5555/env.2 : slow (Retry-After: 9)",
+        )]);
+        result.structured_content = Some(serde_json::json!({"kind": "other"}));
+        promote_upstream_failure(&mut result);
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["kind"],
+            "rate_limited"
+        );
     }
 
     #[test]

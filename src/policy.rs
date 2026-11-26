@@ -179,6 +179,13 @@ mod tests {
         assert!(!text.contains("secret_query"), "{text}");
         assert!(text.contains("http://127.0.0.1:9/api"), "{text}");
         assert!(text.ends_with(')'), "{text}");
+        let scrubbed = scrub_error(
+            &"error sending request for url (http://alice:hunter2@127.0.0.1:9/api?api_key=secret_query)",
+        );
+        assert!(scrubbed.contains("error sending request"), "{scrubbed}");
+        assert!(scrubbed.contains("http://127.0.0.1:9/api"), "{scrubbed}");
+        assert!(!scrubbed.contains("hunter2"), "{scrubbed}");
+        assert!(!scrubbed.contains("secret_query"), "{scrubbed}");
     }
 
     #[test]
